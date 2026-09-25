@@ -2146,7 +2146,8 @@ export class PgSettingsRepo implements SettingsRepo {
     // a plain scalar — a calendar date, for one. Label it so the column's value_type stays honest
     // rather than filing every non-money string as 'json'.
     const valueType =
-      typeof value === 'string' ? (/^-?\d+$/.test(value) ? 'money_minor' : 'string') : 'json'
+      typeof value === 'string' ? (/^-?\d+$/.test(value) ? 'money_minor' : 'string')
+        : typeof value === 'number' && Number.isSafeInteger(value) ? 'integer' : 'json'
     await this.pool.query(
       `INSERT INTO settings (key, value, value_type, updated_by, updated_at)
        VALUES ($1, $2::jsonb, $3, $4, now())
@@ -2621,12 +2622,12 @@ export class PgGpsPingRepo implements GpsPingRepo {
   }
 
   /**
-   * One index seek per live driver — flat forever, whatever the history.
+   * One index seek per named driver — flat forever, whatever the history.
    *
    * Its predecessor was `SELECT DISTINCT ON (driver_id) ... WHERE branch_id = $1`, which reads
    * EVERY tuple the branch has ever written: `DISTINCT ON` does not skip ahead, so the cost of
    * drawing ten dots grew with every ping ever stored. The lateral turns it into one seek per
-   * driver against `(branch_id, driver_id, received_at DESC)`.
+   * driver against `(branch_id, driver_id, captured_at DESC)`.
    */
   async latestForDriversInBranch(
     branchId: string,
@@ -2640,11 +2641,26 @@ export class PgGpsPingRepo implements GpsPingRepo {
            SELECT * FROM gps_pings g
             WHERE g.branch_id = $1
               AND g.driver_id = d.driver_id
-              AND g.received_at >= to_timestamp($3::double precision / 1000)
-            ORDER BY g.received_at DESC, g.id DESC
+              AND g.captured_at >= to_timestamp($3::double precision / 1000)
+            ORDER BY g.captured_at DESC, g.id DESC
             LIMIT 1
          ) p`,
       [branchId, [...driverIds], sinceMs],
+    )
+    return rows.map(toGpsPing)
+  }
+
+  async latestForShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT p.* FROM unnest($1::uuid[]) AS s(shift_id)
+         CROSS JOIN LATERAL (
+           SELECT * FROM gps_pings g
+            WHERE g.shift_id = s.shift_id
+            ORDER BY g.captured_at DESC, g.id DESC
+            LIMIT 1
+         ) p`,
+      [[...new Set(shiftIds)]],
     )
     return rows.map(toGpsPing)
   }
@@ -2654,6 +2670,15 @@ export class PgGpsPingRepo implements GpsPingRepo {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       'SELECT * FROM gps_pings WHERE shift_id = $1 ORDER BY captured_at ASC, id ASC',
       [shiftId],
+    )
+    return rows.map(toGpsPing)
+  }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]> {
+    if (shiftIds.length === 0) return []
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      'SELECT * FROM gps_pings WHERE shift_id = ANY($1::uuid[]) ORDER BY shift_id, captured_at ASC, id ASC',
+      [[...new Set(shiftIds)]],
     )
     return rows.map(toGpsPing)
   }

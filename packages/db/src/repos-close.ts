@@ -27,6 +27,7 @@ import {
 } from './repos-shift.ts'
 import { PgShiftSettlementRepo } from './repos-settlement.ts'
 import { PgCloseDraftRepo } from './repos-close-draft.ts'
+import { PgShiftBreakRepo } from './repos-breaks.ts'
 
 type ShiftIdentity = {
   branch_id: string
@@ -42,6 +43,7 @@ const changedIdentity = (shiftId: string): Error & { code: string } =>
 function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
   return {
     shifts: new PgShiftRepo(pool),
+    breaks: new PgShiftBreakRepo(pool),
     preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
     orders: new PgOrderRepo(pool),
     cashDeductions: new PgCashDeductionRepo(pool),

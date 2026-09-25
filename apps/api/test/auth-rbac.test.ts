@@ -24,6 +24,18 @@ describe('authentication (SRS A-1, §7)', () => {
     expect(res.json().roleKey).toBe('branch_manager')
   })
 
+  it('slides the session cookie on an authenticated request, so a long shift never lets it lapse', async () => {
+    // A 12h double shift outlives the 8h cookie; the DB session slides on activity but the cookie
+    // must slide with it, or the native tracker reads no cookie and every upload 401s silently.
+    const token = await h.loginAs('manager')
+    const res = await h.app.inject({ method: 'GET', url: '/me', headers: { cookie: h.cookie(token) } })
+    expect(res.statusCode).toBe(200)
+    const cookie = String(res.headers['set-cookie'])
+    expect(cookie).toContain('ash_session=')
+    expect(cookie).toContain(`Max-Age=${SESSION_IDLE_MS / 1000}`)
+    expect(cookie).toContain('HttpOnly')
+  })
+
   it('rejects a wrong password without revealing whether the user exists', async () => {
     const wrongPassword = await h.app.inject({
       method: 'POST', url: '/auth/login', payload: { username: 'manager', password: 'nope' },
@@ -131,6 +143,9 @@ describe('the boot assertion — no route can escape RBAC', () => {
         'POST /auth/2fa/verify', 'POST /auth/2fa/enroll', 'POST /auth/2fa/confirm',
         'GET /auth/register/branches', 'POST /auth/register',
         'GET /notifications', 'POST /notifications/:id/read',
+        // The hardware-tracker ingest seam: public in the RBAC sense (a bike unit has no session),
+        // but guarded by a gateway secret and 404 until enabled. See app.ts.
+        'POST /tracker/ingest',
       ].sort(),
     )
   })

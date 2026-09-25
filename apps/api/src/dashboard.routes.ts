@@ -4,6 +4,8 @@ import {
   type Deps,
   LEDGER_RANGE_MAX_DAYS,
   type ShiftOrderRecord,
+  type ShiftBreakRecord,
+  type GpsPingRecord,
   type ShiftRecord,
   type ShiftTimingRecord,
   serializeMoney,
@@ -42,6 +44,8 @@ import {
   vehicleIdOfCostLine,
   weekStartFor,
   workedTime,
+  workDistance,
+  GPS_COMPLETE_COVERAGE_PERCENT,
 } from '@ash/domain'
 import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
@@ -265,7 +269,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     ])
 
     const completed = timing.filter((shift) => COMPLETED_SHIFT_STATES.has(shift.state))
-    const orderRows = await deps.orders.listByShiftIds(completed.map((shift) => shift.id))
+    const completedIds = completed.map((shift) => shift.id)
+    const [orderRows, breakRows] = await Promise.all([
+      deps.orders.listByShiftIds(completedIds), deps.breaks.listByShiftIds(completedIds),
+    ])
+    const breaksByShift = new Map<string, ShiftBreakRecord[]>()
+    for (const item of breakRows) {
+      const rows = breaksByShift.get(item.shiftId) ?? []
+      rows.push(item)
+      breaksByShift.set(item.shiftId, rows)
+    }
     const ordersByShift = new Map<string, ShiftOrderRecord[]>()
     for (const order of orderRows) {
       const rows = ordersByShift.get(order.shiftId) ?? []
@@ -290,6 +303,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
         offset,
         dayStart,
+        breakDurationMs(breaksByShift.get(shift.id) ?? [], shift, deps.clock.nowMs()),
       ).pattern
       if (pattern === 'day' || pattern === 'evening') tally.ordinaryShifts += 1
       else if (pattern === 'full') tally.doubleShifts += 1
@@ -361,16 +375,18 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const offset = deps.clock.offsetMinutes()
     const dayStart = deps.clock.dayStartMinutes()
     const nowMs = deps.clock.nowMs()
+    const completed = timing.filter((s) => COMPLETED_SHIFT_STATES.has(s.state))
+    const live = timing.filter((s) => s.state === 'open' || s.state === 'suspended')
+    const metrics = await readShiftGpsMetrics(deps, [...completed, ...live], nowMs)
     const workedOf = (s: ShiftTimingRecord): WorkedTime =>
       workedTime(
         s.windowOpensAt === null ? null : Date.parse(s.windowOpensAt),
         s.submittedAt === null ? null : Date.parse(s.submittedAt),
         offset,
         dayStart,
+        breakDurationMs(metrics.get(s.id)?.breaks ?? [], s, nowMs),
       )
 
-    const completed = timing.filter((s) => COMPLETED_SHIFT_STATES.has(s.state))
-    const live = timing.filter((s) => s.state === 'open' || s.state === 'suspended')
     const completedIds = completed.map((s) => s.id)
     const [orderRows, settlementRows, drivers, vehicles] = await Promise.all([
       deps.orders.listByShiftIds(completedIds),
@@ -427,6 +443,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       // km. The rule is the domain's (`shiftDistance`), shared with `/dashboard/fleet-performance`.
       const distance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
       const km = distance.recorded ? distance.km : 0
+      const gps = metrics.get(shift.id)?.work
 
       for (const tally of [total, tallyFor(byDriver, shift.driverId), tallyFor(byVehicle, shift.vehicleId)]) {
         tally.shifts += 1
@@ -441,6 +458,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         tally.fees += fees
         tally.companyShare += companyShare
         tally.km += km
+        if (gps) addGpsToTally(tally, gps)
       }
     }
 
@@ -467,7 +485,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       const worked = workedOf(shift)
       runningSlots[worked.slot ?? 'unknown'] += 1
       if (shift.windowOpensAt !== null && worked.slot !== null) {
-        const elapsed = Math.floor((nowMs - Date.parse(shift.windowOpensAt)) / 60_000)
+        const elapsed = Math.floor((metrics.get(shift.id)?.work.workDurationMs ?? 0) / 60_000)
         const target = SHIFT_TARGET_MINUTES[worked.slot]
         if (target !== null && elapsed > target) overTarget += 1
       }
@@ -511,6 +529,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
         fxProvisional: feesUsd?.provisional ?? false,
         companyShareSyp: shareOf(total),
         km: total.km,
+        ...gpsTallyShape(total),
         workedMinutes: total.workedMinutes,
       },
       byDriver: [...byDriver.entries()]
@@ -526,6 +545,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
           orders: t.orders,
           feesSyp: money(t.fees),
           companyShareSyp: shareOf(t),
+          ...gpsTallyShape(t),
         }))
         .sort(byName),
       byVehicle: [...byVehicle.entries()]
@@ -538,6 +558,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
           doubles: t.doubles,
           short: { count: t.shortCount, minutes: t.shortMinutes },
           km: t.km,
+          ...gpsTallyShape(t),
           workedMinutes: t.workedMinutes,
           orders: t.orders,
           feesSyp: money(t.fees),
@@ -590,6 +611,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
     const timing = await deps.shifts.listTimingBetween(branchId, q.from, q.to)
     const completed = timing.filter((s) => COMPLETED_SHIFT_STATES.has(s.state))
     const completedIds = completed.map((s) => s.id)
+    const gpsMetrics = await readShiftGpsMetrics(deps, completed, deps.clock.nowMs())
     // Clamped like the profit report: the trial period is readable but never totalled as cost.
     const costsFrom = showFinance ? clampToGoLive(q.from, await goLiveDate(deps)) : null
     const [orderRows, settlementRows, vehicles, range] = await Promise.all([
@@ -629,9 +651,11 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
           counted.filter((o) => o.kind === 'manual').reduce((acc, o) => acc + (o.companyShare ?? 0n), 0n)
       }
       const distance = shiftDistance({ start: shift.odoStart, end: shift.odoEnd })
+      const gps = gpsMetrics.get(shift.id)?.work
       for (const tally of [total, rowFor(shift.vehicleId)]) {
         tally.shifts += 1
         tally.distance = addShiftDistance(tally.distance, distance)
+        if (gps) addGpsToTally(tally, gps)
         tally.orders += counted.length
         tally.fees += fees
         tally.companyShare += companyShare
@@ -658,6 +682,7 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       shifts: tally.shifts,
       km: tally.distance.km,
       kmUnrecorded: tally.distance.unrecordedShifts,
+      ...gpsTallyShape(tally),
       orders: tally.orders,
       feesSyp: money(tally.fees),
       ...(showFinance
@@ -1116,6 +1141,7 @@ function usdEquivalentByDay(
 interface FleetTally {
   shifts: number
   distance: DistanceTotal
+  gps: GpsTally
   orders: number
   fees: bigint
   companyShare: bigint
@@ -1123,7 +1149,7 @@ interface FleetTally {
 }
 
 function emptyFleetTally(): FleetTally {
-  return { shifts: 0, distance: EMPTY_DISTANCE_TOTAL, orders: 0, fees: 0n, companyShare: 0n, cost: 0n }
+  return { shifts: 0, distance: EMPTY_DISTANCE_TOTAL, gps: emptyGpsTally(), orders: 0, fees: 0n, companyShare: 0n, cost: 0n }
 }
 
 /** The population the completed-shifts screen lists: a close that was actually settled. */
@@ -1153,6 +1179,7 @@ interface ShiftTally {
   fees: bigint
   companyShare: bigint
   km: number
+  gps: GpsTally
 }
 
 function emptyShiftTally(): ShiftTally {
@@ -1166,7 +1193,113 @@ function emptyShiftTally(): ShiftTally {
     fees: 0n,
     companyShare: 0n,
     km: 0,
+    gps: emptyGpsTally(),
   }
+}
+
+type GpsWorkSummary = {
+  distanceMetres: number | null
+  coveragePercent: number | null
+  workDurationMs: number | null
+  coveredDurationMs: number
+}
+
+interface GpsTally {
+  distanceMetres: number
+  measuredShifts: number
+  unavailableShifts: number
+  incompleteShifts: number
+  coveredDurationMs: number
+  workDurationMs: number
+}
+
+const emptyGpsTally = (): GpsTally => ({
+  distanceMetres: 0, measuredShifts: 0, unavailableShifts: 0, incompleteShifts: 0,
+  coveredDurationMs: 0, workDurationMs: 0,
+})
+
+function addGpsToTally(tally: { gps: GpsTally }, work: GpsWorkSummary): void {
+  if (work.distanceMetres === null) tally.gps.unavailableShifts++
+  else {
+    tally.gps.distanceMetres += work.distanceMetres
+    tally.gps.measuredShifts++
+  }
+  if (work.coveragePercent === null || work.coveragePercent < GPS_COMPLETE_COVERAGE_PERCENT) tally.gps.incompleteShifts++
+  tally.gps.coveredDurationMs += work.coveredDurationMs
+  tally.gps.workDurationMs += work.workDurationMs ?? 0
+}
+
+function gpsTallyShape(tally: { gps: GpsTally }): {
+  workDistanceMetres: number | null
+  gpsCoveragePercent: number | null
+  gpsIncompleteShifts: number
+  gpsUnavailableShifts: number
+} {
+  const gps = tally.gps
+  return {
+    workDistanceMetres: gps.measuredShifts ? Math.round(gps.distanceMetres) : null,
+    gpsCoveragePercent: gps.workDurationMs ? Math.min(100, Math.round(gps.coveredDurationMs / gps.workDurationMs * 100)) : null,
+    gpsIncompleteShifts: gps.incompleteShifts,
+    gpsUnavailableShifts: gps.unavailableShifts,
+  }
+}
+
+function breakDurationMs(rows: readonly ShiftBreakRecord[], shift: ShiftTimingRecord, nowMs: number): number {
+  if (shift.windowOpensAt === null) return 0
+  const started = Date.parse(shift.windowOpensAt)
+  const ended = shift.submittedAt === null ? nowMs : Date.parse(shift.submittedAt)
+  return rows.reduce((total, row) =>
+    total + Math.max(0, Math.min(row.endedAtMs ?? ended, ended) - Math.max(row.startedAtMs, started)), 0)
+}
+
+async function readShiftGpsMetrics(
+  deps: Deps,
+  shifts: readonly ShiftTimingRecord[],
+  asOfMs: number,
+): Promise<Map<string, { breaks: ShiftBreakRecord[]; work: GpsWorkSummary }>> {
+  // A 400-day report can span millions of fixes. Bound each read, then retain only the four
+  // aggregate numbers needed by the report, not the per-ping phase and edge arrays.
+  const BATCH_SHIFT_COUNT = 25
+  const result = new Map<string, { breaks: ShiftBreakRecord[]; work: GpsWorkSummary }>()
+  for (let start = 0; start < shifts.length; start += BATCH_SHIFT_COUNT) {
+    const batch = shifts.slice(start, start + BATCH_SHIFT_COUNT)
+    const ids = batch.map((shift) => shift.id)
+    const [pings, breaks] = await Promise.all([
+      deps.gps.listByShiftIds(ids), deps.breaks.listByShiftIds(ids),
+    ])
+    const pingsByShift = new Map<string, GpsPingRecord[]>()
+    for (const ping of pings) {
+      const group = pingsByShift.get(ping.shiftId) ?? []
+      group.push(ping)
+      pingsByShift.set(ping.shiftId, group)
+    }
+    const breaksByShift = new Map<string, ShiftBreakRecord[]>()
+    for (const item of breaks) {
+      const group = breaksByShift.get(item.shiftId) ?? []
+      group.push(item)
+      breaksByShift.set(item.shiftId, group)
+    }
+    for (const shift of batch) {
+      const rows = breaksByShift.get(shift.id) ?? []
+      const work = workDistance({
+        pings: pingsByShift.get(shift.id) ?? [],
+        breaks: rows,
+        windowOpensAtMs: shift.windowOpensAt === null ? null : Date.parse(shift.windowOpensAt),
+        submittedAtMs: shift.submittedAt === null ? null : Date.parse(shift.submittedAt),
+        asOfMs,
+      })
+      result.set(shift.id, {
+        breaks: rows,
+        work: {
+          distanceMetres: work.distanceMetres,
+          coveragePercent: work.coveragePercent,
+          workDurationMs: work.workDurationMs,
+          coveredDurationMs: work.coveredDurationMs,
+        },
+      })
+    }
+  }
+  return result
 }
 
 function hasCompleteEndPackage(shift: ShiftRecord): boolean {

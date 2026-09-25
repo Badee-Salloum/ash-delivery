@@ -40,6 +40,10 @@ export interface ShiftSummaryTally {
   orders: number
   feesSyp: string
   companyShareSyp: string | null
+  workDistanceMetres: number | null
+  gpsCoveragePercent: number | null
+  gpsIncompleteShifts: number
+  gpsUnavailableShifts: number
 }
 
 export interface ShiftsSummary {
@@ -69,6 +73,10 @@ export interface ShiftsSummary {
     companyShareSyp: string | null
     km: number
     workedMinutes: number
+    workDistanceMetres: number | null
+    gpsCoveragePercent: number | null
+    gpsIncompleteShifts: number
+    gpsUnavailableShifts: number
   }
   byDriver: Array<
     ShiftSummaryTally & {
@@ -117,6 +125,10 @@ export interface FleetPerformanceTally {
   shifts: number
   km: number
   kmUnrecorded: number
+  workDistanceMetres: number | null
+  gpsCoveragePercent: number | null
+  gpsIncompleteShifts: number
+  gpsUnavailableShifts: number
   orders: number
   feesSyp: string
   companyShareSyp?: string

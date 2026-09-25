@@ -1680,7 +1680,7 @@ describe('GET /dashboard/shifts-summary (P2)', () => {
       // 91 km on the canonical bike and 80 on the double; the reset odometer adds none.
       totals: { orders: 20, feesSyp: sypStr(100_000), companyShareSyp: null, km: 171, workedMinutes: 630 + 480 },
     })
-    expect(body.byDriver).toEqual([
+    expect(body.byDriver).toMatchObject([
       {
         driverId: 'driver-sum-abandoned', name: 'driver-sum-abandoned', nameEn: null, code: null,
         shifts: 1, doubles: 0, short: { count: 0, minutes: 0 }, workedMinutes: 0,
@@ -1704,6 +1704,48 @@ describe('GET /dashboard/shifts-summary (P2)', () => {
       ['vehicle-2', 2, 80],
       ['vehicle-sum-abandoned', 1, 0],
     ])
+  })
+
+  it('uses one batched GPS read and reports net work after a break', async () => {
+    await seedSummaryFixture()
+    const base = Date.parse('2026-07-21T06:00:00.000Z')
+    await h.deps.breaks.create({
+      id: 'sum-full-break', shiftId: 'sum-full', startedAtMs: base + 2 * 60_000,
+      endedAtMs: base + 92 * 60_000, endReason: 'driver_resumed',
+      limitMinutes: 60, consumedBeforeMs: 0, overLimitMs: 30 * 60_000,
+    }, 'u-driver')
+    await h.deps.gps.appendMany([0, 1, 30, 92, 93, 631].map((minute, index) => ({
+      shiftId: 'sum-full', driverId: DRIVER2_ID, branchId: BRANCH,
+      lat: 33.5, lng: [36.3, 36.301, 36.32, 36.33, 36.331, 36.34][index]!,
+      accuracyM: 10, capturedAtMs: base + minute * 60_000,
+      receivedAtMs: base + minute * 60_000, source: 'phone_bg' as const,
+    })))
+    const batch = vi.spyOn(h.deps.gps, 'listByShiftIds')
+    const res = await get(await h.loginAs('manager'), `/dashboard/shifts-summary?from=${dayBefore}&to=${day}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(batch).toHaveBeenCalledTimes(1)
+    const summary = res.json()
+    expect(summary.byPattern).toMatchObject({ day: 3, full: 0 })
+    expect(summary.totals.workedMinutes).toBe(540 + 480)
+    expect(summary.totals.workDistanceMetres).toBeGreaterThan(100)
+    expect(summary.totals.workDistanceMetres).toBeLessThan(300)
+    expect(summary.totals.gpsUnavailableShifts).toBe(3)
+    const fleet = await get(await h.loginAs('manager'), `/dashboard/fleet-performance?from=${dayBefore}&to=${day}`)
+    expect(fleet.statusCode, fleet.body).toBe(200)
+    expect(fleet.json().totals.workDistanceMetres).toBe(summary.totals.workDistanceMetres)
+  })
+
+  it('bounds GPS reads when a report spans many shifts', async () => {
+    for (let index = 0; index < 26; index++) {
+      await seedCountShift(`batch-${index}`, 'approved', { businessDate: day })
+    }
+    const reads = vi.spyOn(h.deps.gps, 'listByShiftIds')
+    const res = await get(await h.loginAs('manager'), `/dashboard/shifts-summary?from=${day}&to=${day}`)
+    expect(res.statusCode, res.body).toBe(200)
+    expect(res.json().completed).toBe(26)
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(reads.mock.calls.map(([ids]) => ids.length)).toEqual([25, 1])
+    expect(res.json().totals.workDistanceMetres).toBeNull()
   })
 
   it('shows the company share only to a caller who may see profit (BR8)', async () => {
@@ -1743,6 +1785,7 @@ describe('GET /dashboard/shifts-summary (P2)', () => {
     expect(body).not.toHaveProperty('costsFrom')
     expect(body).not.toHaveProperty('unattributedVehicleCostSyp')
     expect(body.totals).toMatchObject({ shifts: 4, km: 171, kmUnrecorded: 2, orders: 20, feesSyp: sypStr(100_000) })
+    expect(body.totals).toMatchObject({ workDistanceMetres: null, gpsIncompleteShifts: 4, gpsUnavailableShifts: 4 })
     expect(body.totals).not.toHaveProperty('companyShareSyp')
     expect(body.totals).not.toHaveProperty('vehicleCostSyp')
     expect(body.totals).not.toHaveProperty('contributionSyp')

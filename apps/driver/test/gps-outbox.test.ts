@@ -3,6 +3,8 @@ import {
   GPS_OUTBOX_MAX,
   GPS_OUTBOX_TTL_MS,
   type QueuedFix,
+  dropFixes,
+  dropShift,
   enqueueFix,
   fixKey,
   nextFlushBatch,
@@ -24,7 +26,10 @@ import {
  * matters operationally: that its absence never stops a driver tracking.
  */
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(async () => {
+  vi.unstubAllGlobals()
+  await dropShift('memory-test')
+})
 
 const fix = (shiftId: string, capturedAtMs: number): QueuedFix => ({
   key: fixKey(shiftId, capturedAtMs),
@@ -123,11 +128,15 @@ describe('a phone with no usable IndexedDB still tracks', () => {
    * keep seeing pins. He simply loses the ability to survive a reload, which is strictly better
    * than not tracking at all.
    */
-  it('degrades to empty rather than throwing', async () => {
+  it('keeps unsaved fixes in memory until upload acknowledges them', async () => {
     vi.stubGlobal('indexedDB', undefined)
-    await expect(enqueueFix({ shiftId: 's1', lat: 1, lng: 2, accuracyM: 3, capturedAtMs: 4 })).resolves.toBeUndefined()
-    await expect(peekFixes('s1', 10)).resolves.toEqual([])
-    await expect(sweepOutbox(Date.now())).resolves.toEqual({ dropped: 0 })
+    const capturedAtMs = Date.now()
+    await expect(enqueueFix({ shiftId: 'memory-test', lat: 1, lng: 2, accuracyM: 3, capturedAtMs })).resolves.toBeUndefined()
+    await expect(peekFixes('memory-test', 10)).resolves.toEqual([
+      { key: fixKey('memory-test', capturedAtMs), shiftId: 'memory-test', lat: 1, lng: 2, accuracyM: 3, capturedAtMs },
+    ])
+    await dropFixes([fixKey('memory-test', capturedAtMs)])
+    await expect(peekFixes('memory-test', 10)).resolves.toEqual([])
   })
 
   it('survives a store that throws on open', async () => {
@@ -136,6 +145,10 @@ describe('a phone with no usable IndexedDB still tracks', () => {
         throw new Error('quota')
       },
     } as unknown as IDBFactory)
-    await expect(peekFixes('s1', 10)).resolves.toEqual([])
+    const capturedAtMs = Date.now()
+    await enqueueFix({ shiftId: 'memory-test', lat: 1, lng: 2, accuracyM: null, capturedAtMs })
+    await expect(peekFixes('memory-test', 10)).resolves.toHaveLength(1)
+    await expect(sweepOutbox(capturedAtMs + GPS_OUTBOX_TTL_MS + 1)).resolves.toEqual({ dropped: 1 })
+    await expect(peekFixes('memory-test', 10)).resolves.toEqual([])
   })
 })

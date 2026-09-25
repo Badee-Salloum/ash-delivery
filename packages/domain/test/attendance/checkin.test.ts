@@ -3,13 +3,13 @@ import { describe, expect, it } from 'vitest'
 import {
   type CheckInWindow,
   assessCheckIn,
-  distanceMetres,
   isWithinOperatingRegion,
   localMinuteOfDay,
   rollCall,
   swapWouldBeInRegion,
   windowFor,
 } from '../../src/attendance/checkin.ts'
+import { distanceMetres } from '../../src/geo/haversine.ts'
 
 /**
  * «التفقّد» — the branch manager proving he was at the branch when he was expected there

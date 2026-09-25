@@ -121,6 +121,10 @@
   --color-map-stale-fill: var(--ash-map-stale-fill);
   --color-map-branch-stroke: var(--ash-map-branch-stroke);
   --color-map-branch-fill: var(--ash-map-branch-fill);
+  --color-map-path-stroke: var(--ash-map-path-stroke);
+  --color-map-segment-stroke: var(--ash-map-segment-stroke);
+  --color-map-start-fill: var(--ash-map-start-fill);
+  --color-map-end-fill: var(--ash-map-end-fill);
 
   /* SOLID fills, which are a different job from the inks above and must not be confused with them.
      A `-ink` is text ON a tinted surface, so in dark it LIGHTENS. A `-solid` is a saturated block
@@ -258,6 +262,13 @@
   --ash-map-stale-fill: #94a3b8;
   --ash-map-branch-stroke: #1e3a8a;
   --ash-map-branch-fill: #3b82f6;
+  /* The recorded path: a muted full trail, a bright segment for the selected order, and a green
+     start / red end so a route reads direction at a glance. Not success/danger — route endpoints. */
+  --ash-map-path-stroke: #475569;
+  --ash-map-break-stroke: #b45309;
+  --ash-map-segment-stroke: #7c3aed;
+  --ash-map-start-fill: #047857;
+  --ash-map-end-fill: #dc2626;
 
   --ash-danger-solid: #dc2626;
   --ash-danger-solid-hover: #b91c1c;
@@ -362,6 +373,13 @@
   --ash-map-stale-fill: #94a3b8;
   --ash-map-branch-stroke: #1e3a8a;
   --ash-map-branch-fill: #3b82f6;
+  /* The recorded path: a muted full trail, a bright segment for the selected order, and a green
+     start / red end so a route reads direction at a glance. Not success/danger — route endpoints. */
+  --ash-map-path-stroke: #475569;
+  --ash-map-break-stroke: #fbbf24;
+  --ash-map-segment-stroke: #7c3aed;
+  --ash-map-start-fill: #047857;
+  --ash-map-end-fill: #dc2626;
 
   /* Unchanged from light on purpose: white text sits on these, and each paired `on-*` foreground
      clears AA. Lightening them for the dark theme would cost that and gain nothing. */

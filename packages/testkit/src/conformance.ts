@@ -820,6 +820,8 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500 })])
         const trail = await deps.gps.listForShift(SHIFT)
         expect(trail.map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+        expect((await deps.gps.listByShiftIds([SHIFT, SHIFT])).map((p) => p.capturedAtMs)).toEqual([10_000, 20_000, 30_000])
+        expect(await deps.gps.listByShiftIds([])).toEqual([])
       })
 
       it('returns the latest fix per named driver, and nothing older than the window', async () => {
@@ -836,6 +838,27 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         expect(await deps.gps.latestForDriversInBranch(BRANCH, [OTHER_DRIVER], 0)).toEqual([])
         // And a fix older than the window is a memory, not a position.
         expect(await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 3_000)).toEqual([])
+      })
+
+      it('selects the latest capture when an older fix arrives in a later batch', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([fix(20_000, { receivedAtMs: 20_500, lat: 33.2 })])
+        await deps.gps.appendMany([fix(10_000, { receivedAtMs: 50_000, lat: 33.1 })])
+        const latest = await deps.gps.latestForDriversInBranch(BRANCH, [DRIVER], 15_000)
+        expect(latest).toHaveLength(1)
+        expect(latest[0]!.lat).toBeCloseTo(33.2)
+      })
+
+      it('selects the latest fix within the named shift and ignores untracked shift IDs', async () => {
+        const deps = await fresh()
+        await deps.gps.appendMany([
+          fix(20_000, { shiftId: SHIFT, lat: 33.2 }),
+          fix(30_000, { shiftId: SHIFT, lat: 33.3 }),
+        ])
+        const latest = await deps.gps.latestForShiftIds([SHIFT, OTHER_SHIFT])
+        expect(latest).toHaveLength(1)
+        expect(latest[0]?.lat).toBeCloseTo(33.3)
+        expect(await deps.gps.latestForShiftIds([])).toEqual([])
       })
 
       it('round-trips every field, including the capture layer', async () => {
@@ -1849,6 +1872,83 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           }
           await deps.orders.create(order, USER)
           await expect(deps.orders.create({ ...order, id: ORDER_2 }, USER)).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+    })
+
+    describe('tracker devices', () => {
+      const DEVICE_1 = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd1'
+      const DEVICE_2 = 'dddddddd-dddd-4ddd-8ddd-ddddddddddd2'
+      const device = (over: Partial<Parameters<typeof buildDevice>[0]> = {}) => buildDevice(over)
+      function buildDevice(over: Record<string, unknown>) {
+        return {
+          id: DEVICE_1,
+          branchId: BRANCH,
+          imei: '350000000000001',
+          vehicleId: null as string | null,
+          secretHash: 'x'.repeat(40),
+          label: 'Tracker A',
+          active: true,
+          lastSeenAtMs: null as number | null,
+          createdBy: USER,
+          createdAtMs: 1_784_000_000_000,
+          updatedAtMs: 1_784_000_000_000,
+          ...over,
+        }
+      }
+
+      it('registers a device and finds it by imei', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          const found = await deps.trackerDevices.findByImei('350000000000001')
+          expect(found?.id).toBe(DEVICE_1)
+          expect(found?.active).toBe(true)
+          expect(await deps.trackerDevices.findByImei('999999999999')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('refuses a duplicate imei', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          await expect(deps.trackerDevices.register(device({ id: DEVICE_2 }))).rejects.toThrow()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('allows one active device per bike, and a replacement only after deactivation', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device({ vehicleId: VEHICLE }))
+          await expect(
+            deps.trackerDevices.register(device({ id: DEVICE_2, imei: '350000000000002', vehicleId: VEHICLE })),
+          ).rejects.toThrow()
+          await deps.trackerDevices.deactivate(DEVICE_1, USER)
+          await deps.trackerDevices.register(device({ id: DEVICE_2, imei: '350000000000002', vehicleId: VEHICLE }))
+          expect((await deps.trackerDevices.findActiveByImei('350000000000002'))?.id).toBe(DEVICE_2)
+          expect(await deps.trackerDevices.findActiveByImei('350000000000001')).toBeNull()
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('binds a bike, touches last-seen without auditing it, deactivates, and lists the branch', async () => {
+        const deps = await fresh()
+        try {
+          await deps.trackerDevices.register(device())
+          await deps.trackerDevices.bindToVehicle(DEVICE_1, VEHICLE, USER)
+          expect((await deps.trackerDevices.findByImei('350000000000001'))?.vehicleId).toBe(VEHICLE)
+          await deps.trackerDevices.touchLastSeen(DEVICE_1, 1_784_000_100_000)
+          expect((await deps.trackerDevices.findByImei('350000000000001'))?.lastSeenAtMs).toBe(1_784_000_100_000)
+          await deps.trackerDevices.deactivate(DEVICE_1, USER)
+          expect(await deps.trackerDevices.findActiveByImei('350000000000001')).toBeNull()
+          expect(await deps.trackerDevices.listByBranch(BRANCH)).toHaveLength(1)
         } finally {
           await ctx.cleanup?.(deps)
         }

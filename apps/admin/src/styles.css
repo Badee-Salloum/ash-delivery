@@ -11,6 +11,19 @@
 @import '@ash/theme/tokens.css';
 
 /*
+ * Leaflet gives its own panes and controls very high z-indexes — panes at 400, popups at 700,
+ * controls at 800, and the control-position wrappers at 1000 — far above the app's overlay tier
+ * (the nav drawer is z-40, dialogs/toasts z-50). Left alone, those numbers compete in the document
+ * root and the map's tiles and zoom buttons render ON TOP of an open drawer or dialog. Isolating
+ * the map container re-bases that whole z-index war inside its own stacking context, so the map
+ * participates in the page as a single box any overlay sits above. The container keeps
+ * `overflow:hidden`, and the map's own controls/markers/popups (its children) are unaffected.
+ */
+.leaflet-container {
+  isolation: isolate;
+}
+
+/*
  * RTL-first. Tailwind 4 logical properties are used throughout the components (ps-/pe-/ms-/me-,
  * start-/end-, text-start/text-end) so a single stylesheet serves both directions — CI fails the
  * build on any physical utility (ml-/mr-/left-/right-/text-left/text-right).

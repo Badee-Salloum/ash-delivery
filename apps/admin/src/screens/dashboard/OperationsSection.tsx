@@ -58,6 +58,7 @@ export function OperationsSection({ range }: { range: DateRange }): ReactNode {
                 { label: t.dashboard.doubleCount, numeric: true },
                 { label: t.dashboard.shiftsUnderTarget, numeric: true },
                 { label: t.dashboard.orders, numeric: true },
+                { label: t.dashboard.gpsWorkDistance, numeric: true },
                 { label: t.dashboard.revenue, numeric: true },
                 ...(data.companyShareVisible ? [{ label: t.dashboard.companyShareLabel, numeric: true } as const] : []),
               ]}
@@ -75,6 +76,12 @@ export function OperationsSection({ range }: { range: DateRange }): ReactNode {
                   <td className="num px-3 py-2 text-end">{driver.doubles}</td>
                   <td className="num px-3 py-2 text-end">{driver.short.count}</td>
                   <td className="num px-3 py-2 text-end">{driver.orders}</td>
+                  <td className="num px-3 py-2 text-end">
+                    {driver.workDistanceMetres === null ? t.shiftPath.unavailable : (driver.workDistanceMetres / 1000).toFixed(1)}
+                    <span className={`block text-xs ${driver.gpsIncompleteShifts > 0 ? 'text-warning-ink' : 'text-ink-muted'}`}>
+                      {t.dashboard.gpsCoverage.replace('{n}', driver.gpsCoveragePercent === null ? t.shiftPath.unavailable : `${driver.gpsCoveragePercent}%`)}
+                    </span>
+                  </td>
                   <td className="px-3 py-2 text-end"><Money value={driver.feesSyp} /></td>
                   {data.companyShareVisible ? <td className="px-3 py-2 text-end"><Money value={driver.companyShareSyp ?? '0.00'} /></td> : null}
                 </tr>

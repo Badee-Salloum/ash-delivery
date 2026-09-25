@@ -1,7 +1,9 @@
-import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import {
+  type GpsPathView,
+  type BreakSummary,
   type ManagerOrderEvidenceRereadResponse,
   type ManagerOrderEvidenceRereadTarget,
   type OcrScalar,
@@ -17,7 +19,9 @@ import {
 } from '@ash/client'
 import { abs, add, formatMinor, minor, parseMinor, sub, workedTime } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
+import { ShiftPathMap } from '../components/ShiftPathMap.tsx'
 import { explainError } from '../errors.ts'
+import { formatDistance } from '../format-distance.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
 import { br1SplitView, employeeShareChain } from '../money-story.ts'
 import {
@@ -122,6 +126,7 @@ interface Review {
   /** The operation window's start — the driver's own confirmation, not the manager's signature. */
   windowOpensAt?: string | null
   submittedAt?: string | null
+  break?: BreakSummary
   /** Current branch+driver shift funding captured by the locked manager-review read. */
   shiftFunding: { cash: string; wallet: string }
   startPackage: {
@@ -313,6 +318,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * — signed off real cash on a page headed only «مراجعة النوبة». Same lookup Queue.tsx does.
    */
   const [who, setWho] = useState<{ driver: string | null; vehicle: string | null }>({ driver: null, vehicle: null })
+
+  /**
+   * The recorded GPS path, fetched once here and shared: the review table and the close workspace
+   * each show every order's path length beside it, and it seeds the embedded map so it never
+   * refetches. A shift with no trail simply yields no distances — never an error on this screen.
+   */
+  const [gpsPath, setGpsPath] = useState<GpsPathView | null>(null)
+  useEffect(() => {
+    let live = true
+    void api
+      .getShiftGpsPath(shiftId)
+      .then((v) => { if (live) setGpsPath(v) })
+      .catch(() => { if (live) setGpsPath(null) })
+    return () => { live = false }
+  }, [api, shiftId])
+  /** Path length per order, keyed by the provider number the order rows carry. */
+  const distanceByOrderNo = useMemo(
+    () => new Map((gpsPath?.segments ?? []).filter((s) => s.distanceMetres !== null).map((s) => [s.providerOrderNo, s.distanceMetres!])),
+    [gpsPath],
+  )
 
   /**
    * «كشف التسوية». It is read-only until both physical actions are confirmed, but it is mandatory:
@@ -551,6 +576,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const shiftWorked = workedTime(
     shiftStart === null ? null : Date.parse(shiftStart),
     shiftEnd === null ? null : Date.parse(shiftEnd),
+    undefined,
+    undefined,
+    review.break?.totalBreakMs ?? 0,
   )
   // One shift judged alone, so it cannot see a second one that day — the dashboard, which holds
   // the whole day per driver, is where a two-row double is caught. Only an open or suspended shift
@@ -954,6 +982,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       <CloseApprovalWorkspace
         key={`${review.id}:${reviewGeneration}`}
         review={review}
+        distanceByOrderNo={distanceByOrderNo}
         who={{ driver: inlineDriver, vehicle: inlineVehicle }}
         settlement={settlement}
         settlementLoadError={settlementLoadError}
@@ -1048,6 +1077,26 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </Badge>
         </span>
       </div>
+
+      {review.break && review.break.breaks.length > 0 ? (
+        <Card title={t.shift.breakHistory}>
+          <p className="text-sm">{t.shift.breakUsed.replace('{minutes}', String(Math.floor(review.break.totalBreakMs / 60_000)))}</p>
+          {review.break.overLimitMs > 0 ? (
+            <p role="alert" className="mt-1 font-bold text-danger-ink">
+              {t.shift.breakOver.replace('{minutes}', String(Math.ceil(review.break.overLimitMs / 60_000)))}
+            </p>
+          ) : null}
+          <ol className="mt-2 flex flex-col gap-1 text-sm">
+            {review.break.breaks.map((record) => (
+              <li key={record.id} className="border-t border-line-subtle pt-1">
+                <span className="num">{formatDateTime(new Date(record.startedAtMs).toISOString(), lang)} → {record.endedAtMs === null ? t.shift.breakOpen : formatDateTime(new Date(record.endedAtMs).toISOString(), lang)}</span>
+                {record.endReason && record.endReason !== 'driver_resumed' ? <span className="ms-2 text-warning-ink">{t.shift.breakEndedByManager}</span> : null}
+                {record.overLimitMs > 0 ? <strong className="ms-2 text-danger-ink">{t.shift.breakOver.replace('{minutes}', String(Math.ceil(record.overLimitMs / 60_000)))}</strong> : null}
+              </li>
+            ))}
+          </ol>
+        </Card>
+      ) : null}
 
       <OperationWindowAdvisory
         openApprovedAt={review.openApprovedAt ?? null}
@@ -1398,7 +1447,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Money value={hiddenTotal} className="font-semibold text-slate-700" />
           </button>
         ) : null}
-        <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee, operationCopy.windowStatus]}>
+        <Table head={['', '#', t.orders.route, t.orders.payMode, t.orders.fee, t.shiftPath.distance, operationCopy.windowStatus]}>
           {shownOrders.map((o, i) => (
             <tr key={o.providerOrderNo} className={o.included === false ? 'opacity-60' : ''}>
               {/* Every operation shows, checked or not, and an excluded row keeps its PLACE —
@@ -1472,6 +1521,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                   </div>
                 ) : null}
               </td>
+              {/* The length of THIS order's recorded path (best-effort by printed time, from the
+                  GPS trail); em dash when the order has no readable minute or no trail. */}
+              <td className="px-3 py-1">
+                {distanceByOrderNo.has(o.providerOrderNo) ? (
+                  <span className="num" dir="ltr">{formatDistance(distanceByOrderNo.get(o.providerOrderNo)!, t.shiftPath)}</span>
+                ) : (
+                  <span className="text-ink-muted">{gpsPath ? t.shiftPath.unavailable : '—'}</span>
+                )}
+              </td>
               <td className="min-w-64 px-3 py-1">
                 {o.kind === 'manual' ? (
                   <Badge tone="sky">{operationCopy.manualOutsideWindow}</Badge>
@@ -1508,6 +1566,17 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             </tr>
           ))}
         </Table>
+
+        {/* The whole trail's length, once, under the per-order column it totals. */}
+        {gpsPath ? (
+          <p className="mt-2 flex items-center gap-2 text-sm">
+            <span className="text-ink-muted">{t.shiftPath.workDistance}</span>
+            <span className="num ms-auto font-semibold" dir="ltr">
+              {gpsPath.workDistanceMetres === null ? t.shiftPath.unavailable : formatDistance(gpsPath.workDistanceMetres, t.shiftPath)}
+            </span>
+          </p>
+        ) : null}
+        {gpsPath?.coverageIncomplete ? <p className="text-sm font-semibold text-warning-ink">{t.shiftPath.incompleteCoverage}</p> : null}
 
         {/* The payments log is deliberately read-only here. It remains useful evidence, but its
             rows do not change BR1, order fees, the fixed share or ledger postings. */}
@@ -1548,6 +1617,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           </ul>
         </Card>
       ) : null}
+
+      {/* The recorded GPS trail, split into a path segment per order (gps.view). Hidden when the
+          shift has no trail, so it never shows an empty map on a shift that was never tracked. */}
+      <ShiftPathMap shiftId={shiftId} hideWhenEmpty view={gpsPath} />
 
       {/* A reason for the re-shoot / reject the driver will see — only where a decision is taken. */}
       {atGate ? (
@@ -1865,6 +1938,8 @@ function ManagerChargeBox({
 
 interface CloseApprovalWorkspaceProps {
   review: Review
+  /** Path length per order (whole metres), keyed by provider number; empty when there is no trail. */
+  distanceByOrderNo: ReadonlyMap<string, number>
   who: { driver: string | null; vehicle: string | null }
   settlement: SettlementView | null
   settlementLoadError: string | null
@@ -1903,6 +1978,7 @@ interface CloseApprovalWorkspaceProps {
 /** Fast close-only workspace: exceptions on the left, physical settlement fixed on the right. */
 function CloseApprovalWorkspace({
   review,
+  distanceByOrderNo,
   who,
   settlement,
   settlementLoadError,
@@ -2121,6 +2197,7 @@ function CloseApprovalWorkspace({
                     key={order.providerOrderNo}
                     lookupDuplicateRow={lookupDuplicateRow}
                     order={order}
+                    distanceMetres={distanceByOrderNo.get(order.providerOrderNo)}
                     index={orders.indexOf(order) + 1 || index + 1}
                     businessDate={day}
                     disabled={busy || refreshing}
@@ -2177,11 +2254,12 @@ function CloseApprovalWorkspace({
                   <li key={order.providerOrderNo} className="min-w-0">
                     <details className="min-w-0 rounded-lg border border-slate-200 bg-surface-card">
                       <summary className={`cursor-pointer list-none p-2 ${FOCUS_RING}`}>
-                        <OrdinaryOrderRow order={order} businessDate={day} />
+                        <OrdinaryOrderRow order={order} businessDate={day} distanceMetres={distanceByOrderNo.get(order.providerOrderNo)} />
                       </summary>
                       <div className="border-t border-slate-200 p-2">
                         <OrderAttentionCard
                           order={order}
+                          distanceMetres={distanceByOrderNo.get(order.providerOrderNo)}
                           index={orders.indexOf(order) + 1}
                           businessDate={day}
                           disabled={busy || refreshing}
@@ -3124,6 +3202,7 @@ function DuplicateChoicePanel({
 
 function OrderAttentionCard({
   order,
+  distanceMetres,
   index,
   businessDate,
   disabled,
@@ -3139,6 +3218,7 @@ function OrderAttentionCard({
   onTimingDraftPending,
 }: {
   order: Review['orders'][number]
+  distanceMetres?: number | undefined
   index: number
   businessDate: string
   disabled: boolean
@@ -3278,6 +3358,9 @@ function OrderAttentionCard({
         <div className="min-w-0 flex-1">
           <p className="num text-sm font-semibold">{date} · {order.occurredMinute ?? '—'}</p>
           {route ? <p className="truncate text-xs text-slate-600" title={route}>{route}</p> : null}
+          {typeof distanceMetres === 'number' ? (
+            <p className="num text-xs text-ink-muted" dir="ltr">{t.shiftPath.distance}: {formatDistance(distanceMetres, t.shiftPath)}</p>
+          ) : null}
         </div>
         <div className="min-w-24 text-end">
           <FeeCell
@@ -3722,7 +3805,16 @@ function DeductionAttentionCard({
   )
 }
 
-function OrdinaryOrderRow({ order, businessDate }: { order: Review['orders'][number]; businessDate: string }): ReactNode {
+function OrdinaryOrderRow({
+  order,
+  businessDate,
+  distanceMetres,
+}: {
+  order: Review['orders'][number]
+  businessDate: string
+  distanceMetres?: number | undefined
+}): ReactNode {
+  const { t } = useApp()
   const route = [
     (order.points ?? []).find((point) => point.role === 'start')?.label,
     (order.points ?? []).find((point) => point.role === 'end')?.label,
@@ -3738,6 +3830,9 @@ function OrdinaryOrderRow({ order, businessDate }: { order: Review['orders'][num
         <span className="num block font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</span>
         {route ? <span className="block truncate text-xs text-slate-500" title={route}>{route}</span> : null}
       </span>
+      {typeof distanceMetres === 'number' ? (
+        <span className="num shrink-0 text-xs text-ink-muted" dir="ltr">{formatDistance(distanceMetres, t.shiftPath)}</span>
+      ) : null}
       <Money value={order.fee} className="shrink-0 font-bold" />
       {/* The affordance. A `<summary>` with `list-none` shows no marker of its own. */}
       <span aria-hidden="true" className="shrink-0 text-xs text-slate-400">▾</span>

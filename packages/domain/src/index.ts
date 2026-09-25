@@ -9,6 +9,7 @@ export * from './br1/diagnose.ts'
 export * from './tier/rules.ts'
 export * from './tier/split.ts'
 export * from './time/civil.ts'
+export * from './geo/haversine.ts'
 export * from './attendance/checkin.ts'
 export * from './rbac/can.ts'
 export * from './ledger/recipes.ts'
@@ -38,6 +39,12 @@ export * from './reporting/ledger-range.ts'
 
 // P3 — kilometres per shift, behind the dashboard's fleet table (P6 extends it).
 export * from './fleet/odometer.ts'
+
+// GPS — split a shift's recorded trail into a path segment per order, by printed time,
+// and measure the great-circle length of a run of pings.
+export * from './gps/segment.ts'
+export * from './gps/distance.ts'
+export * from './gps/work-distance.ts'
 
 // C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
 export * from './assets/depreciation.ts'

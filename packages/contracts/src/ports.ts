@@ -886,6 +886,31 @@ export interface DriverAccountProvisioningRepo {
   provision(input: DriverAccountProvisionInput): Promise<void>
 }
 
+export type ShiftBreakEndReason = 'driver_resumed' | 'manager_suspended' | 'manager_voided' | 'manager_force_closed'
+
+/** One pause within an operational shift. Milliseconds use the server clock. */
+export interface ShiftBreakRecord {
+  id: string
+  shiftId: string
+  startedAtMs: number
+  endedAtMs: number | null
+  endReason: ShiftBreakEndReason | null
+  /** Global allowance captured when this break began. */
+  limitMinutes: number
+  /** Completed pauses before this one; makes later setting changes non-retroactive. */
+  consumedBeforeMs: number
+  /** Stored on end; active rows are projected with the current server time. */
+  overLimitMs: number
+}
+
+export interface ShiftBreakRepo {
+  findById(id: string): Promise<ShiftBreakRecord | null>
+  listByShift(shiftId: string): Promise<ShiftBreakRecord[]>
+  listByShiftIds(shiftIds: readonly string[]): Promise<ShiftBreakRecord[]>
+  create(record: ShiftBreakRecord, actorId: string): Promise<void>
+  end(id: string, endedAtMs: number, reason: ShiftBreakEndReason, overLimitMs: number, actorId: string): Promise<void>
+}
+
 export interface ShiftRepo {
   create(shift: ShiftRecord, actorId: string | null): Promise<void>
   findById(id: string): Promise<ShiftRecord | null>
@@ -2798,18 +2823,20 @@ export interface GpsPingRepo {
    */
   appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }>
   /**
-   * The latest fix for each of the named drivers — what the live map draws.
+   * The latest fix for each of the named drivers, for driver-wide history reads.
    *
-   * Takes the driver ids because the caller already knows who is live, and a seek per driver is
+   * Takes the driver ids so a seek per driver is
    * O(drivers) forever. Its predecessor was `DISTINCT ON (driver_id)` over the whole branch, which
    * does not skip: it reads every tuple the branch has ever written, so it degraded with history.
-   * `sinceMs` bounds it further — a fix older than that is not a live position, it is a memory.
+   * `sinceMs` bounds capture time, since a newly received buffered fix may describe an old position.
    */
   latestForDriversInBranch(
     branchId: string,
     driverIds: readonly string[],
     sinceMs: number,
   ): Promise<GpsPingRecord[]>
+  /** Latest captured fix on each named live shift; old-shift late uploads cannot mask it. */
+  latestForShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]>
   /**
    * A shift's whole trail, in CAPTURE order.
    *
@@ -2818,8 +2845,44 @@ export interface GpsPingRepo {
    * and the summed distance inflates without bound. That number is one a manager acts on.
    */
   listForShift(shiftId: string): Promise<GpsPingRecord[]>
+  /** Resolve all trails in one reporting read, capture-ordered within each shift. */
+  listByShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]>
   /** How many fixes a shift has stored. Guards one wedged handset from filling the table. */
   countForShift(shiftId: string): Promise<number>
+}
+
+/**
+ * A registered hardware GPS tracker (SRS K-1 — infrastructure only; no device exists yet).
+ *
+ * A tracker measures a BIKE (a phone measures a driver), so it is fitted to a vehicle at a branch
+ * and known by its IMEI. Only the secret's hash is kept. `lastSeenAtMs` is liveness, updated by the
+ * ingest seam; registration, binding and deactivation are the audited authority decisions.
+ */
+export interface TrackerDeviceRecord {
+  id: string
+  branchId: string
+  imei: string
+  vehicleId: string | null
+  secretHash: string
+  label: string
+  active: boolean
+  lastSeenAtMs: number | null
+  createdBy: string
+  createdAtMs: number
+  updatedAtMs: number
+}
+
+export interface TrackerDeviceRepo {
+  register(device: TrackerDeviceRecord): Promise<void>
+  findByImei(imei: string): Promise<TrackerDeviceRecord | null>
+  /** The device that may currently write telemetry for this IMEI — active only. */
+  findActiveByImei(imei: string): Promise<TrackerDeviceRecord | null>
+  /** Fit the device to a bike (or unfit with null). One active device per bike is enforced in SQL. */
+  bindToVehicle(id: string, vehicleId: string | null, actorId: string): Promise<void>
+  deactivate(id: string, actorId: string): Promise<void>
+  /** A bare liveness touch — deliberately not audited, like the pings themselves. */
+  touchLastSeen(id: string, atMs: number): Promise<void>
+  listByBranch(branchId: string): Promise<TrackerDeviceRecord[]>
 }
 
 /**
@@ -2831,6 +2894,7 @@ export interface GpsPingRepo {
  */
 export interface ShiftCloseTransactionDeps {
   shifts: ShiftRepo
+  breaks: ShiftBreakRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
@@ -2877,6 +2941,7 @@ export interface Deps {
   sessions: SessionRepo
   driverAccounts: DriverAccountProvisioningRepo
   shifts: ShiftRepo
+  breaks: ShiftBreakRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   assignments: AssignmentRepo
   batteryReadings: BatteryReadingRepo
@@ -2937,6 +3002,7 @@ export interface Deps {
   /** Revisioned, server-owned recovery state for the driver's closing workflow. */
   closeDrafts: CloseDraftRepo
   gps: GpsPingRepo
+  trackerDevices: TrackerDeviceRepo
   /** Atomic close-boundary/review writer; callback work is database-only. */
   closeUnitOfWork: ShiftCloseUnitOfWork
 }

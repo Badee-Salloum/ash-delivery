@@ -11,6 +11,7 @@ import { LiveShifts } from './screens/LiveShifts.tsx'
 import { CompletedShifts } from './screens/CompletedShifts.tsx'
 import { PreapprovedShifts } from './screens/PreapprovedShifts.tsx'
 import { GpsLive } from './screens/GpsLive.tsx'
+import { RecordedPaths } from './screens/RecordedPaths.tsx'
 import { Approval } from './screens/Approval.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { Fleet } from './screens/Fleet.tsx'
@@ -193,8 +194,11 @@ export function AdminApp(): ReactNode {
   const canManageCompanyFund = session.roleKey === 'system_admin' || session.roleKey === 'general_manager'
   const canSeeTreasuryMovements =
     session.roleKey === 'system_admin' || session.roleKey === 'general_manager' || session.roleKey === 'branch_manager'
-  // gps.view — the same two roles; the branch manager no longer has it.
-  const canSeeMap = canManageUsers
+  // gps.view — the branch manager IS the dispatcher and sees his own branch's live tracking (owner
+  // 2026-09-08, restoring SRS §3 «التتبع الحي GPS ✓ فرعه»), alongside the GM and system admin. The
+  // API scopes him to his branch; this just stops hiding the map he is entitled to.
+  const canSeeMap =
+    session.roleKey === 'system_admin' || session.roleKey === 'general_manager' || session.roleKey === 'branch_manager'
   /*
    * Grouped by FUNCTION, and every item carries a glyph.
    *
@@ -220,6 +224,7 @@ export function AdminApp(): ReactNode {
     // The live map is gps.view — the GM and the system admin only. The branch manager runs his
     // branch from the shift screens. (The API enforces it too; this only stops offering a 403.)
     ...(canSeeMap ? [{ key: 'gpsLive' as const, label: t.gpsLive.title, icon: 'map' as const }] : []),
+    ...(canSeeMap ? [{ key: 'recordedPaths' as const, label: t.recordedPaths.title, icon: 'map' as const }] : []),
     { key: 'fleet', label: `${t.fleet.drivers} / ${t.fleet.vehicles}`, icon: 'bike', group: 'fleet' },
     { key: 'treasury', label: t.treasury.branchTreasury, icon: 'treasury', group: 'money' },
     ...(canSeeTreasuryMovements
@@ -453,6 +458,8 @@ export function AdminApp(): ReactNode {
           <PreapprovedShifts />
         ) : section === 'gpsLive' ? (
           <GpsLive />
+        ) : section === 'recordedPaths' && canSeeMap ? (
+          <RecordedPaths key={mountKey} initial={liveParams.current} />
         ) : section === 'fleet' ? (
           <Fleet />
         ) : section === 'fleetConfig' ? (

@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { formatDateTimeSeconds, type GpsLiveDriver } from '@ash/client'
+import { formatDateTimeSeconds, type GpsLiveDriver, type GpsSilentShift } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { type GpsFreshness, gpsAgeMinutes, gpsFreshness } from '../gps-freshness.ts'
@@ -30,6 +30,7 @@ const MARKER_OPACITY: Record<GpsFreshness, number> = { fresh: 0.9, recent: 0.75,
 export function GpsLive(): ReactNode {
   const { api, t, lang, theme, branchId } = useApp()
   const [drivers, setDrivers] = useState<GpsLiveDriver[]>([])
+  const [silent, setSilent] = useState<GpsSilentShift[]>([])
   const [names, setNames] = useState<Record<string, DriverLite>>({})
   const [error, setError] = useState<string | null>(null)
 
@@ -41,7 +42,10 @@ export function GpsLive(): ReactNode {
     setError(null)
     void api
       .gpsLive()
-      .then((r) => setDrivers(r.drivers))
+      .then((r) => {
+        setDrivers(r.drivers)
+        setSilent(r.silent)
+      })
       .catch((e: { error?: string }) => setError(e.error ?? 'error'))
     void api
       .get<{ drivers: DriverLite[] }>('/drivers')
@@ -110,6 +114,19 @@ export function GpsLive(): ReactNode {
         {error ? <p className="mb-2 text-sm text-red-600">{explainError(error, t)}</p> : null}
         <div ref={mapDiv} className="h-[60vh] w-full rounded-lg" />
       </Card>
+      {silent.length > 0 ? (
+        <Card title={t.gpsLive.silentTitle}>
+          <p className="mb-2 text-sm text-ink-muted">{t.gpsLive.silentHint}</p>
+          <ul className="flex flex-col gap-1 text-sm">
+            {silent.map((s) => (
+              <li key={s.shiftId} className="flex flex-wrap items-center gap-2 border-b border-line-subtle py-1 last:border-0">
+                <span className="font-medium">{driverName(s.driverId)}</span>
+                <Badge tone="danger">{t.gpsLive.silentFor.replace('{n}', String(s.silentMinutes))}</Badge>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ) : null}
       <Card title={t.gpsLive.drivers}>
         {drivers.length === 0 ? (
           <p className="py-6 text-center text-slate-600">{t.gpsLive.none}</p>

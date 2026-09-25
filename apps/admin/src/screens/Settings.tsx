@@ -12,6 +12,7 @@ interface GeneralSettings {
   receiptCeilingMinor: string | null
   kwhPriceMinor: string | null
   goLiveBusinessDate: string | null
+  breakLimitMinutes: number
 }
 
 /**
@@ -148,7 +149,7 @@ function GeneralCard({
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
 
-  const save = async (body: { receiptCeilingMinor?: string; kwhPriceMinor?: string }): Promise<void> => {
+  const save = async (body: { receiptCeilingMinor?: string; kwhPriceMinor?: string; breakLimitMinutes?: number }): Promise<void> => {
     setErr(null)
     setMsg(null)
     try {
@@ -178,10 +179,61 @@ function GeneralCard({
           onSave={(v) => save({ kwhPriceMinor: v })}
           saveLabel={t.common.save}
         />
+        <BreakLimitSetting
+          current={general.breakLimitMinutes ?? 60}
+          canEdit={canEdit}
+          onSave={(value) => save({ breakLimitMinutes: value })}
+        />
       </div>
       {msg ? <p className="mt-3 text-sm font-medium text-emerald-700">{msg}</p> : null}
       {err ? <p className="mt-3 text-sm font-medium text-red-600">{explainError(err, t)}</p> : null}
     </Card>
+  )
+}
+
+function BreakLimitSetting({
+  current,
+  canEdit,
+  onSave,
+}: {
+  current: number
+  canEdit: boolean
+  onSave(value: number): void | Promise<void>
+}): ReactNode {
+  const { t } = useApp()
+  const [text, setText] = useState('')
+  const [invalid, setInvalid] = useState(false)
+  useEffect(() => { setText(''); setInvalid(false) }, [current])
+  const value = Number(text)
+  const valid = Number.isInteger(value) && value >= 1 && value <= 1440
+  return (
+    <div className="rounded-lg border border-line-subtle p-3">
+      <div className="text-xs font-semibold text-ink-muted">{t.settings.breakLimit}</div>
+      <div className="mt-0.5 text-xs text-ink-secondary">{t.settings.breakLimitHint}</div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <span className="num text-lg font-bold">{current} {t.settings.minutes}</span>
+        {canEdit ? (
+          <>
+            <TextInput
+              type="number"
+              min={1}
+              max={1440}
+              step={1}
+              inputMode="numeric"
+              value={text}
+              onChange={(event) => { setText(event.target.value); setInvalid(false) }}
+              className="w-28"
+              aria-label={t.settings.breakLimit}
+            />
+            <Button variant="ghost" disabled={text.trim() === ''} onClick={() => {
+              if (!valid) { setInvalid(true); return }
+              void onSave(value)
+            }}>{t.common.save}</Button>
+          </>
+        ) : null}
+      </div>
+      {invalid ? <p role="alert" className="mt-1 text-xs text-danger-ink">{t.settings.breakLimitInvalid}</p> : null}
+    </div>
   )
 }
 

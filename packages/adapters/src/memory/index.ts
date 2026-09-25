@@ -46,6 +46,8 @@ import type {
   ShiftCloseUnitOfWorkInput,
   GpsPingRecord,
   GpsPingRepo,
+  TrackerDeviceRecord,
+  TrackerDeviceRepo,
   OrderPointRecord,
   OperationBatch,
   OperationBatchRepo,
@@ -113,6 +115,7 @@ import { MemoryReceivableEventRepo } from './receivables.ts'
 import { MemoryLedgerRangeSource } from './ledger-range.ts'
 import { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
 import { MemoryCompanyFinanceRepo } from './company-finance.ts'
+import { MemoryShiftBreakRepo } from './breaks.ts'
 
 export { MemoryBlobStore, MemoryMediaRepo } from './media.ts'
 export { MemoryOcrReadRepo, MemoryOcrReader, ScriptedOcrReader } from '../ocr/memory.ts'
@@ -128,6 +131,7 @@ export { MemoryReceivableEventRepo } from './receivables.ts'
 export { MemoryLedgerRangeSource } from './ledger-range.ts'
 export { MemoryCompanyLedgerRepo, MemoryCompanyLedgerSource, MemoryFinancialLocks } from './company.ts'
 export { MemoryCompanyFinanceRepo } from './company-finance.ts'
+export { MemoryShiftBreakRepo } from './breaks.ts'
 
 /**
  * In-memory implementations of every port.
@@ -2241,15 +2245,28 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
     const wanted = new Set(driverIds)
     const latest = new Map<string, GpsPingRecord>()
     for (const r of this.rows) {
-      if (r.branchId !== branchId || !wanted.has(r.driverId) || r.receivedAtMs < sinceMs) continue
+      if (r.branchId !== branchId || !wanted.has(r.driverId) || r.capturedAtMs < sinceMs) continue
       const seen = latest.get(r.driverId)
-      // Tie-break on id (insertion order) so a fixed clock still resolves the newest — the Pg repo
-      // does the same with `ORDER BY received_at DESC, id DESC`.
-      if (!seen || r.receivedAtMs > seen.receivedAtMs || (r.receivedAtMs === seen.receivedAtMs && r.id > seen.id)) {
+      // Tie-break on id (insertion order), matching the PostgreSQL capture-time query.
+      if (!seen || r.capturedAtMs > seen.capturedAtMs || (r.capturedAtMs === seen.capturedAtMs && r.id > seen.id)) {
         latest.set(r.driverId, r)
       }
     }
     return [...latest.values()].map((r) => structuredClone(r))
+  }
+
+  async latestForShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]> {
+    const wanted = new Set(shiftIds)
+    const latest = new Map<string, GpsPingRecord>()
+    for (const row of this.rows) {
+      if (!wanted.has(row.shiftId)) continue
+      const previous = latest.get(row.shiftId)
+      if (!previous || row.capturedAtMs > previous.capturedAtMs ||
+        (row.capturedAtMs === previous.capturedAtMs && row.id > previous.id)) {
+        latest.set(row.shiftId, row)
+      }
+    }
+    return [...latest.values()].map((row) => structuredClone(row))
   }
 
   async listForShift(shiftId: string): Promise<GpsPingRecord[]> {
@@ -2261,8 +2278,72 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
       .map((r) => structuredClone(r))
   }
 
+  async listByShiftIds(shiftIds: readonly string[]): Promise<GpsPingRecord[]> {
+    const wanted = new Set(shiftIds)
+    return this.rows
+      .filter((r) => wanted.has(r.shiftId))
+      .sort((a, b) => a.shiftId.localeCompare(b.shiftId) || a.capturedAtMs - b.capturedAtMs || a.id - b.id)
+      .map((r) => structuredClone(r))
+  }
+
   async countForShift(shiftId: string): Promise<number> {
     return this.rows.filter((r) => r.shiftId === shiftId).length
+  }
+}
+
+/** The hardware tracker registry (SRS K-1 infrastructure); mirrors the SQL uniqueness rules. */
+export class MemoryTrackerDeviceRepo implements TrackerDeviceRepo {
+  readonly rows = new Map<string, TrackerDeviceRecord>()
+
+  // Mirror the partial unique index: at most one ACTIVE device may name a given bike.
+  private assertActiveVehicleFree(vehicleId: string | null, active: boolean, selfId: string): void {
+    if (vehicleId === null || !active) return
+    for (const d of this.rows.values()) {
+      if (d.id !== selfId && d.active && d.vehicleId === vehicleId) {
+        throw Object.assign(new Error(`vehicle ${vehicleId} already has an active tracker`), { code: 'ACTIVE_VEHICLE_TAKEN' })
+      }
+    }
+  }
+
+  async register(device: TrackerDeviceRecord): Promise<void> {
+    for (const d of this.rows.values()) {
+      if (d.imei === device.imei) throw Object.assign(new Error(`duplicate imei ${device.imei}`), { code: 'DUPLICATE_IMEI' })
+    }
+    this.assertActiveVehicleFree(device.vehicleId, device.active, device.id)
+    this.rows.set(device.id, { ...device })
+  }
+
+  async findByImei(imei: string): Promise<TrackerDeviceRecord | null> {
+    for (const d of this.rows.values()) if (d.imei === imei) return { ...d }
+    return null
+  }
+
+  async findActiveByImei(imei: string): Promise<TrackerDeviceRecord | null> {
+    for (const d of this.rows.values()) if (d.imei === imei && d.active) return { ...d }
+    return null
+  }
+
+  async bindToVehicle(id: string, vehicleId: string | null, _actorId: string): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.assertActiveVehicleFree(vehicleId, d.active, id)
+    this.rows.set(id, { ...d, vehicleId })
+  }
+
+  async deactivate(id: string, _actorId: string): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.rows.set(id, { ...d, active: false })
+  }
+
+  async touchLastSeen(id: string, atMs: number): Promise<void> {
+    const d = this.rows.get(id)
+    if (!d) return
+    this.rows.set(id, { ...d, lastSeenAtMs: atMs })
+  }
+
+  async listByBranch(branchId: string): Promise<TrackerDeviceRecord[]> {
+    return [...this.rows.values()].filter((d) => d.branchId === branchId).map((d) => ({ ...d }))
   }
 }
 
@@ -2309,6 +2390,7 @@ export interface MemoryDeps extends Deps {
   users: MemoryUserRepo
   driverAccounts: MemoryDriverAccountProvisioningRepo
   shifts: MemoryShiftRepo
+  breaks: MemoryShiftBreakRepo
   orders: MemoryOrderRepo
   cashDeductions: MemoryCashDeductionRepo
   operationWindows: MemoryOperationWindowRepo
@@ -2334,6 +2416,7 @@ export interface MemoryDeps extends Deps {
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
+  trackerDevices: MemoryTrackerDeviceRepo
 }
 
 /** In-memory parity for ledger-backed financial commands. */
@@ -2432,6 +2515,7 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
 export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   private readonly deps: ShiftCloseTransactionDeps
   private readonly shifts: MemoryShiftRepo
+  private readonly breaks: MemoryShiftBreakRepo
   private readonly orders: MemoryOrderRepo
   private readonly deductions: MemoryCashDeductionRepo
   private readonly movements: MemoryWalletMovementRepo
@@ -2450,6 +2534,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   constructor(
     deps: ShiftCloseTransactionDeps,
     shifts: MemoryShiftRepo,
+    breaks: MemoryShiftBreakRepo,
     orders: MemoryOrderRepo,
     deductions: MemoryCashDeductionRepo,
     movements: MemoryWalletMovementRepo,
@@ -2467,6 +2552,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   ) {
     this.deps = deps
     this.shifts = shifts
+    this.breaks = breaks
     this.orders = orders
     this.deductions = deductions
     this.movements = movements
@@ -2489,6 +2575,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
   ): Promise<T> {
     return this.gate.run(async () => {
       const shiftSnapshot = new Map([...this.shifts.rows].map(([id, row]) => [id, structuredClone(row)]))
+      const breakSnapshot = new Map([...this.breaks.rows].map(([id, row]) => [id, structuredClone(row)]))
       const orderSnapshot = new Map([...this.orders.rows].map(([id, row]) => [id, structuredClone(row)]))
       const deductionSnapshot = new Map([...this.deductions.rows].map(([id, row]) => [id, structuredClone(row)]))
       const movementSnapshot = new Map([...this.movements.rows].map(([id, row]) => [id, structuredClone(row)]))
@@ -2513,6 +2600,7 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
         return await work(this.deps)
       } catch (error) {
         restoreMap(this.shifts.rows, shiftSnapshot)
+        restoreMap(this.breaks.rows, breakSnapshot)
         restoreMap(this.orders.rows, orderSnapshot)
         restoreMap(this.deductions.rows, deductionSnapshot)
         restoreMap(this.movements.rows, movementSnapshot)
@@ -2538,6 +2626,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const ledger = new MemoryLedgerRepo(() => clock.nowMs())
   const media = new MemoryMediaRepo()
   const shifts = new MemoryShiftRepo(media)
+  const breaks = new MemoryShiftBreakRepo()
   const orders = new MemoryOrderRepo()
   const cashDeductions = new MemoryCashDeductionRepo()
   const movements = new MemoryWalletMovementRepo()
@@ -2609,6 +2698,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const operationRemovals = new MemoryOperationRemovalRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
+    breaks,
     preapprovedShiftRules,
     orders,
     cashDeductions,
@@ -2631,6 +2721,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const closeUnitOfWork = new MemoryShiftCloseUnitOfWork(
     transactionDeps,
     shifts,
+    breaks,
     orders,
     cashDeductions,
     movements,
@@ -2655,6 +2746,7 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     sessions,
     driverAccounts,
     shifts,
+    breaks,
     assignments,
     preapprovedShiftRules,
     batteryReadings,
@@ -2706,5 +2798,6 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     settlements,
     closeDrafts,
     gps: new MemoryGpsPingRepo(),
+    trackerDevices: new MemoryTrackerDeviceRepo(),
   }
 }

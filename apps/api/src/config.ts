@@ -33,6 +33,17 @@ const schema = z.object({
   /** Emergency kill switch for the one public account-creation path. */
   DRIVER_SELF_REGISTRATION_ENABLED: explicitBoolean,
 
+  /**
+   * The hardware-tracker ingest seam (SRS K-1). OFF by default and until the first device is
+   * fitted: no device exists yet, and an open ingest port with no token is an attack surface. The
+   * gateway authenticates with `TRACKER_GATEWAY_TOKEN`, which must be set for ingest to accept.
+   */
+  TRACKER_INGEST_ENABLED: z
+    .union([z.boolean(), z.enum(['true', 'false'])])
+    .default(false)
+    .transform((value) => value === true || value === 'true'),
+  TRACKER_GATEWAY_TOKEN: z.string().min(16).optional(),
+
   /** bcrypt cost. SRS §7 mandates bcrypt; 12 is the current sane floor. */
   BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
 

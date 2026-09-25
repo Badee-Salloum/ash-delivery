@@ -16,6 +16,7 @@ import type {
   DraftMovement,
   DraftOrder,
   EvidenceUploadResponse,
+  BreakSummary,
 } from '@ash/client'
 import {
   allProblems,
@@ -24,6 +25,7 @@ import {
   cashDeductionsAreValid,
   checkOdometer,
   clientUuid,
+  damascusParts,
   applyCloseDraftOperationsOverlay,
   closeDraftEditableFingerprint,
   closeDraftOperations,
@@ -696,6 +698,24 @@ export function ShiftFlow({
   const toast = useToast()
   const [phase, setPhase] = useState<Phase>(resume ? (PHASE_FOR[resume.state] ?? 'start') : 'start')
   const [serverState, setServerState] = useState<string | null>(resume?.state ?? null)
+  const [breakSummary, setBreakSummary] = useState<BreakSummary | null>(null)
+  const [breakBusy, setBreakBusy] = useState(false)
+  const [breakError, setBreakError] = useState<string | null>(null)
+  const [breakClock, setBreakClock] = useState(() => Date.now())
+  const pendingBreakId = useRef<string | null>(null)
+  const breakReadAt = useRef(Date.now())
+  const breakGeneration = useRef(0)
+  const lastBreakServerNow = useRef(-Infinity)
+  const receiveBreakSummary = useCallback((summary: BreakSummary | undefined, generation: number) => {
+    if (!summary || generation !== breakGeneration.current || summary.serverNowMs < lastBreakServerNow.current) return
+    lastBreakServerNow.current = summary.serverNowMs
+    breakReadAt.current = Date.now()
+    setBreakClock(breakReadAt.current)
+    setBreakSummary(summary)
+    if (pendingBreakId.current && summary.breaks.some((record) => record.id === pendingBreakId.current)) {
+      pendingBreakId.current = null
+    }
+  }, [])
   // The fitted set can change mid-shift when the driver swaps a pack, so it lives in state: the
   // swap panel hands back the new fitment and the close screen then reads THAT, not the old pack.
   const [fitted, setFitted] = useState<readonly FittedBattery[]>(batteries)
@@ -722,6 +742,50 @@ export function ShiftFlow({
   useEffect(() => {
     if (resume) setPhase(PHASE_FOR[resume.state] ?? 'start')
   }, [resume?.id, resume?.state])
+
+  useEffect(() => {
+    breakGeneration.current += 1
+    lastBreakServerNow.current = -Infinity
+    setBreakSummary(null)
+    setBreakError(null)
+    pendingBreakId.current = null
+  }, [activeDraftShiftId])
+
+  useEffect(() => {
+    if (phase !== 'orders' || !shift) return
+    const timer = setInterval(() => setBreakClock(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [phase, shift?.id])
+
+  useEffect(() => {
+    if (phase !== 'orders' || !shift) return
+    const generation = breakGeneration.current
+    void api.shiftBreaks(shift.id).then((summary) => receiveBreakSummary(summary, generation)).catch(() => undefined)
+  }, [api, phase, shift?.id, receiveBreakSummary])
+
+  const changeBreak = async (action: 'start' | 'resume'): Promise<void> => {
+    if (!shift || breakBusy) return
+    const breakId = action === 'start'
+      ? (pendingBreakId.current ?? (pendingBreakId.current = clientUuid()))
+      : breakSummary?.activeBreak?.id
+    if (!breakId) return
+    const generation = ++breakGeneration.current
+    setBreakBusy(true)
+    setBreakError(null)
+    try {
+      const summary = action === 'start'
+        ? await api.startShiftBreak(shift.id, breakId)
+        : await api.resumeShiftWork(shift.id, breakId)
+      receiveBreakSummary(summary, generation)
+      pendingBreakId.current = null
+    } catch (error) {
+      setBreakError((error as { error?: string }).error ?? 'error')
+      // A request may have committed even if its response was lost. The next tap uses the same ID.
+      void api.shiftBreaks(shift.id).then((summary) => receiveBreakSummary(summary, generation)).catch(() => undefined)
+    } finally {
+      setBreakBusy(false)
+    }
+  }
 
   /** Restore once per shift, and remove the prior shift's scalar draft when identity changes. */
   useEffect(() => {
@@ -1034,14 +1098,18 @@ export function ShiftFlow({
     const watching = phase === 'orders' || phase === 'end' || phase === 'suspended'
     if (!watching || !shift) return
     const timer = setInterval(() => {
+      const generation = breakGeneration.current
       void api
         .shiftState(shift.id)
-        .then((st) => applyServerState(st.state))
+        .then((st) => {
+          receiveBreakSummary(st.break, generation)
+          applyServerState(st.state)
+        })
         // Swallowed: a dropped poll is a network blip, and the offline banner already says so.
         .catch(() => undefined)
     }, 20_000)
     return () => clearInterval(timer)
-  }, [api, phase, shift, applyServerState])
+  }, [api, phase, shift, applyServerState, receiveBreakSummary])
 
   /**
    * Keep the manager-review screen alive. A rephoto changes the SAME shift from pending_review back
@@ -1096,9 +1164,11 @@ export function ShiftFlow({
    */
   useEffect(() => {
     if (!resume) return
+    const generation = breakGeneration.current
     void api
       .shiftState(resume.id)
       .then((st) => {
+        receiveBreakSummary(st.break, generation)
         setStartRestore({
           odometerKm: st.startPackage.odometerKm,
           mediaSlots: st.startPackage.mediaSlots,
@@ -1229,7 +1299,7 @@ export function ShiftFlow({
         setResumeFailed(true)
         setLoaded(true)
       })
-  }, [api, resume, reloadKey, applyServerState, showManagerReturnReason])
+  }, [api, resume, reloadKey, applyServerState, showManagerReturnReason, receiveBreakSummary])
 
   /**
    * The end screen never accepts evidence until its revisioned server draft is loaded.
@@ -1308,11 +1378,23 @@ export function ShiftFlow({
   // anyway, and it stops a long shift being punctuated by typing. What he needs while out is the
   // battery, a way to flag an incident, and the beacon.
   if (phase === 'orders' && shift) {
+    const activeBreak = breakSummary?.activeBreak ?? null
+    const serverNow = breakSummary
+      ? breakSummary.serverNowMs + Math.max(0, breakClock - breakReadAt.current)
+      : breakClock
+    const activeElapsed = activeBreak ? Math.max(0, serverNow - activeBreak.startedAtMs) : 0
+    const totalBreakMs = (breakSummary?.totalBreakMs ?? 0) + (activeBreak ? Math.max(0, breakClock - breakReadAt.current) : 0)
+    const breakOverMs = activeBreak
+      ? Math.max(breakSummary?.overLimitMs ?? 0, activeBreak.consumedBeforeMs + activeElapsed - activeBreak.limitMinutes * 60_000)
+      : (breakSummary?.overLimitMs ?? 0)
+    const formatBreakTime = (ms: number): number => Math.floor(ms / 60_000)
+    const formatBreakOver = (ms: number): number => Math.ceil(ms / 60_000)
+    const formatBreakClock = (ms: number): string => damascusParts(new Date(ms)).time
     return (
       <Screen
         title={t.shift.running}
         footer={
-          <Button variant="success" onClick={() => setPhase('end')}>
+          <Button variant="success" disabled={Boolean(activeBreak) || breakBusy || breakSummary === null} onClick={() => setPhase('end')}>
             {t.shift.finishShift}
           </Button>
         }
@@ -1331,6 +1413,39 @@ export function ShiftFlow({
         </Card>
         <Card>
           <p className="text-center text-sm text-slate-600">{t.shift.runningHint}</p>
+        </Card>
+        <Card>
+          <h2 className="mb-2 font-semibold">{t.shift.breakTitle}</h2>
+          <div className="flex flex-col gap-2 text-sm">
+            {activeBreak ? <p className="font-semibold text-warning-ink">{t.shift.onBreak}</p> : null}
+            <p className="text-ink-secondary">{t.shift.breakLimit.replace('{minutes}', String(activeBreak?.limitMinutes ?? breakSummary?.limitMinutes ?? 60))}</p>
+            <p className="font-semibold text-ink">{t.shift.breakUsed.replace('{minutes}', String(formatBreakTime(totalBreakMs)))}</p>
+            {breakOverMs > 0 ? (
+              <p role="alert" className="rounded-lg border border-danger-line bg-danger-surface p-2 font-bold text-danger-ink">
+                {t.shift.breakOver.replace('{minutes}', String(formatBreakOver(breakOverMs)))}
+              </p>
+            ) : null}
+            {breakSummary === null ? <p className="text-ink-secondary">{t.common.loading}</p> : (
+              <Button disabled={breakBusy} onClick={() => void changeBreak(activeBreak ? 'resume' : 'start')}>
+                {breakBusy ? t.common.loading : activeBreak ? t.shift.resumeWork : t.shift.startBreak}
+              </Button>
+            )}
+            {breakError ? <p role="alert" className="text-danger-ink">{t.shift.breakActionFailed}</p> : null}
+            {breakSummary && breakSummary.breaks.length > 0 ? (
+              <div className="mt-2 border-t border-line-subtle pt-2">
+                <p className="font-semibold">{t.shift.breakHistory}</p>
+                <ol className="mt-1 flex flex-col gap-1">
+                  {breakSummary.breaks.map((record) => (
+                    <li key={record.id} className="flex flex-wrap gap-x-2 text-ink-secondary">
+                      <span className="num">{formatBreakClock(record.startedAtMs)} – {record.endedAtMs === null ? t.shift.breakOpen : formatBreakClock(record.endedAtMs)}</span>
+                      {record.endReason && record.endReason !== 'driver_resumed' ? <span>{t.shift.breakEndedByManager}</span> : null}
+                      {record.overLimitMs > 0 ? <strong className="text-danger-ink">{t.shift.breakOver.replace('{minutes}', String(formatBreakOver(record.overLimitMs)))}</strong> : null}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            ) : null}
+          </div>
         </Card>
         {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
             charged spare; both packs' readings are captured and the bike is re-fitted. */}

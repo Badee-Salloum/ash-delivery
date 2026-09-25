@@ -54,6 +54,8 @@ import {
   PgVehicleEventRepo,
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
+import { PgTrackerDeviceRepo } from '../src/repos-tracker.ts'
+import { PgShiftBreakRepo } from '../src/repos-breaks.ts'
 
 /**
  * The PostgreSQL adapters run the SAME conformance suite as the in-memory ones.
@@ -218,6 +220,7 @@ if (!DATABASE_URL) {
         sessions: new PgSessionRepo(pool),
         driverAccounts: new PgDriverAccountProvisioningRepo(pool),
         shifts: new PgShiftRepo(pool),
+        breaks: new PgShiftBreakRepo(pool),
         preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
         batteryReadings: new PgBatteryReadingRepo(pool),
         batterySwaps: new PgBatterySwapRepo(pool),
@@ -264,6 +267,7 @@ if (!DATABASE_URL) {
         settlements: new PgShiftSettlementRepo(pool),
         closeDrafts: new PgCloseDraftRepo(pool),
         gps: new PgGpsPingRepo(pool),
+        trackerDevices: new PgTrackerDeviceRepo(pool),
         closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }
     }

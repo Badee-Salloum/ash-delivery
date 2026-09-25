@@ -912,6 +912,18 @@ export const gpsBatchRequest = z.object({
  */
 export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
 
+/**
+ * What the hardware-tracker gateway posts (SRS K-1 infrastructure; disabled by default).
+ *
+ * The device is named by its IMEI and authenticated by the gateway's own secret, not a driver
+ * cookie. `source` is never on the wire — the route forces `'tracker'`, so a client can never
+ * claim to be a bike unit.
+ */
+export const trackerIngestRequest = z.object({
+  deviceImei: z.string().regex(/^[0-9]{10,20}$/),
+  fixes: z.array(gpsPingRequest).min(1).max(500),
+})
+
 // ── Fleet (SRS B) ─────────────────────────────────────────────────────────────────────────
 
 /** A driver's profile fields (B-1). `nationalId` is plaintext in transit (HTTPS); stored encrypted. */
@@ -1533,6 +1545,8 @@ export function serializeFxRateNumber(sypMinorPerUsd: bigint): number {
  * precision through JSON. Every field is optional: only what is sent changes.
  */
 export const updateSettingsRequest = z.object({
+  /** One global cumulative allowance for every driver's shift. */
+  breakLimitMinutes: z.number().int().min(1).max(1440).optional(),
   /** «سقف الإيصال» — above this an expense/manual entry needs a photographed receipt (G-3 / س52). */
   receiptCeilingMinor: moneySchema.optional(),
   /** «سعر الكيلوواط-ساعة» — fixed kWh price for charging cost (G-2 / س64). */

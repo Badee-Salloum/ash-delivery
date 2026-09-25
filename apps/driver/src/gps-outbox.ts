@@ -22,6 +22,9 @@
 const DB_NAME = 'ash-driver-gps'
 const DB_VERSION = 1
 const STORE = 'outbox'
+// Mirror this process's fixes in case IndexedDB fails at write OR at read time. The native Android
+// service has its own on-disk queue; this covers browsers with blocked or intermittently broken IDB.
+const memoryOutbox = new Map<string, QueuedFix>()
 
 /**
  * How many fixes may wait at once.
@@ -98,23 +101,31 @@ export function fixKey(shiftId: string, capturedAtMs: number): string {
   return `${encodeURIComponent(shiftId)}:${capturedAtMs}`
 }
 
-/** Everything buffered. An unavailable store reads as empty, never as an error. */
+/** Everything buffered, including fixes whose IndexedDB write failed. */
 async function readAll(): Promise<QueuedFix[]> {
   const all = await withStore<QueuedFix[]>('readonly', (store, resolve, reject) => {
     const request = store.getAll()
     request.onsuccess = () => resolve((request.result as QueuedFix[]) ?? [])
     request.onerror = () => reject(request.error ?? new Error('indexeddb_getall_failed'))
   })
-  return all ?? []
+  return [...new Map([...(all ?? []), ...memoryOutbox.values()].map((fix) => [fix.key, fix])).values()]
 }
 
 /** Buffer one fix. Keyed by the server's natural key, so enqueuing the same instant twice is free. */
 export async function enqueueFix(fix: Omit<QueuedFix, 'key'>): Promise<void> {
+  const queued = { ...fix, key: fixKey(fix.shiftId, fix.capturedAtMs) } satisfies QueuedFix
+  // Hold the fix before an async open/transaction: a failed or blocked IDB write cannot eat it.
+  memoryOutbox.set(queued.key, queued)
   await withStore<void>('readwrite', (store, resolve, reject) => {
-    const request = store.put({ ...fix, key: fixKey(fix.shiftId, fix.capturedAtMs) } satisfies QueuedFix)
+    const request = store.put(queued)
     request.onsuccess = () => resolve(undefined)
     request.onerror = () => reject(request.error ?? new Error('indexeddb_put_failed'))
   })
+  // Match the disk cap for the fallback, where no transaction can run a later sweep.
+  if (memoryOutbox.size > GPS_OUTBOX_MAX) {
+    const oldest = [...memoryOutbox.values()].sort((a, b) => a.capturedAtMs - b.capturedAtMs)
+    for (const stale of oldest.slice(0, memoryOutbox.size - GPS_OUTBOX_MAX)) memoryOutbox.delete(stale.key)
+  }
 }
 
 /**
@@ -143,6 +154,7 @@ export async function peekFixes(shiftId: string, limit: number): Promise<QueuedF
 /** Forget fixes the server has taken. Called only on a 2xx, or on the 409 that ends a shift. */
 export async function dropFixes(keys: readonly string[]): Promise<void> {
   if (keys.length === 0) return
+  for (const key of keys) memoryOutbox.delete(key)
   await withStore<void>('readwrite', (store, resolve, reject) => {
     let left = keys.length
     for (const key of keys) {

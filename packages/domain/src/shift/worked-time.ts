@@ -104,7 +104,7 @@ export const OWNER_SHIFT_HOURS: Readonly<Record<ShiftSlot, Readonly<{ start: num
   })
 
 export interface WorkedTime {
-  /** Minutes from the driver's confirmation to his close submission. `null` while the shift is live. */
+  /** Net minutes from confirmation to close, after recorded breaks. `null` while live. */
   readonly minutes: number | null
   /** `full` when closed and at least ten hours long; otherwise the slot; `unknown` while live. */
   readonly pattern: ShiftPattern
@@ -165,6 +165,7 @@ export function workedTime(
   endedAtMs: number | null,
   offsetMinutes: number = DAMASCUS_OFFSET_MINUTES,
   dayStartMinutes: number = DAY_START_MINUTES,
+  breakDurationMs = 0,
 ): WorkedTime {
   if (startedAtMs === null) return { minutes: null, pattern: 'unknown', slot: null, abandoned: false }
 
@@ -173,7 +174,7 @@ export function workedTime(
 
   // The same rounded figure the screens print, so the badge and the duration beside it can never
   // disagree about which side of ten hours a shift fell.
-  const minutes = Math.max(0, Math.round((endedAtMs - startedAtMs) / 60_000))
+  const minutes = Math.max(0, Math.round((endedAtMs - startedAtMs - Math.max(0, breakDurationMs)) / 60_000))
   const abandoned = minutes > ABANDONED_AFTER_MINUTES
   // A forgotten close is not a double: it keeps the slot it started in, and is never judged.
   if (abandoned) return { minutes, pattern: slot, slot, abandoned }

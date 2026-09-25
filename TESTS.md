@@ -7,6 +7,18 @@ A CI check fails the build when a test named here is renamed or deleted, so this
 
 **Legend:** ✅ implemented and green · ⚠ written but never executed · 🔜 planned, milestone named.
 
+## 2026-09-21 — recorded GPS path per order, and tracker infrastructure
+
+| Gate | Named test | Result |
+| --- | --- | --- |
+| The per-order slice is start-owned, tiles the trail, never segments an untimed order, and matches a brute-force oracle | `domain/gps/segment.test.ts` (12 tests, incl. 4 fast-check properties) | ✅ |
+| `GET /shifts/:id/gps/path` returns the pings and the segmentation, gps.view only, 404 on an unknown shift | `api/gps.test.ts` — *recorded path — a segment per order by printed time* | ✅ |
+| A tracked live shift with no fix past the grace is flagged silent, and clears on a fix | `api/gps.test.ts` — *flags a tracked shift whose tracker has gone silent…* | ✅ |
+| The device registry enforces IMEI uniqueness and one active device per bike on memory and PostgreSQL | `testkit/conformance.ts` — *tracker devices* (4 cases) | ✅ memory + PostgreSQL 17 |
+| Registry routes are fleet.manage; the ingest seam is 404 while disabled, token-guarded, resolves the bike's live shift and forces source=tracker | `api/tracker.test.ts` (7 tests) | ✅ |
+| The ingest route is the only new public route, and it is deliberately public | `api/auth-rbac.test.ts` — *only the routes meant to be public are public* | ✅ |
+| One reusable map is token-painted and mounted in the review overlay, vehicle history and the standalone screen | `admin/shift-path-map.test.ts` (7 source pins) | ✅ |
+
 ## 2026-09-19 design-system unification — verification and frontend production deployment complete
 
 This UI-only slice was verified independently of the earlier production releases below, then deployed

@@ -292,6 +292,27 @@ export interface CloseDraftAttachmentHistoryItem {
   isCurrent: boolean
 }
 
+export interface ShiftBreakRecord {
+  id: string
+  shiftId: string
+  startedAtMs: number
+  endedAtMs: number | null
+  endReason: string | null
+  /** The site-wide limit at the time this break started. */
+  limitMinutes: number
+  consumedBeforeMs: number
+  overLimitMs: number
+}
+
+export interface BreakSummary {
+  breaks: ShiftBreakRecord[]
+  activeBreak: ShiftBreakRecord | null
+  totalBreakMs: number
+  limitMinutes: number
+  overLimitMs: number
+  serverNowMs: number
+}
+
 /** Everything the driver's app needs to pick a half-finished shift back up where he left it. */
 export interface ShiftStateView {
   id: string
@@ -303,6 +324,7 @@ export interface ShiftStateView {
   /** The manager-approved lower edge and driver-submitted upper edge of the operation window. */
   openApprovedAt: string | null
   submittedAt: string | null
+  break?: BreakSummary
   startPackage: {
     odometerKm: number | null
     batteryPercent: number | null
@@ -513,6 +535,70 @@ export interface GpsLiveDriver {
   accuracyM: number | null
   capturedAt: string
   receivedAt: string
+}
+
+/** A tracked live shift the map has heard nothing from — a probably-stopped tracker. */
+export interface GpsSilentShift {
+  driverId: string
+  shiftId: string
+  silentMinutes: number
+}
+
+/** A GPS source: the foreground beacon, the Android background service, or a hardware tracker. */
+export type GpsSource = 'phone_fg' | 'phone_bg' | 'tracker'
+
+export interface GpsPathPing {
+  lat: number
+  lng: number
+  accuracyM: number | null
+  source: GpsSource
+  capturedAt: string
+  receivedAt: string
+  phase: 'before_work' | 'work' | 'break' | 'after_close'
+  /** Validated work edge ending at this ping, or null if it is not safely countable. */
+  workEdgeMetres: number | null
+}
+
+/** A half-open `[pingStartIndex, pingEndIndex)` slice into a `GpsPathView.pings` array. */
+export interface GpsPathRange {
+  pingStartIndex: number
+  pingEndIndex: number
+  /** Great-circle length of this slice's recorded path, in whole metres. */
+  distanceMetres: number | null
+}
+
+export interface GpsPathOrder {
+  id: string
+  providerOrderNo: string
+  occurredDate: string | null
+  occurredMinute: string | null
+  fee: string
+}
+
+export interface GpsPathSegment extends GpsPathRange {
+  orderId: string
+  providerOrderNo: string
+  minuteKey: string
+}
+
+/** One shift's recorded trail, split into a path segment per order by printed time. */
+export interface GpsPathView {
+  shiftId: string
+  windowOpensAt: string | null
+  submittedAt: string | null
+  /** Great-circle length of the whole recorded trail, in whole metres. */
+  totalDistanceMetres: number
+  /** Work movement from validated GPS edges only; null when no usable edge exists. */
+  workDistanceMetres: number | null
+  coveragePercent: number | null
+  coverageIncomplete: boolean
+  breaks: Array<{ startedAt: string; endedAt: string | null }>
+  pings: GpsPathPing[]
+  orders: GpsPathOrder[]
+  segments: GpsPathSegment[]
+  untimedOrderIds: string[]
+  beforeFirst: GpsPathRange
+  afterClose: GpsPathRange
 }
 
 // ── Expenses (SRS G) ────────────────────────────────────────────────────────────────────────
@@ -1511,6 +1597,18 @@ export class ApiClient {
     return this.get<ShiftStateView>(`/shifts/${id}/state`)
   }
 
+  shiftBreaks(id: string) {
+    return this.get<BreakSummary>(`/shifts/${id}/break`)
+  }
+
+  startShiftBreak(id: string, breakId: string) {
+    return this.post<BreakSummary>(`/shifts/${id}/break/start`, { breakId })
+  }
+
+  resumeShiftWork(id: string, breakId: string) {
+    return this.post<BreakSummary>(`/shifts/${id}/break/${breakId}/resume`, {})
+  }
+
   /** Manager-only review, including current branch+driver shift funding from the locked read path. */
   shiftReview<T extends object>(
     id: string,
@@ -1615,6 +1713,7 @@ export class ApiClient {
       receiptCeilingMinor: string | null
       kwhPriceMinor: string | null
       goLiveBusinessDate: string | null
+      breakLimitMinutes: number
     }>('/settings')
   }
   /**
@@ -1627,6 +1726,7 @@ export class ApiClient {
   updateSettings(body: {
     receiptCeilingMinor?: string
     kwhPriceMinor?: string
+    breakLimitMinutes?: number
     goLiveBusinessDate?: string | null
     branchId?: string
   }) {
@@ -2241,9 +2341,13 @@ export class ApiClient {
   sendGps(shiftId: string, body: { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }) {
     return this.post(`/shifts/${shiftId}/gps`, body)
   }
-  /** The manager's live map: the latest fix per driver in the selected branch. */
+  /** The manager's live map: the latest fix per driver, plus tracked shifts that have gone silent. */
   gpsLive() {
-    return this.get<{ drivers: GpsLiveDriver[] }>('/gps/live')
+    return this.get<{ drivers: GpsLiveDriver[]; silent: GpsSilentShift[] }>('/gps/live')
+  }
+  /** One shift's recorded trail, split into a path segment per order by printed time (gps.view). */
+  getShiftGpsPath(shiftId: string) {
+    return this.get<GpsPathView>(`/shifts/${shiftId}/gps/path`)
   }
 
   // ── Documents (SRS B-1 / س37) ───────────────────────────────────────────────────────────────

@@ -25,7 +25,7 @@ const MUST_AUDIT = [
   'drivers', 'vehicles', 'documents',
   'funds', 'fx_days', 'week_locks', 'journal_entries', 'journal_lines',
   'cash_counts', 'expenses', 'incomes', 'receivable_events', 'checkins',
-  'shifts', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
+  'shifts', 'shift_breaks', 'shift_orders', 'cash_deductions', 'shift_media', 'float_tranches', 'tier_rules',
   // Decision-complete cash/wallet close snapshots. Append-only, but creation is a money decision.
   'shift_settlements',
   // Advance authority plus the exact cash/wallet values a driver may receive automatically.
@@ -35,6 +35,10 @@ const MUST_AUDIT = [
   'vehicle_types', 'batteries', 'shift_battery_readings',
   // Where a manual order went — part of the evidence a manager approves a shift against.
   'shift_order_points',
+  // Registering a hardware tracker, or binding one to a bike, grants a device the authority to write
+  // that bike's telemetry — who did it is a decision worth keeping. A bare last-seen touch is kept
+  // out of its audit trigger, the way gps_pings itself is exempt high-frequency liveness.
+  'tracker_devices',
   // What the wallet actually did. An unmatched movement is a term in BR1, and whether a row is
   // included or which order it answers to changes the money a manager approves.
   'shift_wallet_movements',
