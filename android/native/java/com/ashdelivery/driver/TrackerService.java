@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * The thing the whole Android app exists for: location that keeps flowing with the screen off.
@@ -88,9 +89,9 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * WHAT STOPS IT.
  *
- * A 409 from the ingest route, or an ended result from the status route when no fixes are queued.
- * The service outlives the WebView, so JavaScript may never get the chance to call `stop()`.
- * Offline, 5xx, and timeouts preserve the queue and retry on the next tick.
+ * A 409 from the ingest route or an ended result from the status route stops capture. It never
+ * deletes queued fixes: WorkManager can deliver points captured before the end after the service
+ * and WebView have both stopped. Offline, 5xx, and timeouts preserve the queue.
  *
  *
  * KEEPING IT ALIVE. Background-reliability hardenings close ways location silently
@@ -132,15 +133,15 @@ public class TrackerService extends Service {
      */
     private static final long STALE_AFTER_MS = 6 * INTERVAL_MS;
 
-    /** The batch cap, matching the server's: a phone out of signal returns with a run, not a fix. */
-    private static final int FLUSH_MAX = 500;
-
-    /** Bounded so a phone that never regains signal cannot grow this without limit. */
-    private static final int BUFFER_MAX = 2_000;
     private static final long STATUS_INTERVAL_MS = 60_000L;
+    static volatile boolean serviceRunning = false;
+    static volatile String activeShiftId;
 
     private GpsFixStore fixStore;
+    /** SQLite writes never wait for HTTP timeouts. */
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService uploads = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
     private final Handler ticker = new Handler(Looper.getMainLooper());
 
     private FusedLocationProviderClient client;
@@ -154,23 +155,26 @@ public class TrackerService extends Service {
     private volatile boolean stopped = false;
     /** Elapsed-realtime of the last fix, for the watchdog. Set when updates start so it does not fire early. */
     private volatile long lastFixElapsedMs = 0L;
+    /** A provider callback is not a captured point until SQLite has committed it. */
+    private volatile boolean storageFailed = false;
+    private volatile long lastRearmElapsedMs = 0L;
     private long lastStatusCheckElapsedMs = 0L;
+    private int lastNoticeText = R.string.tracking_text;
 
     @Override
     public void onCreate() {
         super.onCreate();
         fixStore = new GpsFixStore(this);
+        GpsUploadWorker.schedule(this);
     }
 
     private final LocationCallback callback = new LocationCallback() {
         @Override
         public void onLocationResult(@NonNull LocationResult result) {
-            enqueue(result.getLastLocation());
+            // Fused can deliver several points after Doze/network recovery. Keep every capture.
+            for (Location location : result.getLocations()) enqueue(location);
         }
     };
-
-    /** Held as a field so both the callback and the ticker submit the same task. */
-    private final Runnable this_flush = this::flush;
 
     /**
      * The heartbeat: flush regardless of a fix arriving, and re-arm the provider if it went silent.
@@ -184,7 +188,9 @@ public class TrackerService extends Service {
         @Override
         public void run() {
             if (stopped) return;
-            if (SystemClock.elapsedRealtime() - lastFixElapsedMs > STALE_AFTER_MS) rearmUpdates();
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastFixElapsedMs > STALE_AFTER_MS && now - lastRearmElapsedMs > STALE_AFTER_MS) rearmUpdates();
+            updateNotice(now);
             submitFlush();
             ticker.postDelayed(this, INTERVAL_MS);
         }
@@ -230,11 +236,23 @@ public class TrackerService extends Service {
             return START_NOT_STICKY;
         }
 
+        if (serviceRunning && id.equals(activeShiftId) && base.equals(origin)) {
+            // Polling the shift may ask for start again. Do not reset the no-fix timer or
+            // register a second provider callback: both would hide a real tracking outage.
+            submitFlush();
+            return START_STICKY;
+        }
+        if (serviceRunning) removeUpdates();
+
         prefs.edit().putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base).apply();
         shiftId = id;
         origin = base;
         stopped = false;
+        lastNoticeText = R.string.tracking_text;
+        serviceRunning = true;
+        activeShiftId = id;
         lastStatusCheckElapsedMs = 0L;
+        fixStore.fillMissingOrigin(base);
 
         try {
             startForeground(NOTIFICATION_ID, notification());
@@ -243,6 +261,8 @@ public class TrackerService extends Service {
             // stopSelf() after a failed startForeground is the sanctioned abort and does not trip the
             // "did not call startForeground in time" crash.
             forget();
+            serviceRunning = false;
+            activeShiftId = null;
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -325,8 +345,8 @@ public class TrackerService extends Service {
 
     /** Tear down whichever provider is running, then start it again — the watchdog's re-arm. */
     private void rearmUpdates() {
-        // Bump first, so a provider that is simply out of signal is not re-armed on every tick.
-        lastFixElapsedMs = SystemClock.elapsedRealtime();
+        // Re-arm throttle is separate from last fix: a failed provider must stay visibly stale.
+        lastRearmElapsedMs = SystemClock.elapsedRealtime();
         removeUpdates();
         startLocationUpdates();
     }
@@ -343,37 +363,57 @@ public class TrackerService extends Service {
     /** One place both providers hand a fix to: buffer it, note it for the watchdog, and flush. */
     private void enqueue(Location location) {
         if (stopped || location == null) return;
-        lastFixElapsedMs = SystemClock.elapsedRealtime();
         String assignedShift = shiftId;
-        if (assignedShift == null) return;
+        String assignedOrigin = origin;
+        if (assignedShift == null || assignedOrigin == null) return;
         try {
             final double lat = location.getLatitude();
             final double lng = location.getLongitude();
             final Float accuracy = location.hasAccuracy() ? location.getAccuracy() : null;
             final long capturedAtMs = location.getTime();
             io.execute(() -> {
-                if (stopped || !assignedShift.equals(shiftId)) return;
-                // Serializing disk writes with uploads means a 202 can only acknowledge rows that
-                // were committed before the request. The queue survives process death and reboot.
-                fixStore.enqueue(assignedShift, lat, lng, accuracy, capturedAtMs, BUFFER_MAX);
-                flush();
+                // A stop may race this queued task. The captured point still belongs on disk and
+                // WorkManager will upload it even after the service has stopped.
+                SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                try {
+                    fixStore.enqueue(assignedShift, assignedOrigin, lat, lng, accuracy, capturedAtMs);
+                } catch (Exception storageError) {
+                    storageFailed = true;
+                    prefs.edit()
+                            .putLong("lastStorageFailureAtMs:" + assignedShift, System.currentTimeMillis())
+                            .putInt("storageFailedCount", prefs.getInt("storageFailedCount", 0) + 1)
+                            .putInt("storageFailedCount:" + assignedShift,
+                                    prefs.getInt("storageFailedCount:" + assignedShift, 0) + 1)
+                            .apply();
+                    return;
+                }
+                storageFailed = false;
+                lastFixElapsedMs = SystemClock.elapsedRealtime();
+                prefs.edit()
+                        .putLong("lastCapturedAtMs", Math.max(capturedAtMs, prefs.getLong("lastCapturedAtMs", 0)))
+                        .putLong("lastCapturedAtMs:" + assignedShift,
+                                Math.max(capturedAtMs, prefs.getLong("lastCapturedAtMs:" + assignedShift, 0))).apply();
+                GpsUploadWorker.schedule(this);
+                submitFlush();
             });
         } catch (RejectedExecutionException shuttingDown) {
             // The service is already stopping; a callback posted earlier may arrive after teardown.
         }
     }
 
-    /** Submit a flush, tolerating the teardown window where the IO executor is already shut down. */
+    /** Upload on a separate thread so offline HTTP cannot delay SQLite commits. */
     private void submitFlush() {
-        if (stopped) return;
+        if (stopped || !flushScheduled.compareAndSet(false, true)) return;
         try {
-            io.execute(this_flush);
+            uploads.execute(() -> {
+                try { flush(); }
+                finally { flushScheduled.set(false); }
+            });
         } catch (RejectedExecutionException shuttingDown) {
-            // A fix already on the main looper can arrive after onDestroy()'s io.shutdown(). Not an
-            // error — the shift is ending; there is nothing left to flush to.
+            flushScheduled.set(false);
+            GpsUploadWorker.schedule(this);
         }
     }
-
     /**
      * The driver swiped the app off the recents list.
      *
@@ -381,7 +421,7 @@ public class TrackerService extends Service {
      * this is the belt-and-suspenders for OEMs that kill it anyway. It schedules a near-future
      * restart from the saved assignment (not exact — no special alarm permission — but wake-while-
      * idle so Doze does not swallow it). If the shift has since closed, the restarted service's first
-     * flush gets the 409 and shuts down cleanly. It cannot beat a deliberate force-stop, which
+     * status check shuts capture down cleanly. It cannot beat a deliberate force-stop, which
      * cancels the alarm too — that is what the office's "not reporting" alert is for.
      */
     @Override
@@ -409,15 +449,20 @@ public class TrackerService extends Service {
     @Override
     public void onDestroy() {
         stopped = true;
+        serviceRunning = false;
+        activeShiftId = null;
         ticker.removeCallbacks(tick);
         removeUpdates();
         io.shutdown();
+        uploads.shutdown();
+        GpsUploadWorker.schedule(this);
         super.onDestroy();
     }
 
     /** Drop the persisted assignment, so a later restart does not resume a shift that is over. */
     private void forget() {
-        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove(KEY_SHIFT_ID).remove(KEY_ORIGIN).apply();
     }
 
     private boolean hasLocationPermission() {
@@ -445,64 +490,52 @@ public class TrackerService extends Service {
         }
         return new NotificationCompat.Builder(this, CHANNEL_ID)
                 .setContentTitle(getString(R.string.tracking_title))
-                .setContentText(getString(R.string.tracking_text))
+                .setContentText(getString(lastNoticeText))
+                .setContentIntent(PendingIntent.getActivity(this, 0,
+                        new Intent(this, MainActivity.class),
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
                 .setSmallIcon(android.R.drawable.ic_menu_mylocation)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build();
     }
 
-    /** Take everything buffered and post it. Runs on the single IO thread, so it never overlaps. */
+    private void updateNotice(long nowElapsedMs) {
+        int next;
+        if (storageFailed) next = R.string.tracking_storage_failed;
+        else if (!"precise".equals(AshTrackerPlugin.permissionLabel(this))) next = R.string.tracking_permission_lost;
+        else if (!AshTrackerPlugin.locationEnabled(this)) next = R.string.tracking_location_disabled;
+        else if (nowElapsedMs - lastFixElapsedMs > 2 * 60_000L) next = R.string.tracking_no_fix;
+        else if ("offline".equals(GpsUploader.networkLabel(this))) next = R.string.tracking_offline;
+        else next = R.string.tracking_text;
+        if (next == lastNoticeText) return;
+        lastNoticeText = next;
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) manager.notify(NOTIFICATION_ID, notification());
+    }
+
+    /** The foreground service uploads promptly; WorkManager owns delayed retries after it stops. */
     private void flush() {
-        if (stopped) return;
+        if (stopped || shiftId == null || origin == null) return;
         String id = shiftId;
         String base = origin;
-        if (id == null || base == null) return;
-
-        List<GpsFixStore.Fix> sending = fixStore.batch(id, FLUSH_MAX);
-        if (sending.isEmpty()) {
-            // A closed shift with no fresh GPS fix still needs a stop signal.
-            long now = SystemClock.elapsedRealtime();
-            if (lastStatusCheckElapsedMs == 0L || now - lastStatusCheckElapsedMs >= STATUS_INTERVAL_MS) {
-                lastStatusCheckElapsedMs = now;
-                if (getStatus(base + "/api/shifts/" + id + "/gps/status") == Outcome.SHIFT_OVER) stopEndedShift(id);
-            }
-            return;
-        }
-
-        JSONObject body = new JSONObject();
-        try {
-            body.put("source", "phone_bg");
-            JSONArray fixes = new JSONArray();
-            for (GpsFixStore.Fix fix : sending) fixes.put(fix.json);
-            body.put("fixes", fixes);
-        } catch (Exception malformed) {
-            return;
-        }
-
-        /*
-         * Hold a partial wake lock across the upload.
-         *
-         * A location fix briefly wakes the CPU (the location HAL holds its own wakelock while
-         * delivering), which is what let us reach this flush with the screen off. But nothing keeps
-         * the CPU awake for the network round-trip: it can suspend mid-POST, freezing the socket
-         * until the next fix wakes it — on a bad connection the upload never completes and the buffer
-         * only grows. The lock is timed as a safety valve so a wedged request can never hold it open.
-         */
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock lock = pm != null ? pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ash:gps-flush") : null;
         if (lock != null) {
-            try { lock.acquire(40_000L); } catch (Exception ignored) { lock = null; }
+            try { lock.acquire(45_000L); } catch (Exception ignored) { lock = null; }
         }
-
         try {
-            Outcome outcome = post(base + "/api/shifts/" + id + "/gps", body);
-            if (outcome == Outcome.ACCEPTED) {
-                fixStore.acknowledge(sending);
-            } else if (outcome == Outcome.SHIFT_OVER) {
+            GpsUploader.Outcome outcome = GpsUploader.flushOnce(this, fixStore, id, base);
+            if (outcome == GpsUploader.Outcome.SHIFT_OVER) {
                 stopEndedShift(id);
+                return;
             }
-            // RETRY: keep the on-disk queue; the ticker will try again.
+            long now = SystemClock.elapsedRealtime();
+            if (lastStatusCheckElapsedMs == 0 || now - lastStatusCheckElapsedMs >= STATUS_INTERVAL_MS) {
+                lastStatusCheckElapsedMs = now;
+                GpsUploader.sendDiagnostics(this, fixStore, id, base, "running");
+                if (!GpsUploader.isShiftLive(this, id, base)) stopEndedShift(id);
+            }
         } finally {
             if (lock != null && lock.isHeld()) {
                 try { lock.release(); } catch (Exception ignored) {}
@@ -510,97 +543,14 @@ public class TrackerService extends Service {
         }
     }
 
-    private enum Outcome { ACCEPTED, SHIFT_OVER, RETRY }
-
     private void stopEndedShift(String id) {
-        fixStore.clearShift(id);
-        if (!id.equals(shiftId)) return; // A new assignment started during the old request.
+        if (!id.equals(shiftId)) return;
+        // The shift ended, not the queue. WorkManager can still deliver captured fixes.
         stopped = true;
+        serviceRunning = false;
+        activeShiftId = null;
         forget();
+        GpsUploadWorker.schedule(this);
         stopSelf();
-    }
-
-    /** Empty-buffer heartbeat. Only an explicit ended/deleted shift stops tracking. */
-    private Outcome getStatus(String url) {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setRequestMethod("GET");
-            connection.setConnectTimeout(15_000);
-            connection.setReadTimeout(20_000);
-            String cookie = CookieManager.getInstance().getCookie(url);
-            if (cookie != null) connection.setRequestProperty("cookie", cookie);
-            int status = connection.getResponseCode();
-            if (status == 404 || status == 409) return Outcome.SHIFT_OVER;
-            if (status != 200) return Outcome.RETRY;
-            writeBackCookies(url, connection);
-            StringBuilder response = new StringBuilder();
-            try (BufferedReader in = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
-                String line;
-                while ((line = in.readLine()) != null) response.append(line);
-            }
-            return new JSONObject(response.toString()).optBoolean("live", true)
-                    ? Outcome.ACCEPTED : Outcome.SHIFT_OVER;
-        } catch (Exception offline) {
-            return Outcome.RETRY;
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
-    }
-
-    private Outcome post(String url, JSONObject body) {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL(url).openConnection();
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(15_000);
-            connection.setReadTimeout(20_000);
-            connection.setDoOutput(true);
-            connection.setRequestProperty("content-type", "application/json");
-            // The driver's ordinary session, straight from the WebView's own cookie jar.
-            String cookie = CookieManager.getInstance().getCookie(url);
-            if (cookie != null) connection.setRequestProperty("cookie", cookie);
-
-            try (OutputStreamWriter out = new OutputStreamWriter(connection.getOutputStream())) {
-                out.write(body.toString());
-            }
-            int status = connection.getResponseCode();
-            if (status >= 200 && status < 300) {
-                // Carry the server's rolled session cookie back into the WebView jar, so the NEXT
-                // post reads a fresh one. This is what keeps a 12h double shift alive even when the
-                // app is never opened: the server slides the cookie on our own upload, and without
-                // this write-back that slide would land nowhere and the 8h cookie would still lapse.
-                writeBackCookies(url, connection);
-                return Outcome.ACCEPTED;
-            }
-            if (status == 409) return Outcome.SHIFT_OVER;
-            // 401/403 are RETRY on purpose rather than a stop: a session that lapses while the
-            // driver is out comes back when he next opens the app, and the fixes he took in
-            // between are the ones worth keeping.
-            return Outcome.RETRY;
-        } catch (Exception offline) {
-            return Outcome.RETRY;
-        } finally {
-            if (connection != null) connection.disconnect();
-        }
-    }
-
-    /** Feed any Set-Cookie from our response into the WebView's shared cookie jar. */
-    private void writeBackCookies(String url, HttpURLConnection connection) {
-        try {
-            java.util.Map<String, java.util.List<String>> headers = connection.getHeaderFields();
-            if (headers == null) return;
-            CookieManager cm = CookieManager.getInstance();
-            boolean any = false;
-            for (java.util.Map.Entry<String, java.util.List<String>> entry : headers.entrySet()) {
-                if (entry.getKey() != null && entry.getKey().equalsIgnoreCase("Set-Cookie") && entry.getValue() != null) {
-                    for (String value : entry.getValue()) cm.setCookie(url, value);
-                    any = true;
-                }
-            }
-            if (any) cm.flush();
-        } catch (Exception ignored) {
-            // A cookie we could not persist just means the next post falls back to the old one.
-        }
     }
 }

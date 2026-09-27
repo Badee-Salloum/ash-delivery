@@ -55,6 +55,7 @@ import {
   PgWeekLockRepo,
 } from '../src/repos-shift.ts'
 import { PgTrackerDeviceRepo } from '../src/repos-tracker.ts'
+import { PgGpsTrackerHealthRepo } from '../src/repos-gps-health.ts'
 import { PgShiftBreakRepo } from '../src/repos-breaks.ts'
 
 /**
@@ -267,6 +268,7 @@ if (!DATABASE_URL) {
         settlements: new PgShiftSettlementRepo(pool),
         closeDrafts: new PgCloseDraftRepo(pool),
         gps: new PgGpsPingRepo(pool),
+        gpsHealth: new PgGpsTrackerHealthRepo(pool),
         trackerDevices: new PgTrackerDeviceRepo(pool),
         closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
       }
@@ -282,6 +284,113 @@ if (!DATABASE_URL) {
         [branchId, fund.type, fund.code, fund.currency],
       )
     },
+  })
+
+  describe('identified GPS tracking boundary', () => {
+    it('serializes opening rejection against a waiting batch and checks the final capture window', async () => {
+      const deps = await makeDeps()
+      const startMs = Date.now() - 120_000
+      await pool.query(
+        `UPDATE shifts SET state = 'awaiting_open_approval',
+           driver_confirmed_at = to_timestamp($2::double precision / 1000)
+         WHERE id = $1`, [SHIFT, startMs],
+      )
+      const closing = await pool.connect()
+      let committed = false
+      try {
+        await closing.query('BEGIN')
+        await closing.query('SELECT id FROM shifts WHERE id = $1 FOR UPDATE', [SHIFT])
+        const nowMs = Date.now()
+        const pointId = crypto.randomUUID()
+        const pending = deps.gps.ingestIdentified({
+          shiftId: SHIFT, source: 'phone_bg', nowMs, maxStored: 20_000,
+          retentionMs: 7 * 24 * 60 * 60_000,
+          fixes: [{ pointId, lat: 33.5, lng: 36.2, accuracyM: 8,
+            capturedAtMs: nowMs + 10_000 }],
+        })
+        let finished = false
+        void pending.then(() => { finished = true }, () => { finished = true })
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        expect(finished).toBe(false)
+        const waiting = await pool.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+              AND query LIKE '%FROM shifts WHERE id = $1 FOR UPDATE%'`,
+        )
+        expect(waiting.rows[0]?.n).toBeGreaterThan(0)
+        await closing.query("UPDATE shifts SET state = 'draft' WHERE id = $1", [SHIFT])
+        await closing.query('COMMIT')
+        committed = true
+        expect(await pending).toMatchObject({ results: [
+          { pointId, status: 'rejected', reason: 'after_tracking_ended' },
+        ] })
+        expect(await deps.gps.countForShift(SHIFT)).toBe(0)
+        const late = await deps.gps.ingestIdentified({
+          shiftId: SHIFT, source: 'phone_bg', nowMs: Date.now(), maxStored: 20_000,
+          retentionMs: 7 * 24 * 60 * 60_000,
+          fixes: [{ pointId: crypto.randomUUID(), lat: 33.5, lng: 36.2,
+            accuracyM: 8, capturedAtMs: nowMs - 30_000 }],
+        })
+        expect(late).toMatchObject({ accepted: 1, rejected: 0 })
+      } finally {
+        if (!committed) await closing.query('ROLLBACK').catch(() => undefined)
+        closing.release()
+      }
+    })
+
+    it('closes an opening attempt and creates a fresh window on reconfirmation', async () => {
+      await makeDeps()
+      await pool.query(
+        `UPDATE shifts SET state = 'awaiting_open_approval',
+           driver_confirmed_at = to_timestamp($2::double precision / 1000)
+         WHERE id = $1`, [SHIFT, Date.now() - 120_000],
+      )
+      await pool.query("UPDATE shifts SET state = 'draft' WHERE id = $1", [SHIFT])
+      const first = await pool.query<{ tracking_ended_at: Date }>(
+        'SELECT tracking_ended_at FROM shifts WHERE id = $1', [SHIFT],
+      )
+      const nextStart = first.rows[0]!.tracking_ended_at.getTime() + 1_000
+      await pool.query(
+        `UPDATE shifts SET state = 'awaiting_open_approval',
+           driver_confirmed_at = to_timestamp($2::double precision / 1000)
+         WHERE id = $1`, [SHIFT, nextStart],
+      )
+      const windows = await pool.query<{ started_at: Date; ended_at: Date | null }>(
+        'SELECT started_at, ended_at FROM gps_tracking_windows WHERE shift_id = $1 ORDER BY started_at',
+        [SHIFT],
+      )
+      expect(windows.rows).toHaveLength(2)
+      expect(windows.rows[0]?.ended_at).not.toBeNull()
+      expect(windows.rows[1]?.started_at.getTime()).toBe(nextStart)
+      expect(windows.rows[1]?.ended_at).toBeNull()
+      const current = await pool.query<{ tracking_ended_at: Date | null }>(
+        'SELECT tracking_ended_at FROM shifts WHERE id = $1', [SHIFT],
+      )
+      expect(current.rows[0]?.tracking_ended_at).toBeNull()
+    })
+  })
+
+  describe('GPS tracker health', () => {
+    it('persists storage failures and never reduces a cumulative loss count', async () => {
+      const deps = await makeDeps()
+      const heartbeat = {
+        shiftId: SHIFT, readinessAtMs: null, readinessCapturedAtMs: null,
+        readinessAccuracyM: null, appBuild: 10, heartbeatAtMs: Date.now(),
+        service: 'running' as const, permission: 'precise' as const,
+        locationEnabled: true, network: 'online' as const, pendingCount: 0,
+        lastCapturedAtMs: null, lastUploadedAtMs: null,
+        droppedExpired: 0, droppedCapacity: 0, droppedStorage: 3,
+        rejectionReasons: {},
+      }
+      await deps.gpsHealth.recordHeartbeat(heartbeat)
+      expect((await deps.gpsHealth.findByShift(SHIFT))?.droppedStorage).toBe(3)
+      await deps.gpsHealth.recordHeartbeat({ ...heartbeat, droppedStorage: 1 })
+      expect((await deps.gpsHealth.findByShift(SHIFT))?.droppedStorage).toBe(3)
+      const events = await pool.query<{ detail: { droppedStorage: number } }>(
+        'SELECT detail FROM gps_tracker_health_events WHERE shift_id = $1 ORDER BY id', [SHIFT],
+      )
+      expect(events.rows.map((row) => row.detail.droppedStorage)).toEqual([3])
+    })
   })
 
   describe('PostgreSQL OCR cache ownership', () => {

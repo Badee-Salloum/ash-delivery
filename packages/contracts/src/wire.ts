@@ -880,6 +880,8 @@ export const adjustCashFloatRequest = adjustWalletTopupRequest
  * numbers — coordinates, not money — so `z.number()` is correct here.
  */
 export const gpsPingRequest = z.object({
+  /** Stable UUID generated when the native app stores the fix, unchanged on every retry. */
+  pointId: z.string().uuid().optional(),
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
   accuracyM: z.number().min(0).nullable().default(null),
@@ -911,6 +913,31 @@ export const gpsBatchRequest = z.object({
  * the field will post singles for weeks after this ships, and they must keep working.
  */
 export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
+
+/** Preflight metadata; location coordinates never leave the handset until confirmation. */
+export const gpsReadinessRequest = z.object({
+  appBuild: z.number().int().positive(),
+  capturedAtMs: z.number().int(),
+  accuracyM: z.number().min(0).max(100),
+  precise: z.literal(true),
+  locationEnabled: z.literal(true),
+})
+
+/** A coordinate-free heartbeat. Counters are cumulative on this handset/shift. */
+export const gpsDiagnosticsRequest = z.object({
+  appBuild: z.number().int().positive().optional(),
+  service: z.enum(['running', 'stopped', 'unknown']),
+  permission: z.enum(['precise', 'approximate', 'denied', 'unknown']),
+  locationEnabled: z.boolean().nullable(),
+  network: z.enum(['online', 'offline', 'unknown']),
+  pendingCount: z.number().int().min(0).max(60_000),
+  lastCapturedAtMs: z.number().int().nullable().optional(),
+  lastUploadedAtMs: z.number().int().nullable().optional(),
+  droppedExpired: z.number().int().min(0).default(0),
+  droppedCapacity: z.number().int().min(0).default(0),
+  droppedStorage: z.number().int().min(0).default(0),
+  rejectionReasons: z.record(z.string().max(80), z.number().int().min(0)).default({}),
+})
 
 /**
  * What the hardware-tracker gateway posts (SRS K-1 infrastructure; disabled by default).

@@ -121,6 +121,9 @@ const AUDIT_EXEMPT = {
   ocr_reads:
     'an internal cost/cache receipt, not a decision: repository-owned reservation and completion updates hold no money; the suggested value lands on the audited shift/order row, where every correction is visible',
   gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
+  gps_tracker_health: 'high-frequency coordinate-free device heartbeat; status transitions are recorded separately',
+  gps_tracker_health_events: 'append-only coordinate-free diagnostic events; retention is 30 days',
+  gps_tracking_windows: 'server-maintained GPS capture intervals; shift state transitions are audited',
   battery_swaps: 'append-only event log; its substance — the pack fitment change on batteries and the swap_out/swap_in readings — is already audited, and the route appends an explicit audit row',
   audit_log: 'the audit log itself',
 }

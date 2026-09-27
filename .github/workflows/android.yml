@@ -49,7 +49,7 @@ jobs:
         run: npm install
 
       # The platform is generated, never committed: `cap add android` writes a few thousand files
-      # that nobody would review. What the repository holds is only what we wrote — three Java
+      # that nobody would review. What the repository holds is only what we wrote — native Java
       # files, two string resources, an offline page and the script that places them.
       - name: generate the android platform
         working-directory: android
@@ -61,15 +61,58 @@ jobs:
         working-directory: android
         run: node apply-native.mjs
 
-      - name: assemble
+      - name: assemble debug for source validation
+        if: github.event_name == 'push'
         working-directory: android/android
         run: ./gradlew --no-daemon assembleDebug
 
-      # Debug-signed on purpose. These handsets are company property and the APK is sideloaded, so
-      # a release keystore would add a secret to manage and a signing identity to lose for no gain
-      # that anyone here would notice. Revisit if it ever goes near Play.
+      - name: prepare persistent release signing
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: android/android
+        env:
+          ASH_ANDROID_KEYSTORE_B64: ${{ secrets.ASH_ANDROID_KEYSTORE_B64 }}
+          ASH_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ASH_ANDROID_KEYSTORE_PASSWORD }}
+          ASH_ANDROID_KEY_ALIAS: ${{ secrets.ASH_ANDROID_KEY_ALIAS }}
+          ASH_ANDROID_KEY_PASSWORD: ${{ secrets.ASH_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$ASH_ANDROID_KEYSTORE_B64"
+          test -n "$ASH_ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ASH_ANDROID_KEY_ALIAS"
+          test -n "$ASH_ANDROID_KEY_PASSWORD"
+          printf '%s' "$ASH_ANDROID_KEYSTORE_B64" | base64 --decode > app/ash-release.jks
+          cat >> app/build.gradle <<'GRADLE'
+          android {
+            signingConfigs {
+              ashRelease {
+                storeFile file('ash-release.jks')
+                storePassword System.getenv('ASH_ANDROID_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('ASH_ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('ASH_ANDROID_KEY_PASSWORD')
+              }
+            }
+            buildTypes { release { signingConfig signingConfigs.ashRelease } }
+          }
+          GRADLE
+
+      - name: assemble signed release
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: android/android
+        env:
+          ASH_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ASH_ANDROID_KEYSTORE_PASSWORD }}
+          ASH_ANDROID_KEY_ALIAS: ${{ secrets.ASH_ANDROID_KEY_ALIAS }}
+          ASH_ANDROID_KEY_PASSWORD: ${{ secrets.ASH_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon assembleRelease
+
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
         with:
-          name: ash-driver-apk
+          name: ash-driver-debug-build-check
           path: android/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: ash-driver-signed-release-apk
+          path: android/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error

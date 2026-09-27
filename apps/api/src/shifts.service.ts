@@ -851,6 +851,7 @@ async function submitStartPackageLocked(
     ...draft,
     state: result.next,
     driverConfirmedAt: new Date(deps.clock.nowMs()).toISOString(),
+    trackingEndedAt: null,
   }
   await deps.shifts.update(updated, actor.userId)
   return updated
@@ -1307,7 +1308,7 @@ async function rejectOpenLocked(
   const shift = await mustFind(deps, shiftId)
   const result = await guard(deps, shift, 'manager_reject_open', actor)
   if (!result.ok) fail(result)
-  const updated: ShiftRecord = { ...shift, state: result.next }
+  const updated: ShiftRecord = { ...shift, state: result.next, trackingEndedAt: new Date(deps.clock.nowMs()).toISOString() }
   await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'open', 'rejected', notes)
   return updated
@@ -4717,6 +4718,7 @@ async function approveCloseLocked(
     // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
     // so the two can never disagree about when the close was signed.
     approvedAt: new Date(confirmedAtMs).toISOString(),
+    trackingEndedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
@@ -4815,7 +4817,7 @@ async function voidShiftLocked(
   }
   for (const o of await deps.orders.listByShift(shiftId)) await deps.orders.delete(o.id, actor.userId)
 
-  const updated: ShiftRecord = { ...shift, state: result.next }
+  const updated: ShiftRecord = { ...shift, state: result.next, trackingEndedAt: new Date(deps.clock.nowMs()).toISOString() }
   await deps.shifts.update(updated, actor.userId)
   await recordDecision(deps, actor, shiftId, 'close', 'force_cancelled', reason)
   return { shift: updated, replayed: false }
@@ -5062,6 +5064,7 @@ async function forceCloseLocked(
     // an approver and no instant. This is the same moment the settlement snapshot is confirmed at,
     // so the two can never disagree about when the close was signed.
     approvedAt: new Date(confirmedAtMs).toISOString(),
+    trackingEndedAt: new Date(confirmedAtMs).toISOString(),
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,

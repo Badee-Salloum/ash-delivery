@@ -45,6 +45,7 @@ export * from './fleet/odometer.ts'
 export * from './gps/segment.ts'
 export * from './gps/distance.ts'
 export * from './gps/work-distance.ts'
+export * from './gps/offline-ingest.ts'
 
 // C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
 export * from './assets/depreciation.ts'

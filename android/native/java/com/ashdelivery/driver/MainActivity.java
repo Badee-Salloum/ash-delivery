@@ -22,5 +22,7 @@ public class MainActivity extends BridgeActivity {
         // Before `super`, which is where the bridge and its plugin registry are built.
         registerPlugin(AshTrackerPlugin.class);
         super.onCreate(savedInstanceState);
+        // A closed shift can still have offline fixes. The WebView need not be open to upload them.
+        GpsUploadWorker.kickNow(this);
     }
 }

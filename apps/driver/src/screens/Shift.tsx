@@ -56,8 +56,9 @@ import {
 } from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
-import { syncNativeTracking } from '../native-tracker.ts'
+import { nativeTrackerAvailable, preflightNativeTracker, syncNativeTracking } from '../native-tracker.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
+import { TrackerStatusCard } from './TrackerStatusCard.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
 import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from './BatteryPanel.tsx'
@@ -655,7 +656,7 @@ const withWalletAuthority = (
  * `pending_review` IS here: the driver is at the counter handing over the close package, and that
  * is exactly the presence evidence the close wants.
  */
-const TRACKED_SHIFT_STATES = new Set(['open', 'suspended', 'pending_review'])
+const TRACKED_SHIFT_STATES = new Set(['awaiting_open_approval', 'open', 'suspended', 'pending_review'])
 
 const PHASE_FOR: Record<string, Phase> = {
   draft: 'start',
@@ -1023,12 +1024,10 @@ export function ShiftFlow({
    * at the branch for the whole close package with the beacon unmounted.
    *
    * Called unconditionally, as a hook must be, and given `null` when the shift is not in a tracked
-   * state. `draft` and `awaiting_open_approval` are deliberately NOT tracked: the shift holds the
-   * driver, but he has not been approved to start working and where he is then is not ours to know.
+   * state. Driver confirmation begins capture, including the wait for manager approval. A draft
+   * remains untracked because the driver has not confirmed it yet.
    */
-  // Renders nothing. The driver was once shown a live «التتبع يعمل / متوقف» line and the owner
-  // did not want the tracking state on his screen; the browser's own location prompt is his notice,
-  // and consent was given. That decision is unchanged — only where the hook is called has moved.
+  // Android status is shown below because capture and upload can fail separately.
   const trackedShiftId = shift && serverState && TRACKED_SHIFT_STATES.has(serverState) ? shift.id : null
   useGpsBeacon(trackedShiftId)
 
@@ -1041,7 +1040,9 @@ export function ShiftFlow({
    * no plugin and this does nothing at all.
    */
   useEffect(() => {
-    void syncNativeTracking(trackedShiftId)
+    void syncNativeTracking(trackedShiftId).then((result) => {
+      if (result?.started === false) toast.error(t.gpsTracking.service_start_failed)
+    })
   }, [trackedShiftId])
 
   const applyServerState = useCallback(
@@ -1359,12 +1360,14 @@ export function ShiftFlow({
         awaiting={phase === 'awaiting'}
         onOpened={(id) => {
           setShift({ id, floatText: '0', topupText: '0', businessDate: '', odoStart: null })
+          setServerState('awaiting_open_approval')
           setPhase('awaiting')
         }}
         onApproved={(funds) => {
           // The manager entered the float + top-up at approval; carry them into the order screen so
           // the live BR1 preview is right.
           setShift((current) => openedShiftState(current, funds))
+          setServerState('open')
           setPhase('orders')
         }}
       />
@@ -1414,6 +1417,7 @@ export function ShiftFlow({
         <Card>
           <p className="text-center text-sm text-slate-600">{t.shift.runningHint}</p>
         </Card>
+        <TrackerStatusCard shiftId={shift.id} />
         <Card>
           <h2 className="mb-2 font-semibold">{t.shift.breakTitle}</h2>
           <div className="flex flex-col gap-2 text-sm">
@@ -1527,6 +1531,7 @@ export function ShiftFlow({
           const storage = localDraftStorage()
           if (storage) clearEndDraft(storage, assignment.driverId, shift.id)
           void deletePendingEvidenceForShift(shift.id)
+          setServerState('pending_review')
           setPhase('done')
         }}
       />
@@ -1542,6 +1547,7 @@ export function ShiftFlow({
       <Card>
         <p className="text-center text-sm text-slate-600">{t.shift.awaitingManager}</p>
       </Card>
+      {shift && serverState === 'pending_review' ? <TrackerStatusCard shiftId={shift.id} /> : null}
       {/* A WAY ON. This app is used twice a day and the close used to end in a cul-de-sac: two
           static cards, and the driver's only exits were the small «تسجيل الخروج» at the very top
           or killing the app. */}
@@ -1623,6 +1629,7 @@ function StartPackage({
   const { api, t } = useApp()
   const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
+  const [gpsGateError, setGpsGateError] = useState<string | null>(null)
   const [odo, setOdo] = useState(
     restore?.odometerKm === null || restore?.odometerKm === undefined ? '' : String(restore.odometerKm),
   )
@@ -1762,10 +1769,56 @@ function StartPackage({
     const odometerKm = parseNonNegativeInteger(odo)
     if (odometerKm === null) return
     setBusy(true)
+    setGpsGateError(null)
+    let startRequestSent = false
+    let nativePreflightUnavailable = false
+    const showConfirmed = (submitted: {
+      id: string
+      state: string
+      businessDate: string
+      startPackage: { odometerKm: number | null; floatTotal: string; topupTotal: string }
+    }): void => {
+      if (submitted.state === 'open') {
+        onApproved({
+          shiftId: submitted.id,
+          floatText: submitted.startPackage.floatTotal,
+          topupText: submitted.startPackage.topupTotal,
+          businessDate: submitted.businessDate,
+          odoStart: submitted.startPackage.odometerKm,
+        })
+      } else if (submitted.state === 'awaiting_open_approval') {
+        onOpened(submitted.id)
+      }
+    }
     try {
+      const alreadyConfirmed = await api.shiftState(shiftId).catch(() => null)
+      if (alreadyConfirmed && (alreadyConfirmed.state === 'open' || alreadyConfirmed.state === 'awaiting_open_approval')) {
+        showConfirmed(alreadyConfirmed)
+        return
+      }
+      const preflight = await preflightNativeTracker()
+      nativePreflightUnavailable = nativeTrackerAvailable() && preflight === null
+      if (preflight) {
+        if (!preflight.ready) {
+          setGpsGateError(preflight.reason ?? 'provider_error')
+          return
+        }
+        if (preflight.nativeVersionCode == null || preflight.capturedAtMs == null || preflight.accuracyM == null) {
+          setGpsGateError('provider_error')
+          return
+        }
+        await api.confirmGpsReadiness(shiftId, {
+          appBuild: preflight.nativeVersionCode,
+          capturedAtMs: preflight.capturedAtMs,
+          accuracyM: preflight.accuracyM,
+          precise: true,
+          locationEnabled: true,
+        })
+      }
       // The driver submits only the odometer + photo. The cash float and wallet top-up are the
       // branch's money, entered by the manager at approval. Charge is captured per pack, so the
       // bike-level battery % is gone (sent null — the column stays a nullable seam).
+      startRequestSent = true
       const submitted = await api.put<{
         id: string
         state: string
@@ -1780,20 +1833,21 @@ function StartPackage({
         // What the reader was looking at, so the correction he just made becomes an example.
         odometerStrip: odoStrip,
       })
-      if (submitted.state === 'open') {
-        onApproved({
-          shiftId: submitted.id,
-          floatText: submitted.startPackage.floatTotal,
-          topupText: submitted.startPackage.topupTotal,
-          businessDate: submitted.businessDate,
-          odoStart: submitted.startPackage.odometerKm,
-        })
-      } else {
-        onOpened(shiftId)
-      }
+      showConfirmed(submitted)
     } catch (e) {
+      // The POST may have committed while its response was lost. Read the server state before
+      // offering another tap, so retrying cannot strand a confirmed shift at the start screen.
+      if (startRequestSent) {
+        const recovered = await api.shiftState(shiftId).catch(() => null)
+        if (recovered && (recovered.state === 'open' || recovered.state === 'awaiting_open_approval')) {
+          showConfirmed(recovered)
+          return
+        }
+      }
       // A driver can't read a console — a failed upload must show on the glass, not vanish.
       const code = (e as { error?: string }).error
+      if (code === 'android_update_required' || (code === 'gps_preflight_required' && (!nativeTrackerAvailable() || nativePreflightUnavailable))) setGpsGateError('upgradeRequired')
+      else if (code?.startsWith('gps_')) setGpsGateError('startBlocked')
       toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
     } finally {
       setBusy(false)
@@ -1861,6 +1915,7 @@ function StartPackage({
             <div className="h-full w-1/3 animate-[ash-slide_1.2s_ease-in-out_infinite] rounded-full bg-amber-500" />
           </div>
         </Card>
+        {shiftId ? <TrackerStatusCard shiftId={shiftId} /> : null}
         {shiftId ? <DiscardButton onDiscard={discardSelf} /> : null}
       </Screen>
     )
@@ -1889,6 +1944,13 @@ function StartPackage({
           {!ready ? (
             <p className="text-sm font-medium text-amber-800">
               {t.shift.stillMissing} {missing.join(' · ')}
+            </p>
+          ) : null}
+          {gpsGateError ? (
+            <p role="alert" className="text-sm font-semibold text-danger-ink">
+              {typeof t.gpsTracking[gpsGateError as keyof typeof t.gpsTracking] === 'string'
+                ? t.gpsTracking[gpsGateError as keyof typeof t.gpsTracking] as string
+                : t.gpsTracking.startBlocked}
             </p>
           ) : null}
           <Button variant="success" disabled={!ready || busy} onClick={confirm}>

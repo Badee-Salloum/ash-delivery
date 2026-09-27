@@ -1,20 +1,44 @@
-/**
- * The web side of the Android tracker, and the only place that knows the shell exists.
- *
- * The same deployed web app runs in three places: a phone browser, an installed PWA, and the
- * Android shell. Only the third has a native tracker, so every access is guarded and the absence of
- * the plugin is the ordinary case rather than an error.
- *
- * The bridge is deliberately one-way for data: fixes never travel through JavaScript. The native
- * service uploads them itself, because a plugin that hands positions to a callback is only as alive
- * as the WebView — and the WebView being asleep is the entire problem the shell exists to solve.
- * So all this module does is say WHICH SHIFT IS LIVE, which the screen already knows.
- */
+/** The Android shell owns capture and its durable SQLite upload queue. */
+
+export interface NativePreflight {
+  ready: boolean
+  reason?: 'permission_denied' | 'location_disabled' | 'no_recent_fix' | 'poor_accuracy' | 'provider_error'
+  capturedAtMs?: number
+  accuracyM?: number
+  nativeVersionCode?: number
+  platform?: 'android'
+}
+
+export interface NativeTrackerStatus {
+  available: boolean
+  permission: boolean
+  permissionState?: 'precise' | 'approximate' | 'denied'
+  nativeVersionCode?: number
+  locationEnabled?: boolean
+  network?: 'online' | 'offline' | 'unknown'
+  backgroundPermission?: boolean
+  notificationPermission?: boolean
+  serviceRunning?: boolean
+  activeShiftId?: string | null
+  lastCapturedAtMs?: number | null
+  lastUploadedAtMs?: number | null
+  pendingCount?: number
+  queueAvailable?: boolean
+  rejectedCount?: number
+  rejectionReasons?: Record<string, number>
+  droppedExpired?: number
+  droppedCapacity?: number
+  storageFailedCount?: number
+  lastFailureReason?: string | null
+}
 
 interface AshTrackerPlugin {
+  preflight?(): Promise<NativePreflight>
+  setupReliability?(): Promise<{ backgroundPermission: boolean; notificationPermission: boolean }>
   start(options: { shiftId: string; origin: string }): Promise<{ started: boolean; reason?: string }>
   stop(): Promise<void>
-  status(): Promise<{ available: boolean; permission: boolean }>
+  status(): Promise<NativeTrackerStatus>
+  retryUploads?(): Promise<void>
 }
 
 interface CapacitorGlobal {
@@ -29,34 +53,51 @@ function plugin(): AshTrackerPlugin | null {
   }
 }
 
-/**
- * Whether a native capture layer exists in this runtime.
- *
- * The web beacon reads this to stand down. Two layers writing the same shift would double the
- * battery cost of a ride to produce rows the server then discards on `(shift_id, captured_at)`.
- */
 export function nativeTrackerAvailable(): boolean {
   return plugin() !== null
 }
 
-/**
- * State what should be true: this shift is being tracked, or nothing is.
- *
- * Safe to call on every poll tick. `startForegroundService` on an already-running service just
- * re-delivers the intent, so the caller states the desired state rather than tracking what it has
- * already asked for — which is what keeps the screen's side of this to two lines.
- *
- * Failures are swallowed on purpose. A driver mid-ride cannot act on «the tracker did not start»,
- * and the shift itself must never be blocked by telemetry; the manager simply sees no pin, and the
- * coverage figure on the finished shift is where that shows up honestly.
- */
-export async function syncNativeTracking(shiftId: string | null): Promise<void> {
+/** Null means a browser or an older shell. The server rollout gate handles older shells. */
+export async function preflightNativeTracker(): Promise<NativePreflight | null> {
   const tracker = plugin()
-  if (!tracker) return
+  if (!tracker?.preflight) return null
   try {
-    if (shiftId === null) await tracker.stop()
-    else await tracker.start({ shiftId, origin: globalThis.location?.origin ?? '' })
+    return await tracker.preflight()
   } catch {
-    /* the web beacon is still running; see `use-gps-beacon.ts` */
+    return { ready: false, reason: 'provider_error' }
+  }
+}
+
+export async function nativeTrackerStatus(): Promise<NativeTrackerStatus | null> {
+  const tracker = plugin()
+  if (!tracker) return null
+  try {
+    return await tracker.status()
+  } catch {
+    return null
+  }
+}
+
+export async function setupNativeTrackingReliability(): Promise<void> {
+  const tracker = plugin()
+  if (tracker?.setupReliability) await tracker.setupReliability()
+}
+
+export async function retryNativeUploads(): Promise<void> {
+  try { await plugin()?.retryUploads?.() } catch { /* The periodic worker still retries. */ }
+}
+
+/** A failed start is returned so the driver can see the tracking fault. */
+export async function syncNativeTracking(shiftId: string | null): Promise<{ started: boolean; reason?: string } | null> {
+  const tracker = plugin()
+  if (!tracker) return null
+  try {
+    if (shiftId === null) {
+      await tracker.stop()
+      return null
+    }
+    return await tracker.start({ shiftId, origin: globalThis.location?.origin ?? '' })
+  } catch {
+    return { started: false, reason: 'service_start_failed' }
   }
 }

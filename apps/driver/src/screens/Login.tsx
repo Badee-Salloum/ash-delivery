@@ -2,6 +2,7 @@ import { type FormEvent, type ReactNode, useState } from 'react'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, Screen, TextInput, ThemeChoiceGroup } from '../ui.tsx'
 import { Register } from './Register.tsx'
+import { retryNativeUploads } from '../native-tracker.ts'
 
 /**
  * Driver login. Drivers are a `driver` role, so there is no second factor — password only, on a
@@ -24,6 +25,7 @@ export function Login(): ReactNode {
     try {
       await api.login(username, password)
       await refreshSession()
+      void retryNativeUploads()
     } catch (err) {
       const code = (err as { error?: string }).error
       setError(code === 'locked' ? t.auth.locked : t.auth.invalidCredentials)

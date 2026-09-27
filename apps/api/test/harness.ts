@@ -101,6 +101,7 @@ export async function makeHarness(
     driverSelfRegistrationEnabled?: boolean
     trackerIngestEnabled?: boolean
     trackerGatewayToken?: string
+    minDriverAndroidTrackerBuild?: number
   } = {},
 ): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
@@ -190,6 +191,8 @@ export async function makeHarness(
       : {}),
     ...(opts.trackerIngestEnabled !== undefined ? { trackerIngestEnabled: opts.trackerIngestEnabled } : {}),
     ...(opts.trackerGatewayToken !== undefined ? { trackerGatewayToken: opts.trackerGatewayToken } : {}),
+    ...(opts.minDriverAndroidTrackerBuild !== undefined
+      ? { minDriverAndroidTrackerBuild: opts.minDriverAndroidTrackerBuild } : {}),
   })
 
   const cookieFor = (token: string) => `${SESSION_COOKIE}=${token}`

@@ -812,6 +812,20 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
         expect(await deps.gps.countForShift(SHIFT)).toBe(1)
       })
 
+      it('uses native UUIDs, preserving distinct fixes captured in the same millisecond', async () => {
+        const deps = await fresh()
+        const a = crypto.randomUUID()
+        const b = crypto.randomUUID()
+        const identified = [fix(5_000, { pointId: a }), fix(5_000, { pointId: b })] as
+          (Omit<GpsPingRecord, 'id'> & { pointId: string })[]
+        expect([...(await deps.gps.appendIdentified(identified))].sort()).toEqual([a, b].sort())
+        expect(await deps.gps.appendIdentified(identified)).toEqual([])
+        expect([...(await deps.gps.knownPointIds(SHIFT, [a, b]))].sort()).toEqual([a, b].sort())
+        const trail = await deps.gps.listForShift(SHIFT)
+        expect(trail.map((point) => point.pointId)).toEqual([a, b])
+        expect(trail.map((point) => point.capturedAtMs)).toEqual([5_000, 5_000])
+      })
+
       it('reads a trail in CAPTURE order, whatever order it arrived in', async () => {
         const deps = await fresh()
         // A buffered run flushed late, interleaved with fixes that arrived live.

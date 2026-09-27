@@ -479,18 +479,11 @@ export const LIVE_STATES: readonly ShiftState[] = [
 export const isLive = (state: ShiftState): boolean => LIVE_STATES.includes(state)
 
 /**
- * States in which the driver's location may be recorded.
- *
- * Deliberately NARROWER than `LIVE_STATES`, and the difference is the whole point. A shift that is
- * `draft` or `awaiting_open_approval` occupies its driver and vehicle — so it is "live" for the
- * purpose of refusing a second shift — but the man has not been approved to start working. Tracking
- * him then would record where he is before his shift begins, which is not what «ما دامت النوبة
- * مفتوحة» means and is not ours to know.
- *
- * `pending_review` IS included: he is standing at the counter handing over the close package, and
- * that is exactly the presence evidence the close wants.
+ * States in which the driver has confirmed the shift and the phone records GPS.
+ * A draft is not tracked. Manager approval may still be pending after confirmation.
+ * Tracking continues through close review and stops at final approval or cancellation.
  */
-export const TRACKED_STATES: readonly ShiftState[] = ['open', 'suspended', 'pending_review']
+export const TRACKED_STATES: readonly ShiftState[] = ['awaiting_open_approval', 'open', 'suspended', 'pending_review']
 
 export const isTracked = (state: ShiftState): boolean => TRACKED_STATES.includes(state)
 

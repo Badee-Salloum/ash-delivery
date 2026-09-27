@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="tracking_storage_failed">Could not save a GPS point on this phone. Open the app and check free storage.</string>
+  <string name="tracking_permission_lost">Precise location permission is missing. Open the app to fix tracking.</string>
+  <string name="tracking_location_disabled">Device location is off. Turn it on to resume tracking.</string>
+  <string name="tracking_no_fix">No GPS point for two minutes. Check location and battery settings.</string>
+  <string name="tracking_offline">Offline: GPS points are saved and will upload when connected.</string>
   <string name="tracking_channel_name">Shift tracking</string>
   <string name="tracking_title">Shift open</string>
   <string name="tracking_text">Your location is recorded during the shift, and stops when it closes.</string>

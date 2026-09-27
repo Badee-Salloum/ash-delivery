@@ -1,4 +1,5 @@
 import { isCalendarDate, type CalendarDate } from '@ash/domain'
+import type { Catalog } from './i18n/ar.ts'
 
 export * from './api.ts'
 export * from './order-entry.ts'
@@ -14,6 +15,13 @@ export * from './client-uuid.ts'
 
 /** Pluralization travels with the catalogues, but app code imports it from the root. */
 export { plural, pluralCategory, type PluralForms } from './i18n/index.ts'
+
+/** Keep the stable machine code visible for unknown causes while translating known faults. */
+export function formatGpsFailureReason(reason: string, copy: Catalog['gpsTracking']): string {
+  const known = copy.reasons[reason as keyof typeof copy.reasons]
+  if (known) return known
+  return reason.startsWith('http_') ? `HTTP ${reason.slice(5)}` : reason
+}
 
 /**
  * One timestamp format for the whole console.

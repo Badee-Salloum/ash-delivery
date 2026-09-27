@@ -98,11 +98,16 @@ export function ShiftPathMap({
       }
     }
     for (const ping of view.pings) {
+      const delayed = ping.lateUpload ?? Date.parse(ping.receivedAt) - Date.parse(ping.capturedAt) > 5 * 60_000
       L.circleMarker([ping.lat, ping.lng], {
         radius: 2, color: ping.phase === 'break' ? paints.break : paints.path,
         fillColor: ping.phase === 'break' ? paints.break : paints.path,
         fillOpacity: 0.7, weight: 0,
-      }).addTo(layer)
+      }).bindPopup(
+        `${t.shiftPath.capturedAt}: ${formatDateTimeSeconds(ping.capturedAt, lang)}<br>` +
+        `${t.shiftPath.receivedAt}: ${formatDateTimeSeconds(ping.receivedAt, lang)}` +
+        (delayed ? `<br>${t.shiftPath.lateUpload}` : ''),
+      ).addTo(layer)
     }
 
     // The selected order's own stretch, drawn bright and on top.
@@ -126,7 +131,7 @@ export function ShiftPathMap({
 
     const extent = showRawExtent ? points : workBounds.length > 0 ? workBounds : breakBounds.length > 0 ? breakBounds : points
     if (mapRef.current && extent.length > 0) mapRef.current.fitBounds(L.latLngBounds(extent).pad(0.3), { maxZoom: 16 })
-  }, [view, selected, theme, showRawExtent])
+  }, [view, selected, theme, showRawExtent, t, lang])
 
   const orderLabel = useCallback(
     (providerOrderNo: string, minute: string | null): string =>
@@ -135,6 +140,7 @@ export function ShiftPathMap({
   )
 
   const trackerPings = view ? view.pings.filter((p) => p.source === 'tracker').length : 0
+  const latePings = view ? view.pings.filter((p) => p.lateUpload ?? Date.parse(p.receivedAt) - Date.parse(p.capturedAt) > 5 * 60_000).length : 0
 
   // In an embedded surface (the review overlay) a shift with no recorded trail should show nothing
   // rather than an empty map card. The standalone screens pass the message through instead.
@@ -158,6 +164,7 @@ export function ShiftPathMap({
             {view.coverageIncomplete ? <Badge tone="amber">{t.shiftPath.incompleteCoverage}</Badge> : null}
             <span className="text-ink-muted">{t.shiftPath.rawTrailDistance}: <span className="num">{formatDistance(view.totalDistanceMetres, t.shiftPath)}</span></span>
             {view.breaks.length > 0 ? <span className="text-warning-ink">{t.shiftPath.breakTrail}</span> : null}
+            {latePings > 0 ? <Badge tone="warning">{t.shiftPath.lateUpload} · {latePings}</Badge> : null}
           </div>
         ) : null}
         {trackerPings > 0 ? (

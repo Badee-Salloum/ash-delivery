@@ -544,6 +544,40 @@ export interface GpsSilentShift {
   silentMinutes: number
 }
 
+export interface GpsDiagnostics {
+  shiftId?: string
+  appBuild?: number | null
+  service: 'running' | 'stopped' | 'unknown'
+  permission: 'precise' | 'approximate' | 'denied' | 'unknown'
+  locationEnabled: boolean | null
+  network: 'online' | 'offline' | 'unknown'
+  pendingCount: number
+  lastCapturedAtMs?: number | null
+  lastUploadedAtMs?: number | null
+  droppedExpired?: number
+  droppedCapacity?: number
+  droppedStorage?: number
+  rejectionReasons?: Record<string, number>
+  reportedAt?: string | null
+  cause?: string
+}
+
+export type GpsHealthCause = 'unknown' | 'permission' | 'location_disabled' | 'service_stopped' |
+  'offline' | 'capture_stopped' | 'upload_stalled' | 'healthy'
+
+export interface GpsLiveHealth extends Partial<GpsDiagnostics> {
+  shiftId: string
+  driverId: string
+  reportedAt: string | null
+  cause: GpsHealthCause
+}
+
+export interface GpsFixResult {
+  pointId: string
+  status: 'stored' | 'duplicate' | 'rejected'
+  reason?: string
+}
+
 /** A GPS source: the foreground beacon, the Android background service, or a hardware tracker. */
 export type GpsSource = 'phone_fg' | 'phone_bg' | 'tracker'
 
@@ -554,6 +588,7 @@ export interface GpsPathPing {
   source: GpsSource
   capturedAt: string
   receivedAt: string
+  lateUpload?: boolean
   phase: 'before_work' | 'work' | 'break' | 'after_close'
   /** Validated work edge ending at this ping, or null if it is not safely countable. */
   workEdgeMetres: number | null
@@ -2315,25 +2350,15 @@ export class ApiClient {
   }
 
   // ── Live GPS (SRS K) ────────────────────────────────────────────────────────────────────────
-  /** The driver's phone posts a location fix while his shift is open (foreground-only). */
-  /**
-   * Send a buffered run of fixes in one request.
-   *
-   * A background uploader produces runs, not singles: a phone with no signal keeps working and
-   * keeps its fixes. One request carrying four costs the API a fraction of four carrying one, and
-   * the server dedupes on `(shift_id, captured_at)` so a retry after a lost response is free.
-   *
-   * 409 means the shift is over and these fixes will never be accepted — the caller must drop them
-   * and stop, never retry.
-   */
+  /** A durable run of fixes, acknowledged individually by stable point ID. */
   sendGpsBatch(
     shiftId: string,
     body: {
       source: 'phone_fg' | 'phone_bg' | 'tracker'
-      fixes: Array<{ lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }>
+      fixes: Array<{ pointId?: string; lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }>
     },
   ) {
-    return this.post<{ ok: true; accepted: number; duplicates: number; rejected: number }>(
+    return this.post<{ ok: true; accepted: number; duplicates: number; rejected: number; results?: GpsFixResult[] }>(
       `/shifts/${shiftId}/gps`,
       body,
     )
@@ -2343,7 +2368,22 @@ export class ApiClient {
   }
   /** The manager's live map: the latest fix per driver, plus tracked shifts that have gone silent. */
   gpsLive() {
-    return this.get<{ drivers: GpsLiveDriver[]; silent: GpsSilentShift[] }>('/gps/live')
+    return this.get<{ drivers: GpsLiveDriver[]; silent: GpsSilentShift[]; health?: GpsLiveHealth[] }>('/gps/live')
+  }
+  confirmGpsReadiness(shiftId: string, body: {
+    appBuild: number
+    capturedAtMs: number
+    accuracyM: number
+    precise: true
+    locationEnabled: true
+  }) {
+    return this.post<{ ready: true; expiresAt: string }>(`/shifts/${shiftId}/gps/readiness`, body)
+  }
+  reportGpsDiagnostics(shiftId: string, body: GpsDiagnostics) {
+    return this.post<{ recorded: true; cause: GpsHealthCause }>(`/shifts/${shiftId}/gps/diagnostics`, body)
+  }
+  getGpsDiagnostics(shiftId: string) {
+    return this.get<GpsLiveHealth>(`/shifts/${shiftId}/gps/diagnostics`)
   }
   /** One shift's recorded trail, split into a path segment per order by printed time (gps.view). */
   getShiftGpsPath(shiftId: string) {

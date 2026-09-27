@@ -205,6 +205,184 @@ describe('live GPS (SRS K)', () => {
   })
 
   describe('a buffered uploader, which is what background tracking actually produces', () => {
+    it('requires a fresh native fix before confirmation when the rollout gate is enabled', async () => {
+      await h.app.close()
+      h = await makeHarness({ minDriverAndroidTrackerBuild: 10 })
+      const driver = await h.loginAs('driver1')
+      const id = (await post(driver, '/shifts', {
+        driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1,
+      })).json().id as string
+      await h.uploadPhoto(driver, id, 'start', 'odometer')
+      expect((await put(driver, `/shifts/${id}/start-package`, {
+        odometerKm: 100, batteryPercent: 90,
+      })).json().error).toBe('gps_preflight_required')
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, {
+        appBuild: 9, capturedAtMs: h.deps.clock.nowMs(), accuracyM: 12,
+        precise: true, locationEnabled: true,
+      })).statusCode).toBe(426)
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, {
+        appBuild: 10, capturedAtMs: h.deps.clock.nowMs() - 31_000, accuracyM: 12,
+        precise: true, locationEnabled: true,
+      })).json().error).toBe('gps_fix_not_fresh')
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, {
+        appBuild: 10, capturedAtMs: h.deps.clock.nowMs(), accuracyM: 12,
+        precise: true, locationEnabled: true,
+      })).json()).toMatchObject({ ready: true })
+      expect((await put(driver, `/shifts/${id}/start-package`, {
+        odometerKm: 100, batteryPercent: 90,
+      })).statusCode).toBe(200)
+      expect((await get(driver, `/shifts/${id}/gps/status`)).json()).toMatchObject({ live: true })
+    })
+
+    it('accepts identified fixes after cancellation only when captured inside the tracking window', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      h.deps.clock.advance(2 * 60_000)
+      const capturedAtMs = h.deps.clock.nowMs()
+      h.deps.clock.advance(60_000)
+      expect((await post(manager, `/shifts/${id}/void`, { reason: 'stuck shift' })).statusCode).toBe(200)
+      h.deps.clock.advance(10 * 60_000)
+      const firstId = crypto.randomUUID()
+      const secondId = crypto.randomUUID()
+      const batch = {
+        source: 'phone_bg', fixes: [
+          { pointId: firstId, lat: 33.5, lng: 36.2, accuracyM: 9, capturedAtMs },
+          { pointId: secondId, lat: 33.6, lng: 36.3, accuracyM: 9, capturedAtMs: h.deps.clock.nowMs() },
+        ],
+      }
+      const first = await post(driver, `/shifts/${id}/gps`, batch)
+      expect(first.statusCode, first.body).toBe(202)
+      expect(first.json()).toMatchObject({ accepted: 1, rejected: 1, results: [
+        { pointId: firstId, status: 'stored' },
+        { pointId: secondId, status: 'rejected', reason: 'after_tracking_ended' },
+      ] })
+      expect(h.deps.gps.rows.find((row) => row.pointId === firstId)?.capturedAtMs).toBe(capturedAtMs)
+      expect(h.deps.gps.rows.find((row) => row.pointId === firstId)?.receivedAtMs).toBe(h.deps.clock.nowMs())
+      expect((await post(driver, `/shifts/${id}/gps`, batch)).json()).toMatchObject({
+        accepted: 0, duplicates: 1, rejected: 1,
+      })
+    })
+
+    it('keeps capture time and per-point results when a batch arrives after final approval', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      h.deps.clock.advance(3 * 60_000)
+      const capturedAtMs = h.deps.clock.nowMs()
+      h.deps.clock.advance(60_000)
+      const endedAt = new Date(h.deps.clock.nowMs()).toISOString()
+      const shift = h.deps.shifts.rows.get(id)!
+      h.deps.shifts.rows.set(id, { ...shift, state: 'approved', approvedAt: endedAt,
+        trackingEndedAt: endedAt, submittedAt: endedAt })
+      h.deps.clock.advance(30 * 60_000)
+      const goodId = crypto.randomUUID()
+      const lateId = crypto.randomUUID()
+      const response = await post(driver, `/shifts/${id}/gps`, { source: 'phone_bg', fixes: [
+        { pointId: goodId, lat: 33.5, lng: 36.2, accuracyM: 8, capturedAtMs },
+        { pointId: lateId, lat: 33.6, lng: 36.3, accuracyM: 8,
+          capturedAtMs: h.deps.clock.nowMs() },
+      ] })
+      expect(response.statusCode, response.body).toBe(202)
+      expect(response.json()).toMatchObject({ accepted: 1, rejected: 1, results: [
+        { pointId: goodId, status: 'stored' },
+        { pointId: lateId, status: 'rejected', reason: 'after_tracking_ended' },
+      ] })
+      const stored = h.deps.gps.rows.find((row) => row.pointId === goodId)!
+      expect(stored.capturedAtMs).toBe(capturedAtMs)
+      expect(stored.receivedAtMs).toBe(h.deps.clock.nowMs())
+      const path = (await get(manager, `/shifts/${id}/gps/path`)).json()
+      expect(path.pings).toMatchObject([{ lateUpload: true }])
+      h.deps.clock.advance(8 * 24 * 60 * 60_000)
+      const driverAgain = await h.loginAs('driver1')
+      expect((await post(driverAgain, `/shifts/${id}/gps`, { source: 'phone_bg', fixes: [
+        { pointId: goodId, lat: 33.5, lng: 36.2, accuracyM: 8, capturedAtMs },
+        { pointId: crypto.randomUUID(), lat: 33.5, lng: 36.2, accuracyM: 8, capturedAtMs },
+      ] })).json()).toMatchObject({ results: [
+        { pointId: goodId, status: 'duplicate' },
+        { status: 'rejected', reason: 'older_than_7_days' },
+      ] })
+    })
+
+    it('retains both confirmed tracking windows across an opening rejection', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = (await post(driver, '/shifts', {
+        driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1,
+      })).json().id as string
+      await h.uploadPhoto(driver, id, 'start', 'odometer')
+      expect((await put(driver, `/shifts/${id}/start-package`, {
+        odometerKm: 100, batteryPercent: 90,
+      })).statusCode).toBe(200)
+      h.deps.clock.advance(60_000)
+      const firstCapture = h.deps.clock.nowMs()
+      h.deps.clock.advance(60_000)
+      expect((await post(manager, `/shifts/${id}/reject-open`, { notes: 'retry evidence' })).statusCode).toBe(200)
+      h.deps.clock.advance(60_000)
+      const gapCapture = h.deps.clock.nowMs()
+      h.deps.clock.advance(60_000)
+      expect((await put(driver, `/shifts/${id}/start-package`, {
+        odometerKm: 100, batteryPercent: 90,
+      })).statusCode).toBe(200)
+      h.deps.clock.advance(60_000)
+      const secondCapture = h.deps.clock.nowMs()
+      h.deps.clock.advance(60_000)
+      const finalEnd = new Date(h.deps.clock.nowMs()).toISOString()
+      const confirmed = h.deps.shifts.rows.get(id)!
+      await h.deps.shifts.update({ ...confirmed, state: 'approved',
+        approvedAt: finalEnd, trackingEndedAt: finalEnd }, null)
+      const response = await post(driver, `/shifts/${id}/gps`, { source: 'phone_bg', fixes: [
+        { pointId: crypto.randomUUID(), lat: 33.5, lng: 36.2, capturedAtMs: firstCapture },
+        { pointId: crypto.randomUUID(), lat: 33.5, lng: 36.2, capturedAtMs: gapCapture },
+        { pointId: crypto.randomUUID(), lat: 33.5, lng: 36.2, capturedAtMs: secondCapture },
+      ] })
+      expect(response.json()).toMatchObject({ accepted: 2, rejected: 1, results: [
+        { status: 'stored' },
+        { status: 'rejected', reason: 'outside_tracking_window' },
+        { status: 'stored' },
+      ] })
+    })
+
+    it('acknowledges a stored UUID even after the per-shift point quota is reached', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const pointId = crypto.randomUUID()
+      const fix = { pointId, lat: 33.5, lng: 36.2, accuracyM: 8,
+        capturedAtMs: h.deps.clock.nowMs() }
+      expect((await post(driver, `/shifts/${id}/gps`, { source: 'phone_bg', fixes: [fix] })).json())
+        .toMatchObject({ accepted: 1 })
+      const stored = h.deps.gps.rows[0]!
+      for (let index = 0; index < 19_999; index++) {
+        h.deps.gps.rows.push({ ...stored, id: index + 2, pointId: null,
+          capturedAtMs: stored.capturedAtMs - index - 1 })
+      }
+      expect((await post(driver, `/shifts/${id}/gps`, { source: 'phone_bg', fixes: [
+        fix, { ...fix, pointId: crypto.randomUUID() },
+      ] })).json()).toMatchObject({ results: [
+        { pointId, status: 'duplicate' },
+        { status: 'rejected', reason: 'shift_point_quota' },
+      ] })
+    })
+
+    it('reports a stale diagnostic heartbeat as unknown without discarding the last data', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const diagnostic = await post(driver, `/shifts/${id}/gps/diagnostics`, {
+        appBuild: 10, service: 'running', permission: 'precise', locationEnabled: true,
+        network: 'offline', pendingCount: 12, lastCapturedAtMs: h.deps.clock.nowMs(),
+        lastUploadedAtMs: null, droppedExpired: 0, droppedCapacity: 0, droppedStorage: 3,
+        rejectionReasons: {},
+      })
+      expect(diagnostic.json()).toMatchObject({ recorded: true, cause: 'offline' })
+      expect((await get(manager, `/shifts/${id}/gps/diagnostics`)).json()).toMatchObject({
+        pendingCount: 12, droppedStorage: 3, cause: 'offline',
+      })
+      h.deps.clock.advance(11 * 60_000)
+      expect((await get(driver, `/shifts/${id}/gps/status`)).json().health.cause).toBe('unknown')
+    })
+
     it('accepts a batch, stores it in CAPTURE order, and counts what was new', async () => {
       const driver = await h.loginAs('driver1')
       const manager = await h.loginAs('manager')

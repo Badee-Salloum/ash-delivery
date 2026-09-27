@@ -11,6 +11,11 @@
   English file exists so a future non-Arabic handset is not left with a raw key on its lock screen.
 -->
 <resources>
+  <string name="tracking_storage_failed">تعذّر حفظ نقطة الموقع على الهاتف. افتح التطبيق وتحقق من المساحة المتاحة.</string>
+  <string name="tracking_permission_lost">إذن الموقع الدقيق غير متاح. افتح التطبيق لإصلاح التتبع.</string>
+  <string name="tracking_location_disabled">موقع الجهاز متوقف. شغّله لاستئناف التتبع.</string>
+  <string name="tracking_no_fix">لم تُسجل نقطة GPS منذ دقيقتين. تحقق من الموقع وإعدادات البطارية.</string>
+  <string name="tracking_offline">لا يوجد إنترنت. تُحفظ نقاط الموقع وستُرفع عند الاتصال.</string>
   <string name="tracking_channel_name">تتبّع النوبة</string>
   <string name="tracking_title">النوبة مفتوحة</string>
   <string name="tracking_text">يُسجَّل موقعك أثناء النوبة، ويتوقّف عند إغلاقها.</string>

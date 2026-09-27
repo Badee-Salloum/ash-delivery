@@ -19,9 +19,8 @@ import androidx.core.content.ContextCompat;
  * shift was live when the phone went down, starts the service again.
  *
  * It does NOT check with the server whether the shift is still live — it does not have to. If the
- * shift has since closed, the service's first flush gets the 409 stop signal, drops its buffer and
- * shuts itself down (see {@link TrackerService}). So the worst case of a stale assignment is one
- * rejected request, not a phone hammering a closed shift.
+ * shift has since closed, the service's status check stops capture. Already captured fixes remain
+ * in SQLite and {@link GpsUploadWorker} delivers them after closure.
  *
  * A boot restart runs with NO visible UI, so a location foreground service can only actually get
  * fixes if the app holds `ACCESS_BACKGROUND_LOCATION` ("allow all the time"). Without it, starting
@@ -38,6 +37,9 @@ public class BootReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(action) && !Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)) {
             return;
         }
+
+        // Uploading buffered fixes requires no location permission or active shift assignment.
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action)) GpsUploadWorker.schedule(context);
 
         SharedPreferences prefs = context.getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
         String shiftId = prefs.getString(TrackerService.KEY_SHIFT_ID, null);

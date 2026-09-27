@@ -19,6 +19,8 @@
  * asks the driver anything: he is riding a motorbike.
  */
 
+import { clientUuid, type GpsFixResult } from '@ash/client'
+
 const DB_NAME = 'ash-driver-gps'
 const DB_VERSION = 1
 const STORE = 'outbox'
@@ -26,17 +28,10 @@ const STORE = 'outbox'
 // service has its own on-disk queue; this covers browsers with blocked or intermittently broken IDB.
 const memoryOutbox = new Map<string, QueuedFix>()
 
-/**
- * How many fixes may wait at once.
- *
- * At a fix every 15 s this is about eight hours — longer than any shift, so an ordinary day out of
- * signal loses nothing. Past it the OLDEST are dropped: when the buffer is full the recent minutes
- * are the ones worth keeping, and a stale position is exactly what the live map must not show.
- */
-export const GPS_OUTBOX_MAX = 2_000
+/** The Android SQLite queue uses the same retention and capacity. */
+export const GPS_OUTBOX_MAX = 60_000
 
-/** A fix older than this is not worth a round trip. The server's own window is the same day. */
-export const GPS_OUTBOX_TTL_MS = 24 * 60 * 60_000
+export const GPS_OUTBOX_TTL_MS = 7 * 24 * 60 * 60_000
 
 export interface QueuedFix {
   /** `${shiftId}:${capturedAtMs}` — the server's natural key, so a double-enqueue is free too. */
@@ -46,6 +41,8 @@ export interface QueuedFix {
   lng: number
   accuracyM: number | null
   capturedAtMs: number
+  pointId?: string
+  rejectedReason?: string
 }
 
 function factory(): IDBFactory | null {
@@ -113,7 +110,7 @@ async function readAll(): Promise<QueuedFix[]> {
 
 /** Buffer one fix. Keyed by the server's natural key, so enqueuing the same instant twice is free. */
 export async function enqueueFix(fix: Omit<QueuedFix, 'key'>): Promise<void> {
-  const queued = { ...fix, key: fixKey(fix.shiftId, fix.capturedAtMs) } satisfies QueuedFix
+  const queued = { ...fix, pointId: fix.pointId ?? clientUuid(), key: fixKey(fix.shiftId, fix.capturedAtMs) } satisfies QueuedFix
   // Hold the fix before an async open/transaction: a failed or blocked IDB write cannot eat it.
   memoryOutbox.set(queued.key, queued)
   await withStore<void>('readwrite', (store, resolve, reject) => {
@@ -141,7 +138,7 @@ export function nextFlushBatch(
   limit: number,
 ): QueuedFix[] {
   return all
-    .filter((fix) => fix.shiftId === shiftId)
+    .filter((fix) => fix.shiftId === shiftId && !fix.rejectedReason)
     .sort((a, b) => a.capturedAtMs - b.capturedAtMs)
     .slice(0, limit)
 }
@@ -151,7 +148,28 @@ export async function peekFixes(shiftId: string, limit: number): Promise<QueuedF
   return nextFlushBatch(all, shiftId, limit)
 }
 
-/** Forget fixes the server has taken. Called only on a 2xx, or on the 409 that ends a shift. */
+/** A partial server response may retire only the named fixes it actually accepted. */
+export function gpsBatchDisposition(
+  pending: readonly QueuedFix[],
+  response: { accepted: number; duplicates: number; rejected: number; results?: readonly GpsFixResult[] },
+): { acknowledged: string[]; rejected: Map<string, string> } {
+  const byId = new Map(pending.filter((fix) => fix.pointId).map((fix) => [fix.pointId, fix]))
+  const acknowledged: string[] = []
+  const rejected = new Map<string, string>()
+  for (const result of response.results ?? []) {
+    const fix = byId.get(result.pointId)
+    if (!fix) continue
+    if (result.status === 'stored' || result.status === 'duplicate') acknowledged.push(fix.key)
+    else rejected.set(fix.key, result.reason ?? 'rejected')
+  }
+  // Older rows had no point ID. Only a fully successful aggregate reply can retire those rows.
+  if (!response.results?.length && response.rejected === 0 && response.accepted + response.duplicates === pending.length) {
+    acknowledged.push(...pending.map((fix) => fix.key))
+  }
+  return { acknowledged, rejected }
+}
+
+/** Forget only fixes the server individually acknowledged as stored or duplicate. */
 export async function dropFixes(keys: readonly string[]): Promise<void> {
   if (keys.length === 0) return
   for (const key of keys) memoryOutbox.delete(key)
@@ -164,6 +182,22 @@ export async function dropFixes(keys: readonly string[]): Promise<void> {
         left -= 1
         if (left === 0) resolve(undefined)
       }
+    }
+  })
+}
+
+/** Keep a rejected fix for diagnosis until normal seven-day expiry, without retrying it forever. */
+export async function markRejectedFixes(reasons: ReadonlyMap<string, string>): Promise<void> {
+  if (reasons.size === 0) return
+  const affected = (await readAll()).filter((fix) => reasons.has(fix.key))
+  for (const fix of affected) memoryOutbox.set(fix.key, { ...fix, rejectedReason: reasons.get(fix.key) ?? 'rejected' })
+  await withStore<void>('readwrite', (store, resolve, reject) => {
+    let left = affected.length
+    if (left === 0) { resolve(undefined); return }
+    for (const fix of affected) {
+      const request = store.put({ ...fix, rejectedReason: reasons.get(fix.key) ?? 'rejected' })
+      request.onerror = () => reject(request.error ?? new Error('indexeddb_put_failed'))
+      request.onsuccess = () => { if (--left === 0) resolve(undefined) }
     }
   })
 }

@@ -46,6 +46,11 @@ import type {
   ShiftCloseUnitOfWorkInput,
   GpsPingRecord,
   GpsPingRepo,
+  GpsIdentifiedFix,
+  GpsIdentifiedIngestResult,
+  GpsPingSource,
+  GpsTrackerHealth,
+  GpsTrackerHealthRepo,
   TrackerDeviceRecord,
   TrackerDeviceRepo,
   OrderPointRecord,
@@ -96,6 +101,10 @@ import {
   hasVisibleText,
   isAwaitingDecision,
   isLive,
+  isTracked,
+  effectiveGpsCaptureWindows,
+  planIdentifiedGpsIngest,
+  gpsIngestReceipts,
   minor,
   postingBalanceProblem,
 } from '@ash/domain'
@@ -330,6 +339,7 @@ export class MemoryDriverAccountProvisioningRepo implements DriverAccountProvisi
 
 export class MemoryShiftRepo implements ShiftRepo {
   readonly rows = new Map<string, ShiftRecord>()
+  readonly trackingWindows = new Map<string, { startedAtMs: number; endedAtMs: number | null }[]>()
   private readonly media: MemoryMediaRepo
   constructor(media: MemoryMediaRepo) {
     this.media = media
@@ -366,6 +376,15 @@ export class MemoryShiftRepo implements ShiftRepo {
     return s ? this.withSlots(s) : null
   }
   async update(shift: ShiftRecord, _actorId: string | null): Promise<void> {
+    const previous = this.rows.get(shift.id)
+    const windows = this.trackingWindows.get(shift.id) ?? []
+    if (previous?.state === 'draft' && shift.state === 'awaiting_open_approval' && shift.driverConfirmedAt) {
+      windows.push({ startedAtMs: Date.parse(shift.driverConfirmedAt), endedAtMs: null })
+    } else if (previous && isTracked(previous.state) && !isTracked(shift.state)) {
+      const open = windows.findLast((window) => window.endedAtMs === null)
+      if (open) open.endedAtMs = Date.parse(shift.trackingEndedAt ?? shift.approvedAt ?? '')
+    }
+    this.trackingWindows.set(shift.id, windows)
     this.rows.set(shift.id, structuredClone(shift))
   }
   async countOpenActorsForBranch(branchId: string): Promise<{ drivers: number; vehicles: number }> {
@@ -2212,6 +2231,8 @@ export class MemoryShiftSettlementRepo implements ShiftSettlementRepo {
 export class MemoryGpsPingRepo implements GpsPingRepo {
   readonly rows: GpsPingRecord[] = []
   private nextId = 1
+  private readonly shifts: MemoryShiftRepo | undefined
+  constructor(shifts?: MemoryShiftRepo) { this.shifts = shifts }
 
   async append(ping: Omit<GpsPingRecord, 'id'>): Promise<void> {
     await this.appendMany([ping])
@@ -2225,16 +2246,76 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
    * in the same batch, because one INSERT statement in PostgreSQL behaves that way too.
    */
   async appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }> {
-    const seen = new Set(this.rows.map((r) => `${r.shiftId}:${r.capturedAtMs}`))
+    const seen = new Set(this.rows.map((r) => r.pointId ? `${r.shiftId}:id:${r.pointId}` : `${r.shiftId}:time:${r.capturedAtMs}`))
     let inserted = 0
     for (const ping of pings) {
-      const key = `${ping.shiftId}:${ping.capturedAtMs}`
+      const key = ping.pointId ? `${ping.shiftId}:id:${ping.pointId}` : `${ping.shiftId}:time:${ping.capturedAtMs}`
       if (seen.has(key)) continue
       seen.add(key)
       this.rows.push({ ...ping, id: this.nextId++ })
       inserted += 1
     }
     return { inserted }
+  }
+
+  async appendIdentified(pings: readonly (Omit<GpsPingRecord, 'id'> & { pointId: string })[]): Promise<readonly string[]> {
+    const seen = new Set(this.rows.filter((row) => row.pointId).map((row) => `${row.shiftId}:${row.pointId}`))
+    const stored: string[] = []
+    for (const ping of pings) {
+      const key = `${ping.shiftId}:${ping.pointId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      this.rows.push({ ...ping, id: this.nextId++ })
+      stored.push(ping.pointId)
+    }
+    return stored
+  }
+
+  async knownPointIds(shiftId: string, pointIds: readonly string[]): Promise<readonly string[]> {
+    const wanted = new Set(pointIds)
+    return this.rows.filter((row) => row.shiftId === shiftId && row.pointId && wanted.has(row.pointId))
+      .map((row) => row.pointId!)
+  }
+
+  async trackingWindows(shiftId: string): Promise<readonly { startedAtMs: number; endedAtMs: number | null }[]> {
+    return structuredClone(this.shifts?.trackingWindows.get(shiftId) ?? [])
+  }
+
+  async ingestIdentified(input: {
+    shiftId: string
+    fixes: readonly GpsIdentifiedFix[]
+    source: GpsPingSource
+    nowMs: number
+    maxStored: number
+    retentionMs: number
+  }): Promise<GpsIdentifiedIngestResult | null> {
+    const shift = this.shifts?.rows.get(input.shiftId)
+    if (!shift) return null
+    const windows = effectiveGpsCaptureWindows(
+      this.shifts?.trackingWindows.get(input.shiftId) ?? [],
+      Date.parse(shift.driverConfirmedAt ?? ''),
+      Date.parse(shift.trackingEndedAt ?? shift.approvedAt ?? ''),
+      isTracked(shift.state),
+    )
+    const knownIds = this.rows.filter((row) => row.shiftId === input.shiftId && row.pointId &&
+      input.fixes.some((fix) => fix.pointId === row.pointId)).map((row) => row.pointId!)
+    const plan = planIdentifiedGpsIngest({
+      fixes: input.fixes, windows, knownIds,
+      storedCount: this.rows.filter((row) => row.shiftId === input.shiftId).length,
+      maxStored: input.maxStored, nowMs: input.nowMs, retentionMs: input.retentionMs,
+    })
+    const storedIds: string[] = []
+    const seen = new Set(this.rows.filter((row) => row.shiftId === input.shiftId && row.pointId)
+      .map((row) => row.pointId!))
+    for (const fix of plan.selected) {
+      if (seen.has(fix.pointId)) continue
+      seen.add(fix.pointId)
+      storedIds.push(fix.pointId)
+      this.rows.push({ ...fix, id: this.nextId++, shiftId: input.shiftId,
+        driverId: shift.driverId, branchId: shift.branchId, source: input.source,
+        receivedAtMs: input.nowMs })
+    }
+    return gpsIngestReceipts(plan, storedIds)
   }
 
   async latestForDriversInBranch(
@@ -2290,6 +2371,55 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
     return this.rows.filter((r) => r.shiftId === shiftId).length
   }
 }
+
+/** Coordinate-free tracker readiness and diagnostic heartbeat. */
+export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
+  readonly rows = new Map<string, GpsTrackerHealth>()
+
+  async recordReadiness(input: { shiftId: string; atMs: number; capturedAtMs: number; accuracyM: number; appBuild: number }): Promise<void> {
+    const previous = this.rows.get(input.shiftId)
+    this.rows.set(input.shiftId, {
+      ...emptyGpsTrackerHealth(input.shiftId), ...previous,
+      readinessAtMs: input.atMs,
+      readinessCapturedAtMs: input.capturedAtMs,
+      readinessAccuracyM: input.accuracyM,
+      appBuild: input.appBuild,
+    })
+  }
+
+  async recordHeartbeat(input: GpsTrackerHealth): Promise<void> {
+    const previous = this.rows.get(input.shiftId)
+    this.rows.set(input.shiftId, {
+      ...emptyGpsTrackerHealth(input.shiftId), ...previous, ...structuredClone(input),
+      readinessAtMs: previous?.readinessAtMs ?? null,
+      readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
+      readinessAccuracyM: previous?.readinessAccuracyM ?? null,
+      droppedExpired: Math.max(previous?.droppedExpired ?? 0, input.droppedExpired),
+      droppedCapacity: Math.max(previous?.droppedCapacity ?? 0, input.droppedCapacity),
+      droppedStorage: Math.max(previous?.droppedStorage ?? 0, input.droppedStorage),
+    })
+  }
+
+  async findByShift(shiftId: string): Promise<GpsTrackerHealth | null> {
+    const row = this.rows.get(shiftId)
+    return row ? structuredClone(row) : null
+  }
+
+  async listByShiftIds(shiftIds: readonly string[]): Promise<GpsTrackerHealth[]> {
+    return shiftIds.flatMap((id) => {
+      const row = this.rows.get(id)
+      return row ? [structuredClone(row)] : []
+    })
+  }
+}
+
+const emptyGpsTrackerHealth = (shiftId: string): GpsTrackerHealth => ({
+  shiftId, readinessAtMs: null, readinessCapturedAtMs: null, readinessAccuracyM: null,
+  appBuild: null, heartbeatAtMs: null, service: null, permission: null,
+  locationEnabled: null, network: null, pendingCount: null,
+  lastCapturedAtMs: null, lastUploadedAtMs: null,
+  droppedExpired: 0, droppedCapacity: 0, droppedStorage: 0, rejectionReasons: {},
+})
 
 /** The hardware tracker registry (SRS K-1 infrastructure); mirrors the SQL uniqueness rules. */
 export class MemoryTrackerDeviceRepo implements TrackerDeviceRepo {
@@ -2416,6 +2546,7 @@ export interface MemoryDeps extends Deps {
   settlements: MemoryShiftSettlementRepo
   closeDrafts: MemoryCloseDraftRepo
   gps: MemoryGpsPingRepo
+  gpsHealth: MemoryGpsTrackerHealthRepo
   trackerDevices: MemoryTrackerDeviceRepo
 }
 
@@ -2797,7 +2928,8 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     operationRemovals,
     settlements,
     closeDrafts,
-    gps: new MemoryGpsPingRepo(),
+    gps: new MemoryGpsPingRepo(shifts),
+    gpsHealth: new MemoryGpsTrackerHealthRepo(),
     trackerDevices: new MemoryTrackerDeviceRepo(),
   }
 }

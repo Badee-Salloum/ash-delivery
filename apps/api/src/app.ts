@@ -1,13 +1,15 @@
 import cookie from '@fastify/cookie'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
-import type { Deps, ShiftOrderRecord } from '@ash/contracts'
+import type { Deps, GpsIdentifiedFix, GpsTrackerHealth, ShiftOrderRecord } from '@ash/contracts'
 import {
   addOrderRequest,
   addTrancheRequest,
   adjustCashFloatRequest,
   adjustWalletTopupRequest,
   gpsIngestRequest,
+  gpsReadinessRequest,
+  gpsDiagnosticsRequest,
   trackerIngestRequest,
   approveCloseRequest,
   forceCloseRequest,
@@ -161,6 +163,8 @@ export interface AppOptions {
   /** The hardware-tracker ingest seam. Off unless both this and a gateway token are set. */
   trackerIngestEnabled?: boolean
   trackerGatewayToken?: string | undefined
+  /** Zero disables the rollout gate until every phone is updated. */
+  minDriverAndroidTrackerBuild?: number
 }
 
 /**
@@ -1002,6 +1006,21 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = startPackageRequest.parse(req.body)
+      const before = await deps.shifts.findById(id)
+      if (before?.state === 'draft' && (opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
+        const readiness = await deps.gpsHealth.findByShift(id)
+        const nowMs = deps.clock.nowMs()
+        if (!readiness || readiness.appBuild === null ||
+            readiness.appBuild < opts.minDriverAndroidTrackerBuild! ||
+            readiness.readinessAtMs === null || nowMs - readiness.readinessAtMs > 120_000 ||
+            readiness.readinessCapturedAtMs === null ||
+            Math.abs(nowMs - readiness.readinessCapturedAtMs) > 120_000 ||
+            readiness.readinessAccuracyM === null || readiness.readinessAccuracyM > 100) {
+          throw new ServiceError(409, 'gps_preflight_required', {
+            minAndroidBuild: opts.minDriverAndroidTrackerBuild,
+          })
+        }
+      }
       const shift = await submitStartPackage(deps, req.actor!, id, body)
       return {
         id: shift.id,
@@ -2416,12 +2435,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * covers a shift that only just opened and has not had time to send its first fix.
    */
   const GPS_SILENCE_GRACE_MS = 10 * 60_000
+  const GPS_OFFLINE_RETENTION_MS = 7 * 24 * 60 * 60_000
 
-  /**
-   * The shared ingest core: quota, clock-skew drop, capture-sort and the deduped append, used by
-   * both the driver route below and (later) the hardware-tracker route. The caller has already
-   * confirmed the shift is live; the `source` is the caller's, never the client's, for the tracker.
-   */
+  const trackerCause = (health: GpsTrackerHealth | null, nowMs: number): string => {
+    if (health?.heartbeatAtMs === null || health?.heartbeatAtMs === undefined ||
+        nowMs - health.heartbeatAtMs > GPS_SILENCE_GRACE_MS) return 'unknown'
+    if (health.permission !== 'precise') return 'permission'
+    if (health.locationEnabled === false) return 'location_disabled'
+    if (health.service !== 'running') return 'service_stopped'
+    if (health.network === 'offline') return 'offline'
+    if (health.lastCapturedAtMs === null || nowMs - health.lastCapturedAtMs > GPS_SILENCE_GRACE_MS) return 'capture_stopped'
+    if (health.pendingCount !== null && health.pendingCount > 0 &&
+        (health.lastUploadedAtMs === null || nowMs - health.lastUploadedAtMs > GPS_SILENCE_GRACE_MS)) return 'upload_stalled'
+    return 'healthy'
+  }
+
+  /** Legacy PWA and hardware-tracker ingest. Native identified fixes use the seven-day path below. */
   type IngestFix = { lat: number; lng: number; accuracyM: number | null; capturedAtMs: number }
   const ingestFixes = async (
     shift: { id: string; driverId: string; branchId: string },
@@ -2470,6 +2499,76 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
    * evidence-upload routes do.
    */
   // A native tracker with an empty buffer still needs to learn that its shift has ended.
+  app.post(
+    '/shifts/:id/gps/readiness',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = gpsReadinessRequest.parse(req.body)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+      if (shift.state !== 'draft') return reply.code(409).send({ error: 'shift_not_draft' })
+      const nowMs = deps.clock.nowMs()
+      if (body.capturedAtMs > nowMs + 5_000 || nowMs - body.capturedAtMs > 30_000) {
+        return reply.code(422).send({ error: 'gps_fix_not_fresh' })
+      }
+      if (body.appBuild < (opts.minDriverAndroidTrackerBuild ?? 0)) {
+        return reply.code(426).send({ error: 'android_update_required', minAndroidBuild: opts.minDriverAndroidTrackerBuild })
+      }
+      await deps.gpsHealth.recordReadiness({
+        shiftId: id, atMs: nowMs, capturedAtMs: body.capturedAtMs,
+        accuracyM: body.accuracyM, appBuild: body.appBuild,
+      })
+      return reply.code(202).send({ ready: true, expiresAt: new Date(nowMs + 120_000).toISOString() })
+    },
+  )
+
+  app.post(
+    '/shifts/:id/gps/diagnostics',
+    { config: { permission: 'shift.operate', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const body = gpsDiagnosticsRequest.parse(req.body)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+      const previous = await deps.gpsHealth.findByShift(id)
+      const nowMs = deps.clock.nowMs()
+      const health: GpsTrackerHealth = {
+        shiftId: id,
+        readinessAtMs: previous?.readinessAtMs ?? null,
+        readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
+        readinessAccuracyM: previous?.readinessAccuracyM ?? null,
+        appBuild: body.appBuild ?? previous?.appBuild ?? null,
+        heartbeatAtMs: nowMs,
+        service: body.service, permission: body.permission,
+        locationEnabled: body.locationEnabled, network: body.network,
+        pendingCount: body.pendingCount,
+        lastCapturedAtMs: body.lastCapturedAtMs ?? null,
+        lastUploadedAtMs: body.lastUploadedAtMs ?? null,
+        droppedExpired: body.droppedExpired,
+        droppedCapacity: body.droppedCapacity,
+        droppedStorage: body.droppedStorage,
+        rejectionReasons: body.rejectionReasons,
+      }
+      await deps.gpsHealth.recordHeartbeat(health)
+      return reply.code(202).send({ recorded: true, cause: trackerCause(health, nowMs) })
+    },
+  )
+
+  app.get(
+    '/shifts/:id/gps/diagnostics',
+    { config: { permission: 'gps.view', subject: shiftSubject } },
+    async (req, reply) => {
+      const { id } = z.object({ id: z.string() }).parse(req.params)
+      const shift = await deps.shifts.findById(id)
+      if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
+      const health = await deps.gpsHealth.findByShift(id)
+      return { shiftId: id, state: shift.state, ...(health ?? {}),
+        reportedAt: health?.heartbeatAtMs == null ? null : new Date(health.heartbeatAtMs).toISOString(),
+        cause: trackerCause(health, deps.clock.nowMs()) }
+    },
+  )
+
   app.get(
     '/shifts/:id/gps/status',
     { config: { permission: 'shift.operate', subject: shiftSubject } },
@@ -2477,7 +2576,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const shift = await deps.shifts.findById(id)
       if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
-      return { live: isTracked(shift.state), state: shift.state }
+      const health = await deps.gpsHealth.findByShift(id)
+      return { live: isTracked(shift.state), state: shift.state,
+        health: health ? { ...health,
+          reportedAt: health.heartbeatAtMs == null ? null : new Date(health.heartbeatAtMs).toISOString(),
+          cause: trackerCause(health, deps.clock.nowMs()) } : { reportedAt: null, cause: 'unknown' } }
     },
   )
   app.post(
@@ -2493,19 +2596,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const shift = await deps.shifts.findById(id)
       if (!shift) return reply.code(404).send({ error: 'shift_not_found' })
 
-      /*
-       * THE STOP SIGNAL. A native uploader outlives the WebView, so JS may never get the chance to
-       * call stop(); this 409 is the only thing that reliably tells it to drop its buffer and shut
-       * down. The client contract is exact and belongs in the same breath: 409 → clear and stop;
-       * network error → keep and back off. Reverse those two and a phone hammers a closed shift
-       * every minute for weeks with nobody watching.
-       *
-       * Everything inside a live shift is accepted, including `pending_review` — a driver standing
-       * at the counter through his close package is precisely the presence evidence we want.
-       * Clipping to the operation window is the distance function's job, not ingest's.
-       */
-      if (!isTracked(shift.state)) {
+      /* Legacy clients have no stable point ID, so a closed shift still returns 409.
+       * Identified native fixes are evaluated one by one against server-recorded
+       * capture windows even after the shift closes. A 409 must never clear their
+       * durable outbox. */
+      if (!isTracked(shift.state) && !('fixes' in body && body.fixes.every((fix) => fix.pointId))) {
         return reply.code(409).send({ error: 'shift_not_live', detail: { state: shift.state } })
+      }
+
+      if (parsed.fixes.every((fix) => fix.pointId)) {
+        const result = await deps.gps.ingestIdentified({
+          shiftId: id, fixes: parsed.fixes as GpsIdentifiedFix[], source: parsed.source,
+          nowMs: deps.clock.nowMs(), maxStored: MAX_GPS_PINGS_PER_SHIFT,
+          retentionMs: GPS_OFFLINE_RETENTION_MS,
+        })
+        if (!result) return reply.code(404).send({ error: 'shift_not_found' })
+        return reply.code(202).send({ ok: true, ...result })
       }
 
       const result = await ingestFixes(shift, parsed.fixes, parsed.source, deps.clock.nowMs())
@@ -2538,6 +2644,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
      */
     const nowMs = deps.clock.nowMs()
     const current = await deps.gps.latestForShiftIds(liveShifts.map((shift) => shift.id))
+    const healthRows = await deps.gpsHealth.listByShiftIds(liveShifts.map((shift) => shift.id))
+    const healthByShift = new Map(healthRows.map((row) => [row.shiftId, row]))
     const shown = current.filter((p) => p.capturedAtMs >= nowMs - GPS_LIVE_WINDOW_MS)
     // Even after a pin leaves the one-hour map window, its last capture is the true silence start.
     const latestByShift = new Map(current.map((p) => [p.shiftId, p]))
@@ -2568,6 +2676,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         receivedAt: new Date(p.receivedAtMs).toISOString(),
       })),
       silent,
+      health: liveShifts.filter((s) => isTracked(s.state)).map((s) => ({
+        driverId: s.driverId, shiftId: s.id,
+        ...(healthByShift.get(s.id) ?? {}),
+        reportedAt: healthByShift.get(s.id)?.heartbeatAtMs == null
+          ? null : new Date(healthByShift.get(s.id)!.heartbeatAtMs!).toISOString(),
+        cause: trackerCause(healthByShift.get(s.id) ?? null, nowMs),
+      })),
     }
   })
 
@@ -2633,6 +2748,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         workEdgeMetres: work.edgeMetres[index] === null ? null : Math.round(work.edgeMetres[index]!),
         capturedAt: new Date(p.capturedAtMs).toISOString(),
         receivedAt: new Date(p.receivedAtMs).toISOString(),
+        lateUpload: p.receivedAtMs - p.capturedAtMs > 5 * 60_000,
       })),
       orders: orders.map((o) => ({
         id: o.id,

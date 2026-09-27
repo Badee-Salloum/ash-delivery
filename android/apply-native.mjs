@@ -7,7 +7,7 @@
  * review and none of which could be verified on a machine without the Android SDK. Committing that
  * would be checking in a large binary-ish artefact and calling it source.
  *
- * So the repository holds only what is genuinely ours — three Java files, two string resources, an
+ * So the repository holds only what is genuinely ours — native Java files, two string resources, an
  * offline page, and this script — and CI regenerates the rest from a pinned Capacitor version. What
  * a reviewer reads is exactly what we wrote.
  *
@@ -60,6 +60,7 @@ let manifest = readFileSync(manifestPath, 'utf8')
  */
 const permissions = [
   'android.permission.INTERNET',
+  'android.permission.ACCESS_NETWORK_STATE',
   'android.permission.ACCESS_FINE_LOCATION',
   'android.permission.ACCESS_COARSE_LOCATION',
   'android.permission.ACCESS_BACKGROUND_LOCATION',
@@ -126,4 +127,17 @@ if (!gradle.includes('play-services-location')) {
   writeFileSync(gradlePath, gradle)
 }
 
-console.log('native sources applied: 5 Java files, 2 string resources, manifest, gradle')
+const workerDependency = "    implementation 'androidx.work:work-runtime:2.10.5'"
+if (!gradle.includes('androidx.work:work-runtime')) {
+  const at = gradle.lastIndexOf('dependencies {')
+  if (at === -1) throw new Error('could not find dependencies in app/build.gradle')
+  const insert = gradle.indexOf('\n', at) + 1
+  gradle = gradle.slice(0, insert) + workerDependency + '\n' + gradle.slice(insert)
+}
+
+// A monotonically increasing Android build code lets the server identify the native capability.
+gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 2')
+gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "2.0"')
+writeFileSync(gradlePath, gradle)
+
+console.log('native sources applied: Java tracker, queue and worker, resources, manifest, gradle')

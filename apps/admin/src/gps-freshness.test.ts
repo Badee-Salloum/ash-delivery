@@ -42,15 +42,14 @@ describe('a pin is labelled with when the driver was there, not when we heard', 
 })
 
 describe('the screen reads the capture time everywhere it draws one', () => {
-  it('labels the pin and the row from capturedAt, never receivedAt', () => {
+  it('labels the pin and the row from capturedAt, using receivedAt only for delay', () => {
     /*
-     * The assertion is negative on purpose. `receivedAt` is still on the wire and still useful for
-     * diagnosing a phone — it just may never be what a position is labelled with, and a positive
-     * test would pass with both present.
+     * A delayed-upload badge needs receivedAt, but it cannot replace the point's own timestamp.
      */
     expect(screenSource).toContain('Date.parse(d.capturedAt)')
     expect(screenSource).toContain('formatDateTimeSeconds(d.capturedAt, lang)')
-    expect(screenSource).not.toContain('d.receivedAt')
+    expect(screenSource).toContain('Date.parse(d.receivedAt) - Date.parse(d.capturedAt)')
+    expect(screenSource).not.toContain('formatDateTimeSeconds(d.receivedAt, lang)')
   })
 
   it('says the age in words, in both languages', () => {

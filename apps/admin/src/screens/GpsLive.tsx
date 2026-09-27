@@ -1,7 +1,7 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
-import { formatDateTimeSeconds, type GpsLiveDriver, type GpsSilentShift } from '@ash/client'
+import { formatDateTimeSeconds, formatGpsFailureReason, type GpsHealthCause, type GpsLiveDriver, type GpsLiveHealth, type GpsSilentShift } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { type GpsFreshness, gpsAgeMinutes, gpsFreshness } from '../gps-freshness.ts'
@@ -10,8 +10,7 @@ import { Badge, Card } from '../ui.tsx'
 
 /**
  * The live map (SRS K-2): the latest GPS fix per driver in the branch, polled every 10 s. A pin per
- * driver + a side list. Foreground-only tracking, so a driver with the app backgrounded goes stale
- * rather than moving — his last-seen time says so.
+ * driver + a side list. Freshness uses capture time, even when an offline batch arrives later.
  *
  * Uses Leaflet directly with `circleMarker` (a drawn circle, no image asset) to avoid the classic
  * bundler-vs-marker-icon problem entirely.
@@ -31,6 +30,7 @@ export function GpsLive(): ReactNode {
   const { api, t, lang, theme, branchId } = useApp()
   const [drivers, setDrivers] = useState<GpsLiveDriver[]>([])
   const [silent, setSilent] = useState<GpsSilentShift[]>([])
+  const [health, setHealth] = useState<GpsLiveHealth[]>([])
   const [names, setNames] = useState<Record<string, DriverLite>>({})
   const [error, setError] = useState<string | null>(null)
 
@@ -45,6 +45,7 @@ export function GpsLive(): ReactNode {
       .then((r) => {
         setDrivers(r.drivers)
         setSilent(r.silent)
+        setHealth(r.health ?? [])
       })
       .catch((e: { error?: string }) => setError(e.error ?? 'error'))
     void api
@@ -82,6 +83,20 @@ export function GpsLive(): ReactNode {
     },
     [names, lang],
   )
+
+  const causeLabel = (cause: GpsHealthCause): string => ({
+    unknown: t.gpsLive.causeUnknown,
+    permission: t.gpsLive.causePermission,
+    location_disabled: t.gpsLive.causeLocationDisabled,
+    service_stopped: t.gpsLive.causeServiceStopped,
+    offline: t.gpsLive.causeOffline,
+    capture_stopped: t.gpsLive.causeCaptureStopped,
+    upload_stalled: t.gpsLive.causeUploadStalled,
+    healthy: t.gpsLive.causeHealthy,
+  })[cause]
+  const healthByShift = new Map(health.map((item) => [item.shiftId, item]))
+  const stamp = (value: number | null | undefined): string =>
+    value == null ? '—' : formatDateTimeSeconds(new Date(value).toISOString(), lang)
 
   // Redraw the markers whenever the fixes change.
   useEffect(() => {
@@ -122,6 +137,7 @@ export function GpsLive(): ReactNode {
               <li key={s.shiftId} className="flex flex-wrap items-center gap-2 border-b border-line-subtle py-1 last:border-0">
                 <span className="font-medium">{driverName(s.driverId)}</span>
                 <Badge tone="danger">{t.gpsLive.silentFor.replace('{n}', String(s.silentMinutes))}</Badge>
+                <span className="text-ink-muted">{causeLabel(healthByShift.get(s.shiftId)?.cause ?? 'unknown')}</span>
               </li>
             ))}
           </ul>
@@ -142,6 +158,7 @@ export function GpsLive(): ReactNode {
                 <span className="num ms-auto text-xs text-slate-600" dir="ltr">
                   {formatDateTimeSeconds(d.capturedAt, lang)}
                 </span>
+                {Date.parse(d.receivedAt) - Date.parse(d.capturedAt) > 5 * 60_000 ? <Badge tone="warning">{t.gpsLive.lateUpload}</Badge> : null}
                 {/* Named, not merely coloured: «قبل ٣٢ دقيقة» is the fact the old screen hid. */}
                 {gpsFreshness(Date.parse(d.capturedAt), Date.now()) !== 'fresh' ? (
                   <Badge tone={gpsFreshness(Date.parse(d.capturedAt), Date.now()) === 'stale' ? 'danger' : 'warning'}>
@@ -153,6 +170,41 @@ export function GpsLive(): ReactNode {
           </ul>
         )}
       </Card>
+      {health.length > 0 ? (
+        <Card title={t.gpsLive.diagnosisTitle}>
+          <ul className="flex flex-col gap-3 text-sm">
+            {health.map((item) => {
+              const lost = (item.droppedExpired ?? 0) + (item.droppedCapacity ?? 0) + (item.droppedStorage ?? 0)
+              const reasons = Object.entries(item.rejectionReasons ?? {}).filter(([, count]) => count > 0)
+              return (
+                <li key={item.shiftId} className="border-b border-line-subtle pb-2 last:border-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <strong>{driverName(item.driverId)}</strong>
+                    <Badge tone={item.cause === 'healthy' ? 'success' : item.cause === 'unknown' ? 'neutral' : 'warning'}>{causeLabel(item.cause)}</Badge>
+                  </div>
+                  <div className="mt-1 grid gap-x-4 gap-y-1 text-ink-muted sm:grid-cols-2">
+                    <span>{t.gpsLive.lastCapture}: <span className="num">{stamp(item.lastCapturedAtMs)}</span></span>
+                    <span>{t.gpsLive.lastUpload}: <span className="num">{stamp(item.lastUploadedAtMs)}</span></span>
+                    <span>{t.gpsTracking.permission}: {item.permission === 'precise' ? t.gpsTracking.precise :
+                      item.permission === 'approximate' ? t.gpsTracking.approximate :
+                      item.permission === 'denied' ? t.gpsTracking.denied : t.gpsTracking.unknown}</span>
+                    <span>{t.gpsTracking.service}: {item.service === 'running' ? t.gpsTracking.enabled :
+                      item.service === 'stopped' ? t.gpsTracking.disabled : t.gpsTracking.unknown}</span>
+                    <span>{t.gpsTracking.network}: {item.network === 'online' ? t.gpsTracking.online :
+                      item.network === 'offline' ? t.gpsTracking.offline : t.gpsTracking.unknown}</span>
+                    <span>{t.gpsLive.pending.replace('{n}', String(item.pendingCount ?? 0))}</span>
+                    {lost > 0 ? <span className="text-danger-ink">{t.gpsLive.dropped.replace('{n}', String(lost))}</span> : null}
+                    {(item.droppedStorage ?? 0) > 0 ? <span className="text-danger-ink">{t.gpsLive.lostStorage.replace('{n}', String(item.droppedStorage))}</span> : null}
+                  </div>
+                  {reasons.length > 0 ? (
+                    <p className="mt-1 text-warning-ink">{t.gpsLive.rejected.replace('{reasons}', reasons.map(([reason, count]) => `${formatGpsFailureReason(reason, t.gpsTracking)}: ${count}`).join(' · '))}</p>
+                  ) : null}
+                </li>
+              )
+            })}
+          </ul>
+        </Card>
+      ) : null}
     </div>
   )
 }

@@ -54,6 +54,9 @@ import type {
   ShiftDecisionRepo,
   GpsPingRecord,
   GpsPingRepo,
+  GpsIdentifiedFix,
+  GpsIdentifiedIngestResult,
+  GpsPingSource,
   ShiftRecord,
   ShiftRepo,
   VehicleEventRecord,
@@ -63,7 +66,10 @@ import type {
   WeekLockRepo,
   ShiftTimingRecord,
 } from '@ash/contracts'
-import { AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor } from '@ash/domain'
+import {
+  AWAITING_DECISION_STATES, type CalendarDate, LIVE_STATES, type Minor, minor,
+  isTracked, effectiveGpsCaptureWindows, planIdentifiedGpsIngest, gpsIngestReceipts,
+} from '@ash/domain'
 import type { Pool, PoolClient } from './pool.ts'
 import { PG, isPgError, withTransaction } from './pool.ts'
 
@@ -176,7 +182,11 @@ export class PgShiftRepo implements ShiftRepo {
            -- write-once identity columns above it is an ordinary assignment. The CHECK constraint
            -- refuses a non-zero amount without a reason, so the pair always moves together.
            manager_charge_minor = $30,
-           manager_charge_reason = $31
+           manager_charge_reason = $31,
+           tracking_ended_at = CASE
+             WHEN state = 'draft' AND $2::shift_state = 'awaiting_open_approval' THEN NULL
+             ELSE COALESCE(tracking_ended_at, $32::timestamptz)
+           END
          WHERE id = $1`,
         [
           shift.id,
@@ -210,6 +220,7 @@ export class PgShiftRepo implements ShiftRepo {
           shift.approvedAt,
           String(shift.managerCharge),
           shift.managerChargeReason,
+          shift.trackingEndedAt ?? null,
         ],
       )
 
@@ -436,6 +447,7 @@ export class PgShiftRepo implements ShiftRepo {
       ordersHash: (r.orders_hash as string | null) ?? null,
       approvedBy: (r.approved_by as string | null) ?? null,
       approvedAt: r.approved_at == null ? null : (r.approved_at as Date).toISOString(),
+      trackingEndedAt: r.tracking_ended_at == null ? null : (r.tracking_ended_at as Date).toISOString(),
       managerCharge: minor(BigInt((r.manager_charge_minor as string | null) ?? '0')),
       managerChargeReason: (r.manager_charge_reason as string | null) ?? null,
     }))
@@ -2600,25 +2612,130 @@ export class PgGpsPingRepo implements GpsPingRepo {
     if (pings.length === 0) return { inserted: 0 }
     const params: unknown[] = []
     const tuples = pings.map((ping, index) => {
-      const base = index * 9
+      const base = index * 10
       params.push(
         ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng,
-        ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs, ping.source,
+        ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs, ping.source, ping.pointId ?? null,
       )
       return (
         `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
         `to_timestamp($${base + 7}::double precision / 1000),` +
-        `to_timestamp($${base + 8}::double precision / 1000),$${base + 9})`
+        `to_timestamp($${base + 8}::double precision / 1000),$${base + 9},$${base + 10}::uuid)`
       )
     })
     const { rowCount } = await this.pool.query(
       `INSERT INTO gps_pings
-         (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source)
+         (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source, client_point_id)
        VALUES ${tuples.join(',')}
-       ON CONFLICT (shift_id, captured_at) DO NOTHING`,
+       ON CONFLICT DO NOTHING`,
       params,
     )
     return { inserted: rowCount ?? 0 }
+  }
+
+  async appendIdentified(pings: readonly (Omit<GpsPingRecord, 'id'> & { pointId: string })[]): Promise<readonly string[]> {
+    if (pings.length === 0) return []
+    const params: unknown[] = []
+    const tuples = pings.map((ping, index) => {
+      const base = index * 10
+      params.push(
+        ping.shiftId, ping.driverId, ping.branchId, ping.lat, ping.lng,
+        ping.accuracyM, ping.capturedAtMs, ping.receivedAtMs, ping.source, ping.pointId,
+      )
+      return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
+        `to_timestamp($${base + 7}::double precision / 1000),` +
+        `to_timestamp($${base + 8}::double precision / 1000),$${base + 9},$${base + 10}::uuid)`
+    })
+    const { rows } = await this.pool.query<{ client_point_id: string }>(
+      `INSERT INTO gps_pings
+         (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source, client_point_id)
+       VALUES ${tuples.join(',')}
+       ON CONFLICT DO NOTHING RETURNING client_point_id`,
+      params,
+    )
+    return rows.map((row) => row.client_point_id)
+  }
+
+  async knownPointIds(shiftId: string, pointIds: readonly string[]): Promise<readonly string[]> {
+    if (pointIds.length === 0) return []
+    const { rows } = await this.pool.query<{ client_point_id: string }>(
+      'SELECT client_point_id FROM gps_pings WHERE shift_id = $1 AND client_point_id = ANY($2::uuid[])',
+      [shiftId, [...new Set(pointIds)]],
+    )
+    return rows.map((row) => row.client_point_id)
+  }
+
+  async trackingWindows(shiftId: string): Promise<readonly { startedAtMs: number; endedAtMs: number | null }[]> {
+    const { rows } = await this.pool.query<{ started_at: Date; ended_at: Date | null }>(
+      'SELECT started_at, ended_at FROM gps_tracking_windows WHERE shift_id = $1 ORDER BY started_at',
+      [shiftId],
+    )
+    return rows.map((row) => ({ startedAtMs: row.started_at.getTime(),
+      endedAtMs: row.ended_at?.getTime() ?? null }))
+  }
+
+  async ingestIdentified(input: {
+    shiftId: string
+    fixes: readonly GpsIdentifiedFix[]
+    source: GpsPingSource
+    nowMs: number
+    maxStored: number
+    retentionMs: number
+  }): Promise<GpsIdentifiedIngestResult | null> {
+    return withTransaction(this.pool, { actorId: null }, async (client) => {
+      // Every final close/reject updates this same shift row. Its row lock makes
+      // the tracking end and this whole batch one serial order in PostgreSQL.
+      const locked = await client.query<{
+        driver_id: string; branch_id: string; state: ShiftRecord['state'];
+        driver_confirmed_at: Date | null; tracking_ended_at: Date | null; approved_at: Date | null
+      }>(
+        `SELECT driver_id, branch_id, state, driver_confirmed_at,
+                tracking_ended_at, approved_at
+           FROM shifts WHERE id = $1 FOR UPDATE`, [input.shiftId],
+      )
+      const shift = locked.rows[0]
+      if (!shift) return null
+      const recorded = await client.query<{ started_at: Date; ended_at: Date | null }>(
+        'SELECT started_at, ended_at FROM gps_tracking_windows WHERE shift_id = $1 ORDER BY started_at',
+        [input.shiftId],
+      )
+      const windows = effectiveGpsCaptureWindows(
+        recorded.rows.map((row) => ({ startedAtMs: row.started_at.getTime(),
+          endedAtMs: row.ended_at?.getTime() ?? null })),
+        shift.driver_confirmed_at?.getTime() ?? Number.NaN,
+        shift.tracking_ended_at?.getTime() ?? shift.approved_at?.getTime() ?? Number.NaN,
+        isTracked(shift.state),
+      )
+      const stored = await client.query<{ n: string }>(
+        'SELECT count(*)::text AS n FROM gps_pings WHERE shift_id = $1', [input.shiftId],
+      )
+      const known = await client.query<{ client_point_id: string }>(
+        'SELECT client_point_id FROM gps_pings WHERE shift_id = $1 AND client_point_id = ANY($2::uuid[])',
+        [input.shiftId, [...new Set(input.fixes.map((fix) => fix.pointId))]],
+      )
+      const plan = planIdentifiedGpsIngest({
+        fixes: input.fixes, windows, knownIds: known.rows.map((row) => row.client_point_id),
+        storedCount: Number(stored.rows[0]?.n ?? 0), maxStored: input.maxStored,
+        nowMs: input.nowMs, retentionMs: input.retentionMs,
+      })
+      if (plan.selected.length === 0) return gpsIngestReceipts(plan, [])
+      const params: unknown[] = []
+      const tuples = plan.selected.map((fix, index) => {
+        const base = index * 10
+        params.push(input.shiftId, shift.driver_id, shift.branch_id, fix.lat, fix.lng,
+          fix.accuracyM, fix.capturedAtMs, input.nowMs, input.source, fix.pointId)
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},` +
+          `to_timestamp($${base + 7}::double precision / 1000),` +
+          `to_timestamp($${base + 8}::double precision / 1000),$${base + 9},$${base + 10}::uuid)`
+      })
+      const inserted = await client.query<{ client_point_id: string }>(
+        `INSERT INTO gps_pings
+           (shift_id, driver_id, branch_id, lat, lng, accuracy_m, captured_at, received_at, source, client_point_id)
+         VALUES ${tuples.join(',')}
+         ON CONFLICT DO NOTHING RETURNING client_point_id`, params,
+      )
+      return gpsIngestReceipts(plan, inserted.rows.map((row) => row.client_point_id))
+    })
   }
 
   /**
@@ -2696,6 +2813,7 @@ const toGpsPing = (r: Record<string, unknown>): GpsPingRecord => ({
   // Older rows predate the column and default to the foreground beacon, which is what they were.
   source: (r.source as GpsPingRecord['source'] | null) ?? 'phone_fg',
   id: Number(r.id),
+  pointId: (r.client_point_id as string | null) ?? null,
   shiftId: String(r.shift_id),
   driverId: String(r.driver_id),
   branchId: String(r.branch_id),

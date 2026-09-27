@@ -106,10 +106,9 @@ describe('what gets thrown away, and why', () => {
   })
 })
 
-describe('the key is the server’s own natural key', () => {
+describe('the local capture key', () => {
   it('is stable for one instant, so buffering the same fix twice costs nothing', () => {
-    // `(shift_id, captured_at)` is what the ingest route dedupes on. Sharing it means a retry is
-    // free at both ends rather than only at the server's.
+    // The queue key protects local double-enqueue; the server uses the stable pointId instead.
     expect(fixKey('shift-1', 1_000)).toBe(fixKey('shift-1', 1_000))
     expect(fixKey('shift-1', 1_000)).not.toBe(fixKey('shift-1', 1_001))
     expect(fixKey('shift-1', 1_000)).not.toBe(fixKey('shift-2', 1_000))
@@ -133,7 +132,10 @@ describe('a phone with no usable IndexedDB still tracks', () => {
     const capturedAtMs = Date.now()
     await expect(enqueueFix({ shiftId: 'memory-test', lat: 1, lng: 2, accuracyM: 3, capturedAtMs })).resolves.toBeUndefined()
     await expect(peekFixes('memory-test', 10)).resolves.toEqual([
-      { key: fixKey('memory-test', capturedAtMs), shiftId: 'memory-test', lat: 1, lng: 2, accuracyM: 3, capturedAtMs },
+      expect.objectContaining({
+        key: fixKey('memory-test', capturedAtMs), shiftId: 'memory-test', pointId: expect.any(String),
+        lat: 1, lng: 2, accuracyM: 3, capturedAtMs,
+      }),
     ])
     await dropFixes([fixKey('memory-test', capturedAtMs)])
     await expect(peekFixes('memory-test', 10)).resolves.toEqual([])

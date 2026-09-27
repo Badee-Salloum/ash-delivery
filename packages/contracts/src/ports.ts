@@ -569,6 +569,8 @@ export interface ShiftRecord {
    * than an honest gap.
    */
   approvedAt: string | null
+  /** Server-owned end of GPS capture, including manager cancellation. */
+  trackingEndedAt?: string | null
 }
 
 export interface ShiftOrderRecord {
@@ -2795,6 +2797,8 @@ export interface ShiftSettlementRepo {
 /** A single GPS fix from the driver's phone while a shift is open (SRS K). Telemetry, not money. */
 export interface GpsPingRecord {
   id: number
+  /** Stable native outbox identity; legacy web and tracker fixes have no client id. */
+  pointId?: string | null
   shiftId: string
   driverId: string
   branchId: string
@@ -2811,6 +2815,54 @@ export interface GpsPingRecord {
 
 export type GpsPingSource = 'phone_fg' | 'phone_bg' | 'tracker'
 
+export interface GpsIdentifiedFix {
+  pointId: string
+  lat: number
+  lng: number
+  accuracyM: number | null
+  capturedAtMs: number
+}
+
+export interface GpsIdentifiedReceipt {
+  pointId: string
+  status: 'stored' | 'duplicate' | 'rejected'
+  reason?: string
+}
+
+export interface GpsIdentifiedIngestResult {
+  results: GpsIdentifiedReceipt[]
+  accepted: number
+  duplicates: number
+  rejected: number
+}
+
+export interface GpsTrackerHealth {
+  shiftId: string
+  readinessAtMs: number | null
+  readinessCapturedAtMs: number | null
+  readinessAccuracyM: number | null
+  appBuild: number | null
+  heartbeatAtMs: number | null
+  service: 'running' | 'stopped' | 'unknown' | null
+  permission: 'precise' | 'approximate' | 'denied' | 'unknown' | null
+  locationEnabled: boolean | null
+  network: 'online' | 'offline' | 'unknown' | null
+  pendingCount: number | null
+  lastCapturedAtMs: number | null
+  lastUploadedAtMs: number | null
+  droppedExpired: number
+  droppedCapacity: number
+  droppedStorage: number
+  rejectionReasons: Record<string, number>
+}
+
+export interface GpsTrackerHealthRepo {
+  recordReadiness(input: { shiftId: string; atMs: number; capturedAtMs: number; accuracyM: number; appBuild: number }): Promise<void>
+  recordHeartbeat(input: GpsTrackerHealth): Promise<void>
+  findByShift(shiftId: string): Promise<GpsTrackerHealth | null>
+  listByShiftIds(shiftIds: readonly string[]): Promise<GpsTrackerHealth[]>
+}
+
 export interface GpsPingRepo {
   append(ping: Omit<GpsPingRecord, 'id'>): Promise<void>
   /**
@@ -2822,6 +2874,21 @@ export interface GpsPingRepo {
    * than guess.
    */
   appendMany(pings: readonly Omit<GpsPingRecord, 'id'>[]): Promise<{ inserted: number }>
+  /** Insert identified native fixes atomically and return the IDs actually added. */
+  appendIdentified(pings: readonly (Omit<GpsPingRecord, 'id'> & { pointId: string })[]): Promise<readonly string[]>
+  /** IDs already stored, so a retry is acknowledged even when age or quota now rejects new fixes. */
+  knownPointIds(shiftId: string, pointIds: readonly string[]): Promise<readonly string[]>
+  /** Server-recorded capture periods, including earlier confirmations later rejected. */
+  trackingWindows(shiftId: string): Promise<readonly { startedAtMs: number; endedAtMs: number | null }[]>
+  /** Lock the shift row, evaluate server-owned capture windows, then insert before releasing it. */
+  ingestIdentified(input: {
+    shiftId: string
+    fixes: readonly GpsIdentifiedFix[]
+    source: GpsPingSource
+    nowMs: number
+    maxStored: number
+    retentionMs: number
+  }): Promise<GpsIdentifiedIngestResult | null>
   /**
    * The latest fix for each of the named drivers, for driver-wide history reads.
    *
@@ -3002,6 +3069,7 @@ export interface Deps {
   /** Revisioned, server-owned recovery state for the driver's closing workflow. */
   closeDrafts: CloseDraftRepo
   gps: GpsPingRepo
+  gpsHealth: GpsTrackerHealthRepo
   trackerDevices: TrackerDeviceRepo
   /** Atomic close-boundary/review writer; callback work is database-only. */
   closeUnitOfWork: ShiftCloseUnitOfWork

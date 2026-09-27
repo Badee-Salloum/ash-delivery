@@ -24,6 +24,7 @@ async function main(): Promise<void> {
     maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
     driverSelfRegistrationEnabled: config.DRIVER_SELF_REGISTRATION_ENABLED,
     trackerIngestEnabled: config.TRACKER_INGEST_ENABLED,
+    minDriverAndroidTrackerBuild: config.MIN_DRIVER_ANDROID_TRACKER_BUILD,
     trackerGatewayToken: config.TRACKER_GATEWAY_TOKEN,
   })
 

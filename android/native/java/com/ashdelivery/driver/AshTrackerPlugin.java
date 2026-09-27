@@ -6,8 +6,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
 import android.widget.Toast;
@@ -24,11 +30,21 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GoogleApiAvailability;
+import com.google.android.gms.location.FusedLocationProviderClient;
+import com.google.android.gms.location.LocationCallback;
+import com.google.android.gms.location.LocationRequest;
+import com.google.android.gms.location.LocationResult;
+import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.Priority;
+
+import org.json.JSONObject;
 
 /**
  * The only bridge between the web app and the tracker.
  *
- * Deliberately three methods and no data path. Fixes never travel through JavaScript — the service
+ * Deliberately no GPS data path. Fixes never travel through JavaScript — the service
  * uploads them itself, because a plugin that hands positions to a callback is only as alive as the
  * WebView, and the WebView being asleep is the entire problem this app exists to solve.
  *
@@ -74,6 +90,163 @@ public class AshTrackerPlugin extends Plugin {
     static final String LOCATION = "location";
     static final String NOTIFICATIONS = "notifications";
     static final String BACKGROUND = "background";
+    private final Handler probeHandler = new Handler(Looper.getMainLooper());
+    private PluginCall probeCall;
+    private LocationCallback probeFusedCallback;
+    private LocationListener probePlatformListener;
+    private FusedLocationProviderClient probeFusedClient;
+    private LocationManager probeLocationManager;
+    private Runnable probeTimeout;
+    private boolean probeSawPoorAccuracy;
+
+    /** Probe the provider before a shift confirmation. Probe coordinates never leave this method. */
+    @PluginMethod
+    public void preflight(PluginCall call) {
+        if (!hasLocationPermission()) {
+            requestPermissionForAlias(LOCATION, call, "onPreflightPermission");
+            return;
+        }
+        beginProbe(call);
+    }
+
+    @PermissionCallback
+    private void onPreflightPermission(PluginCall call) {
+        if (!hasLocationPermission()) {
+            call.resolve(preflightResult(false, "permission_denied", null));
+            return;
+        }
+        beginProbe(call);
+    }
+
+    private JSObject preflightResult(boolean ready, String reason, Location location) {
+        JSObject out = new JSObject().put("ready", ready)
+                .put("platform", "android").put("nativeVersionCode", appBuild(getContext()));
+        if (reason != null) out.put("reason", reason);
+        if (location != null) {
+            out.put("capturedAtMs", location.getTime());
+            if (location.hasAccuracy()) out.put("accuracyM", location.getAccuracy());
+        }
+        return out;
+    }
+
+    private void beginProbe(PluginCall call) {
+        if (probeCall != null) {
+            call.resolve(preflightResult(false, "provider_error", null));
+            return;
+        }
+        if (!locationEnabled(getContext())) {
+            call.resolve(preflightResult(false, "location_disabled", null));
+            return;
+        }
+        probeCall = call;
+        probeSawPoorAccuracy = false;
+        probeTimeout = () -> finishProbe(null, probeSawPoorAccuracy ? "poor_accuracy" : "no_recent_fix");
+        probeHandler.postDelayed(probeTimeout, 60_000L);
+        try {
+            boolean gms = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(getContext()) == ConnectionResult.SUCCESS;
+            if (gms) {
+                probeFusedClient = LocationServices.getFusedLocationProviderClient(getContext());
+                probeFusedCallback = new LocationCallback() {
+                    @Override public void onLocationResult(LocationResult result) {
+                        for (Location location : result.getLocations()) checkProbeLocation(location);
+                    }
+                };
+                LocationRequest request = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000L)
+                        .setMinUpdateIntervalMillis(1_000L).build();
+                probeFusedClient.requestLocationUpdates(request, probeFusedCallback, Looper.getMainLooper())
+                        .addOnFailureListener(error -> {
+                            stopProbeUpdates();
+                            startPlatformProbe();
+                        });
+            } else startPlatformProbe();
+        } catch (Exception error) {
+            stopProbeUpdates();
+            startPlatformProbe();
+        }
+    }
+
+    private void startPlatformProbe() {
+        if (probeCall == null) return;
+        probeLocationManager = (LocationManager) getContext().getSystemService(Context.LOCATION_SERVICE);
+        if (probeLocationManager == null) {
+            finishProbe(null, "provider_error");
+            return;
+        }
+        probePlatformListener = new LocationListener() {
+            @Override public void onLocationChanged(Location location) { checkProbeLocation(location); }
+            @Override public void onStatusChanged(String provider, int status, Bundle extras) {}
+            @Override public void onProviderEnabled(String provider) {}
+            @Override public void onProviderDisabled(String provider) {}
+        };
+        try {
+            boolean requested = false;
+            for (String provider : new String[]{LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER}) {
+                if (probeLocationManager.isProviderEnabled(provider)) {
+                    probeLocationManager.requestLocationUpdates(provider, 1_000L, 0f, probePlatformListener, Looper.getMainLooper());
+                    requested = true;
+                }
+            }
+            if (!requested) finishProbe(null, "provider_error");
+        } catch (Exception error) { finishProbe(null, "provider_error"); }
+    }
+
+    private void checkProbeLocation(Location location) {
+        if (probeCall == null || location == null) return;
+        long age = System.currentTimeMillis() - location.getTime();
+        if (age < -5_000L || age > 30_000L) return;
+        if (!location.hasAccuracy() || location.getAccuracy() > 100f) {
+            probeSawPoorAccuracy = true;
+            return;
+        }
+        finishProbe(location, null);
+    }
+
+    private void finishProbe(Location location, String reason) {
+        PluginCall call = probeCall;
+        if (call == null) return;
+        probeCall = null;
+        if (probeTimeout != null) probeHandler.removeCallbacks(probeTimeout);
+        stopProbeUpdates();
+        call.resolve(preflightResult(location != null, reason, location));
+    }
+
+    private void stopProbeUpdates() {
+        if (probeFusedClient != null && probeFusedCallback != null)
+            try { probeFusedClient.removeLocationUpdates(probeFusedCallback); } catch (Exception ignored) {}
+        if (probeLocationManager != null && probePlatformListener != null)
+            try { probeLocationManager.removeUpdates(probePlatformListener); } catch (Exception ignored) {}
+        probeFusedCallback = null;
+        probePlatformListener = null;
+    }
+
+    /** Optional reliability setup. It never delays or gates capture at shift confirmation. */
+    @PluginMethod
+    public void setupReliability(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasBackgroundPermission() && !askedBackground()) {
+            markAskedBackground();
+            requestPermissionForAlias(BACKGROUND, call, "onReliabilityBackground");
+            return;
+        }
+        requestReliabilityNotification(call);
+    }
+
+    @PermissionCallback
+    private void onReliabilityBackground(PluginCall call) { requestReliabilityNotification(call); }
+
+    private void requestReliabilityNotification(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
+            requestPermissionForAlias(NOTIFICATIONS, call, "onReliabilityNotification");
+            return;
+        }
+        call.resolve(new JSObject().put("backgroundPermission", hasBackgroundPermission())
+                .put("notificationPermission", hasNotificationPermission()));
+    }
+
+    @PermissionCallback
+    private void onReliabilityNotification(PluginCall call) {
+        call.resolve(new JSObject().put("backgroundPermission", hasBackgroundPermission())
+                .put("notificationPermission", hasNotificationPermission()));
+    }
 
     /**
      * Start tracking one shift.
@@ -95,59 +268,16 @@ public class AshTrackerPlugin extends Plugin {
             requestPermissionForAlias(LOCATION, call, "onLocationPermission");
             return;
         }
-        afterForeground(call);
+        startService(call);
     }
 
     @PermissionCallback
     private void onLocationPermission(PluginCall call) {
         if (!hasLocationPermission()) {
-            /*
-             * He said no. Not an error, and not something to interrupt a man on a motorbike about:
-             * the shift itself is unaffected and he keeps working. The manager simply gets no pin,
-             * and the coverage figure on the finished shift is where that shows up honestly —
-             * measured from the server rather than taken from anyone's account of his own phone.
-             */
+            // A denied or approximate-only grant cannot start precise tracking.
             call.resolve(new JSObject().put("started", false).put("reason", "permission_denied"));
             return;
         }
-        afterForeground(call);
-    }
-
-    /**
-     * Between foreground location and launching, ask ONCE for «allow all the time».
-     *
-     * This is only so tracking can come back on its own after a reboot (BootReceiver). It is
-     * best-effort and never gates the service: tracking proceeds whether or not it is granted,
-     * because the foreground service runs on in-use location while the app has been opened. Asked at
-     * most once per install so a decline does not turn into a prompt every shift.
-     */
-    private void afterForeground(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasBackgroundPermission() && !askedBackground()) {
-            markAskedBackground();
-            requestPermissionForAlias(BACKGROUND, call, "onBackgroundPermission");
-            return;
-        }
-        launch(call);
-    }
-
-    @PermissionCallback
-    private void onBackgroundPermission(PluginCall call) {
-        // Granted or not, tracking proceeds; background only helps the post-reboot restart.
-        launch(call);
-    }
-
-    private void launch(PluginCall call) {
-        // Asked for separately and never gated on: without it the service still runs, it is only
-        // the driver's notice that goes missing — so a refusal must not stop the tracking.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission()) {
-            requestPermissionForAlias(NOTIFICATIONS, call, "onNotificationPermission");
-            return;
-        }
-        startService(call);
-    }
-
-    @PermissionCallback
-    private void onNotificationPermission(PluginCall call) {
         startService(call);
     }
 
@@ -163,24 +293,39 @@ public class AshTrackerPlugin extends Plugin {
         // about to send. Passed in rather than hardcoded: staging and production differ.
         String origin = call.getString("origin");
         intent.putExtra(TrackerService.EXTRA_ORIGIN, origin != null ? origin : getBridge().getServerUrl());
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            getContext().startForegroundService(intent);
-        } else {
-            getContext().startService(intent);
+        if (!locationEnabled(getContext())) {
+            call.resolve(new JSObject().put("started", false).put("reason", "location_disabled"));
+            return;
         }
-        boolean batteryStepDone = batteryStepDone();
-        maybeRequestBatteryExemption();
-        // Sequence the two one-time setup prompts across shifts so the driver is never shown both at
-        // once: battery optimisation on the first tracked shift, the OEM autostart screen on a later
-        // one. Only aggressive-OEM handsets ever see the autostart step.
-        if (batteryStepDone) maybeGuideAutostart();
-        call.resolve(new JSObject().put("started", true));
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) getContext().startForegroundService(intent);
+            else getContext().startService(intent);
+        } catch (Exception denied) {
+            call.resolve(new JSObject().put("started", false).put("reason", "service_start_failed"));
+            return;
+        }
+        GpsUploadWorker.schedule(getContext());
+        // startForegroundService returns before onStartCommand. Observe the actual service outcome.
+        probeHandler.postDelayed(() -> {
+            boolean running = TrackerService.serviceRunning && shiftId.equals(TrackerService.activeShiftId);
+            JSObject result = new JSObject().put("started", running);
+            if (!running) result.put("reason", "service_start_failed");
+            call.resolve(result);
+            if (running) {
+                boolean batteryStepDone = batteryStepDone();
+                maybeRequestBatteryExemption();
+                if (batteryStepDone) maybeGuideAutostart();
+            }
+        }, 750L);
     }
 
     /** Stop tracking. Also happens on its own when the server answers 409 — see TrackerService. */
     @PluginMethod
     public void stop(PluginCall call) {
+        getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE).edit()
+                .remove(TrackerService.KEY_SHIFT_ID).remove(TrackerService.KEY_ORIGIN).apply();
         getContext().stopService(new Intent(getContext(), TrackerService.class));
+        GpsUploadWorker.schedule(getContext());
         call.resolve();
     }
 
@@ -188,13 +333,92 @@ public class AshTrackerPlugin extends Plugin {
      * Whether a native capture layer exists at all.
      *
      * The web beacon reads this to stand down: two layers writing the same shift would double the
-     * battery cost of a ride to produce rows the server then discards on `(shift_id, captured_at)`.
+     * battery cost of a ride and produce duplicate route points.
      */
     @PluginMethod
     public void status(PluginCall call) {
-        call.resolve(new JSObject()
-                .put("available", true)
-                .put("permission", hasLocationPermission()));
+        GpsFixStore store = new GpsFixStore(getContext());
+        try {
+            JSONObject queue = new JSONObject();
+            boolean queueAvailable = true;
+            try {
+                store.fillMissingOrigin(getBridge().getServerUrl());
+                store.prune();
+                queue = store.diagnostics();
+            } catch (Exception storageError) {
+                queueAvailable = false;
+            }
+            android.content.SharedPreferences prefs = getContext().getSharedPreferences(
+                    TrackerService.PREFS, Context.MODE_PRIVATE);
+            String activeShiftId = TrackerService.activeShiftId;
+            String captureKey = activeShiftId == null ? "lastCapturedAtMs" : "lastCapturedAtMs:" + activeShiftId;
+            String uploadKey = activeShiftId == null ? "lastUploadedAtMs" : "lastUploadedAtMs:" + activeShiftId;
+            long lastCapture = prefs.getLong(captureKey, 0);
+            long lastStorageFailure = activeShiftId == null ? 0 :
+                    prefs.getLong("lastStorageFailureAtMs:" + activeShiftId, 0);
+            String lastFailure = !queueAvailable ? "sqlite_unavailable" :
+                    lastStorageFailure > lastCapture ? "sqlite_write_failed" :
+                    queue.optString("lastFailureReason", "");
+            JSObject result = new JSObject()
+                    .put("available", true)
+                    .put("platform", "android")
+                    .put("nativeVersionCode", appBuild(getContext()))
+                    .put("permission", hasLocationPermission())
+                    .put("permissionState", permissionLabel(getContext()))
+                    .put("backgroundPermission", hasBackgroundPermission())
+                    .put("notificationPermission", Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasNotificationPermission())
+                    .put("locationEnabled", locationEnabled(getContext()))
+                    .put("network", GpsUploader.networkLabel(getContext()))
+                    .put("serviceRunning", TrackerService.serviceRunning)
+                    .put("activeShiftId", activeShiftId == null ? JSONObject.NULL : activeShiftId)
+                    .put("lastCapturedAtMs", nullablePositive(prefs.getLong(captureKey, 0)))
+                    .put("lastUploadedAtMs", nullablePositive(prefs.getLong(uploadKey, 0)))
+                    .put("queueAvailable", queueAvailable)
+                    .put("pendingCount", queueAvailable ? queue.optInt("pendingCount", 0) : JSONObject.NULL)
+                    .put("rejectedCount", queue.optInt("rejectedCount", 0))
+                    .put("rejectionReasons", queue.optJSONObject("rejectionReasons") == null
+                            ? new JSONObject() : queue.optJSONObject("rejectionReasons"))
+                    .put("droppedExpired", queue.optInt("event_expired", 0))
+                    .put("droppedCapacity", queue.optInt("event_capacity", 0))
+                    .put("storageFailedCount", prefs.getInt(activeShiftId == null ? "storageFailedCount" :
+                            "storageFailedCount:" + activeShiftId, 0))
+                    .put("lastFailureReason", lastFailure);
+            GpsUploadWorker.schedule(getContext());
+            call.resolve(result);
+        } finally { store.close(); }
+    }
+
+    private static Object nullablePositive(long value) { return value > 0 ? value : JSONObject.NULL; }
+
+    /** A fresh login should retry retained fixes immediately, including from completed shifts. */
+    @PluginMethod
+    public void retryUploads(PluginCall call) {
+        GpsUploadWorker.kickNow(getContext());
+        call.resolve();
+    }
+
+    static int appBuild(Context context) {
+        try {
+            android.content.pm.PackageInfo info = context.getPackageManager().getPackageInfo(context.getPackageName(), 0);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) return (int) info.getLongVersionCode();
+            return info.versionCode;
+        } catch (Exception error) { return 0; }
+    }
+
+    static String permissionLabel(Context context) {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+            return "precise";
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED)
+            return "approximate";
+        return "denied";
+    }
+
+    static boolean locationEnabled(Context context) {
+        LocationManager manager = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
+        if (manager == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) return manager.isLocationEnabled();
+        return manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                || manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
     }
 
     private boolean hasLocationPermission() {
@@ -203,6 +427,7 @@ public class AshTrackerPlugin extends Plugin {
     }
 
     private boolean hasNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true;
         return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS)
                 == PackageManager.PERMISSION_GRANTED;
     }

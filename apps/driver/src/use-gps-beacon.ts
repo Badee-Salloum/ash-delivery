@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
-import { dropFixes, dropShift, enqueueFix, peekFixes, sweepOutbox } from './gps-outbox.ts'
+import { dropFixes, enqueueFix, gpsBatchDisposition, markRejectedFixes, peekFixes, sweepOutbox } from './gps-outbox.ts'
 import { nativeTrackerAvailable } from './native-tracker.ts'
 
 /**
@@ -92,27 +92,23 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
         const pending = await peekFixes(shiftId, FLUSH_MAX)
         if (pending.length === 0) return
         try {
-          await api.sendGpsBatch(shiftId, {
+          const response = await api.sendGpsBatch(shiftId, {
             source: 'phone_fg',
             fixes: pending.map((fix) => ({
+              ...(fix.pointId ? { pointId: fix.pointId } : {}),
               lat: fix.lat,
               lng: fix.lng,
               accuracyM: fix.accuracyM,
               capturedAtMs: fix.capturedAtMs,
             })),
           })
-          await dropFixes(pending.map((fix) => fix.key))
+          const { acknowledged, rejected } = gpsBatchDisposition(pending, response)
+          await dropFixes(acknowledged)
+          await markRejectedFixes(rejected)
         } catch (err) {
-          /*
-           * THE CONTRACT, and getting it backwards is the expensive mistake.
-           *
-           * 409 means the shift is over — the server will never accept these fixes, so they are
-           * dropped and the beacon stops. Anything else (offline, 5xx, a timeout) means "not yet":
-           * the buffer is kept and the next tick tries again. Treat a 409 as retryable and a phone
-           * hammers a closed shift every fifteen seconds for weeks with nobody watching.
-           */
+          // A closed shift can still receive fixes captured during its tracking window for seven
+          // days. An unexpected 409 stops this foreground watcher but never clears saved points.
           if ((err as { status?: number }).status === 409) {
-            await dropShift(shiftId)
             stopped = true
             setTracking(false)
           }
