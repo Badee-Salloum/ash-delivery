@@ -325,6 +325,11 @@ public class AshTrackerPlugin extends Plugin {
         getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE).edit()
                 .remove(TrackerService.KEY_SHIFT_ID).remove(TrackerService.KEY_ORIGIN).apply();
         getContext().stopService(new Intent(getContext(), TrackerService.class));
+        // The service may already be dead when the WebView sees the closed shift. Clear its
+        // separate reminder in that case too; the ongoing foreground notice is OS-managed.
+        android.app.NotificationManager notifications = (android.app.NotificationManager)
+                getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+        if (notifications != null) notifications.cancel(TrackerService.ALERT_NOTIFICATION_ID);
         GpsUploadWorker.schedule(getContext());
         call.resolve();
     }

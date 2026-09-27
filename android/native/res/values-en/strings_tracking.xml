@@ -8,5 +8,14 @@
   <string name="tracking_channel_name">Shift tracking</string>
   <string name="tracking_title">Shift open</string>
   <string name="tracking_text">Your location is recorded during the shift, and stops when it closes.</string>
+  <string name="tracking_alert_channel_name">Tracking interruption alerts</string>
+  <string name="tracking_alert_title">Location tracking alert</string>
+  <string name="tracking_alert_storage_failed">No GPS points have been saved for 10 minutes. Open the app and check phone storage.</string>
+  <string name="tracking_alert_permission_lost">No GPS points have been saved for 10 minutes. Enable precise location permission for the app.</string>
+  <string name="tracking_alert_location_disabled">No GPS points have been saved for 10 minutes. Turn on device location.</string>
+  <string name="tracking_alert_no_fix">No GPS points have been saved for 10 minutes. Open the app and check location and battery settings.</string>
+  <string name="tracking_alert_offline">No internet for 10 minutes. GPS points are saved on this phone and will upload when connected.</string>
+  <string name="tracking_alert_upload_stalled">GPS points have not uploaded for 10 minutes. Open the app and check internet and sign-in.</string>
+  <string name="tracking_alert_rejected">The server has rejected GPS points for 10 minutes. Open the app and check tracking diagnostics.</string>
   <string name="tracking_autostart_hint">Enable Autostart for ASH Delivery so tracking keeps working during the shift.</string>
 </resources>

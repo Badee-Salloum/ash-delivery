@@ -108,6 +108,11 @@ public class TrackerService extends Service {
 
     private static final String CHANNEL_ID = "ash_tracking";
     private static final int NOTIFICATION_ID = 4711;
+    private static final String ALERT_CHANNEL_ID = "ash_tracking_alerts_v1";
+    static final int ALERT_NOTIFICATION_ID = 4712;
+    private static final long ALERT_INTERVAL_MS = 10 * 60_000L;
+    private static final String ALERT_STARTED_KEY = "alertStartedAtMs:";
+    private static final String ALERT_LAST_KEY = "alertLastAtMs:";
 
     /** Where the assignment survives a restart. See {@link #onStartCommand}. */
     // Package-private so BootReceiver can restart from the same saved assignment after a reboot.
@@ -142,6 +147,7 @@ public class TrackerService extends Service {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ExecutorService uploads = Executors.newSingleThreadExecutor();
     private final AtomicBoolean flushScheduled = new AtomicBoolean(false);
+    private final AtomicBoolean alertCheckScheduled = new AtomicBoolean(false);
     private final Handler ticker = new Handler(Looper.getMainLooper());
 
     private FusedLocationProviderClient client;
@@ -160,6 +166,7 @@ public class TrackerService extends Service {
     private volatile long lastRearmElapsedMs = 0L;
     private long lastStatusCheckElapsedMs = 0L;
     private int lastNoticeText = R.string.tracking_text;
+    private int lastAlertText = 0;
 
     @Override
     public void onCreate() {
@@ -191,6 +198,7 @@ public class TrackerService extends Service {
             long now = SystemClock.elapsedRealtime();
             if (now - lastFixElapsedMs > STALE_AFTER_MS && now - lastRearmElapsedMs > STALE_AFTER_MS) rearmUpdates();
             updateNotice(now);
+            checkTrackingAlert();
             submitFlush();
             ticker.postDelayed(this, INTERVAL_MS);
         }
@@ -242,7 +250,10 @@ public class TrackerService extends Service {
             submitFlush();
             return START_STICKY;
         }
-        if (serviceRunning) removeUpdates();
+        if (serviceRunning) {
+            removeUpdates();
+            cancelAlertNotification();
+        }
 
         prefs.edit().putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base).apply();
         shiftId = id;
@@ -265,6 +276,11 @@ public class TrackerService extends Service {
             activeShiftId = null;
             stopSelf();
             return START_NOT_STICKY;
+        }
+
+        // A repeated start or START_STICKY restart must keep the original ten-minute clock.
+        if (prefs.getLong(ALERT_STARTED_KEY + id, 0L) <= 0L) {
+            prefs.edit().putLong(ALERT_STARTED_KEY + id, System.currentTimeMillis()).apply();
         }
 
         lastFixElapsedMs = SystemClock.elapsedRealtime();
@@ -451,6 +467,7 @@ public class TrackerService extends Service {
         stopped = true;
         serviceRunning = false;
         activeShiftId = null;
+        cancelAlertNotification();
         ticker.removeCallbacks(tick);
         removeUpdates();
         io.shutdown();
@@ -512,6 +529,137 @@ public class TrackerService extends Service {
         lastNoticeText = next;
         NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager != null) manager.notify(NOTIFICATION_ID, notification());
+    }
+
+    /**
+     * Alert the driver only after ten minutes without a point committed to SQLite, or ten minutes
+     * without an accepted upload while this shift actually has queued points. The foreground
+     * notification changes sooner; this separate channel can visibly remind the driver every ten
+     * minutes while the outage persists. Android may defer a tick or suppress heads-up display.
+     */
+    private void checkTrackingAlert() {
+        String id = shiftId;
+        if (stopped || id == null) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        long now = System.currentTimeMillis();
+        long started = prefs.getLong(ALERT_STARTED_KEY + id, now);
+        long captured = prefs.getLong("lastCapturedAtMs:" + id, 0L);
+        long uploaded = prefs.getLong("lastUploadedAtMs:" + id, 0L);
+        if (now - Math.max(started, captured) >= ALERT_INTERVAL_MS) {
+            int reason;
+            if (storageFailed || prefs.getLong("lastStorageFailureAtMs:" + id, 0L) > captured)
+                reason = R.string.tracking_alert_storage_failed;
+            else if (!"precise".equals(AshTrackerPlugin.permissionLabel(this)))
+                reason = R.string.tracking_alert_permission_lost;
+            else if (!AshTrackerPlugin.locationEnabled(this))
+                reason = R.string.tracking_alert_location_disabled;
+            else reason = R.string.tracking_alert_no_fix;
+            showTrackingAlert(id, reason);
+            return;
+        }
+        if (now - Math.max(started, uploaded) < ALERT_INTERVAL_MS) {
+            clearTrackingAlert(id);
+            return;
+        }
+
+        // A missing upload timestamp alone is not an outage: a shift may have no pending points.
+        // Keep the SQLite read off the main thread; the location callback uses this same executor.
+        if (!alertCheckScheduled.compareAndSet(false, true)) return;
+        try {
+            io.execute(() -> {
+                int pending = -1;
+                int rejected = 0;
+                try {
+                    JSONObject queue = fixStore.diagnosticsForShift(id);
+                    pending = queue.optInt("pendingCount", 0);
+                    rejected = queue.optInt("rejectedCount", 0);
+                }
+                catch (Exception ignored) { /* The capture check will report a sustained write failure. */ }
+                final int pendingCount = pending;
+                final int rejectedCount = rejected;
+                ticker.post(() -> {
+                    alertCheckScheduled.set(false);
+                    if (stopped || !id.equals(shiftId)) return;
+                    SharedPreferences latest = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+                    long time = System.currentTimeMillis();
+                    long begun = latest.getLong(ALERT_STARTED_KEY + id, time);
+                    long lastCapture = latest.getLong("lastCapturedAtMs:" + id, 0L);
+                    long lastUpload = latest.getLong("lastUploadedAtMs:" + id, 0L);
+                    if (time - Math.max(begun, lastCapture) >= ALERT_INTERVAL_MS) {
+                        checkTrackingAlert();
+                    } else if (time - Math.max(begun, lastUpload) < ALERT_INTERVAL_MS ||
+                            (pendingCount == 0 && rejectedCount == 0)) {
+                        clearTrackingAlert(id);
+                    } else if (pendingCount > 0) {
+                        int reason = "offline".equals(GpsUploader.networkLabel(this))
+                                ? R.string.tracking_alert_offline : R.string.tracking_alert_upload_stalled;
+                        showTrackingAlert(id, reason);
+                    } else if (rejectedCount > 0) {
+                        showTrackingAlert(id, R.string.tracking_alert_rejected);
+                    }
+                });
+            });
+        } catch (RejectedExecutionException shuttingDown) {
+            alertCheckScheduled.set(false);
+        }
+    }
+
+    private void showTrackingAlert(String id, int reason) {
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null || !canShowTrackingAlerts(manager)) return;
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        long now = System.currentTimeMillis();
+        long last = prefs.getLong(ALERT_LAST_KEY + id, 0L);
+        boolean due = last <= 0L || now < last || now - last >= ALERT_INTERVAL_MS;
+        if (!due && lastAlertText == reason) return;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(ALERT_CHANNEL_ID,
+                    getString(R.string.tracking_alert_channel_name), NotificationManager.IMPORTANCE_HIGH);
+            channel.setShowBadge(false);
+            manager.createNotificationChannel(channel);
+            NotificationChannel activeChannel = manager.getNotificationChannel(ALERT_CHANNEL_ID);
+            if (activeChannel == null || activeChannel.getImportance() == NotificationManager.IMPORTANCE_NONE) return;
+        }
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, ALERT_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentTitle(getString(R.string.tracking_alert_title))
+                .setContentText(getString(reason))
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(getString(reason)))
+                .setContentIntent(PendingIntent.getActivity(this, 1, new Intent(this, MainActivity.class),
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ERROR)
+                .setOnlyAlertOnce(!due)
+                .setAutoCancel(false);
+        if (!due) builder.setSilent(true);
+        try {
+            if (due) manager.cancel(ALERT_NOTIFICATION_ID);
+            manager.notify(ALERT_NOTIFICATION_ID, builder.build());
+            lastAlertText = reason;
+            if (due) prefs.edit().putLong(ALERT_LAST_KEY + id, now).apply();
+        } catch (SecurityException denied) {
+            // Android 13+ notification permission may have been revoked between check and notify.
+        }
+    }
+
+    private boolean canShowTrackingAlerts(NotificationManager manager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) return false;
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.N || manager.areNotificationsEnabled();
+    }
+
+    private void clearTrackingAlert(String id) {
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (lastAlertText == 0 && prefs.getLong(ALERT_LAST_KEY + id, 0L) == 0L) return;
+        cancelAlertNotification();
+        prefs.edit().remove(ALERT_LAST_KEY + id).apply();
+    }
+
+    private void cancelAlertNotification() {
+        lastAlertText = 0;
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) manager.cancel(ALERT_NOTIFICATION_ID);
     }
 
     /** The foreground service uploads promptly; WorkManager owns delayed retries after it stops. */

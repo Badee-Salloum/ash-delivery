@@ -56,7 +56,7 @@ import {
 } from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
-import { nativeTrackerAvailable, preflightNativeTracker, syncNativeTracking } from '../native-tracker.ts'
+import { nativeTrackerAvailable, preflightNativeTracker, setupNativeTrackingReliability, syncNativeTracking } from '../native-tracker.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { TrackerStatusCard } from './TrackerStatusCard.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
@@ -1834,6 +1834,14 @@ function StartPackage({
         odometerStrip: odoStrip,
       })
       showConfirmed(submitted)
+      // Start capture as soon as the driver confirms, including while the manager is approving.
+      // Ask for notification/background reliability permissions only after capture has started:
+      // a system dialog must never delay the first GPS points or the server confirmation.
+      if (nativeTrackerAvailable()) {
+        void syncNativeTracking(submitted.id)
+          .then((result) => result?.started ? setupNativeTrackingReliability() : undefined)
+          .catch(() => undefined)
+      }
     } catch (e) {
       // The POST may have committed while its response was lost. Read the server state before
       // offering another tap, so retrying cannot strand a confirmed shift at the start screen.
