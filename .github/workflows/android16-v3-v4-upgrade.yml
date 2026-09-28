@@ -1,0 +1,50 @@
+name: android16-v3-v4-upgrade
+
+on:
+  push:
+    branches: [diag/android16-v3-v4-upgrade]
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    # Push the prepared branch now, then trigger only after the public v4
+    # release asset exists with an empty commit containing [run-upgrade].
+    if: contains(github.event.head_commit.message, '[run-upgrade]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V4_TAG: driver-android-v4.0.0
+      V4_ASSET: ash-driver-v4-signed.apk
+      V3_APK: ${{ runner.temp }}/ash-driver-redmi-diagnostic-v3.apk
+      V4_APK: ${{ runner.temp }}/ash-driver-v4-signed.apk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download published v3 and v4 APKs
+        run: |
+          gh release download driver-android-redmi-diagnostic-v3 --repo Badee-Salloum/ash-delivery --pattern ash-driver-redmi-diagnostic-v3.apk --dir "$RUNNER_TEMP"
+          echo '1379ad8f886a74f4fd2cb49c4006a7d5a67619f5eb7886f836637d953ea72f22  '"$V3_APK" | sha256sum --check
+          gh release download "$V4_TAG" --repo Badee-Salloum/ash-delivery --pattern "$V4_ASSET" --dir "$RUNNER_TEMP"
+          expected=$(gh release view "$V4_TAG" --repo Badee-Salloum/ash-delivery --json assets --jq ".assets[] | select(.name == \"$V4_ASSET\") | .digest" | sed 's/^sha256://')
+          test -n "$expected"
+          echo "$expected  $V4_APK" | sha256sum --check
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Verify in-place upgrade on Android 16
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash .github/scripts/android16-v3-v4-upgrade.sh
