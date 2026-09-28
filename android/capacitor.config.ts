@@ -32,6 +32,8 @@ import type { CapacitorConfig } from '@capacitor/cli'
  * also disposes of the developer fee and the sanctions friction around paying it from Damascus.
  */
 const config: CapacitorConfig = {
+  // Capacitor uses this to generate the existing Java namespace. apply-native.mjs changes the
+  // installed applicationId and packaged appId to com.ashdelivery.driver.diagnostic for v4+.
   appId: 'com.ashdelivery.driver',
   appName: 'ASH Delivery — السائق',
   /*
