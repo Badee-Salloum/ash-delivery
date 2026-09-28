@@ -18,16 +18,16 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       V4_TAG: driver-android-v4.0.0
       V4_ASSET: ash-driver-v4-signed.apk
-      V3_APK: ${{ runner.temp }}/ash-driver-redmi-diagnostic-v3.apk
-      V4_APK: ${{ runner.temp }}/ash-driver-v4-signed.apk
+      V3_APK: /tmp/ash-driver-redmi-diagnostic-v3.apk
+      V4_APK: /tmp/ash-driver-v4-signed.apk
     steps:
       - uses: actions/checkout@v4
 
       - name: Download published v3 and v4 APKs
         run: |
-          gh release download driver-android-redmi-diagnostic-v3 --repo Badee-Salloum/ash-delivery --pattern ash-driver-redmi-diagnostic-v3.apk --dir "$RUNNER_TEMP"
+          gh release download driver-android-redmi-diagnostic-v3 --repo Badee-Salloum/ash-delivery --pattern ash-driver-redmi-diagnostic-v3.apk --dir /tmp
           echo '1379ad8f886a74f4fd2cb49c4006a7d5a67619f5eb7886f836637d953ea72f22  '"$V3_APK" | sha256sum --check
-          gh release download "$V4_TAG" --repo Badee-Salloum/ash-delivery --pattern "$V4_ASSET" --dir "$RUNNER_TEMP"
+          gh release download "$V4_TAG" --repo Badee-Salloum/ash-delivery --pattern "$V4_ASSET" --dir /tmp
           expected=$(gh release view "$V4_TAG" --repo Badee-Salloum/ash-delivery --json assets --jq ".assets[] | select(.name == \"$V4_ASSET\") | .digest" | sed 's/^sha256://')
           test -n "$expected"
           echo "$expected  $V4_APK" | sha256sum --check
