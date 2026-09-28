@@ -43,7 +43,7 @@ const schema = z.object({
     .default(false)
     .transform((value) => value === true || value === 'true'),
   TRACKER_GATEWAY_TOKEN: z.string().min(16).optional(),
-  /** Enable only after all driver phones have installed and drained the new Android build. */
+  /** Minimum Android build for new shift starts; deploy the chosen gate even during APK rollout. */
   MIN_DRIVER_ANDROID_TRACKER_BUILD: z.coerce.number().int().min(0).default(0),
 
   /** bcrypt cost. SRS §7 mandates bcrypt; 12 is the current sane floor. */

@@ -35,7 +35,7 @@ export interface NativeTrackerStatus {
 interface AshTrackerPlugin {
   preflight?(): Promise<NativePreflight>
   setupReliability?(): Promise<{ backgroundPermission: boolean; notificationPermission: boolean }>
-  start(options: { shiftId: string; origin: string }): Promise<{ started: boolean; reason?: string }>
+  start(options: { shiftId: string; origin: string; provisional?: boolean }): Promise<{ started: boolean; reason?: string }>
   stop(): Promise<void>
   status(): Promise<NativeTrackerStatus>
   retryUploads?(): Promise<void>
@@ -87,8 +87,14 @@ export async function retryNativeUploads(): Promise<void> {
   try { await plugin()?.retryUploads?.() } catch { /* The periodic worker still retries. */ }
 }
 
-/** A failed start is returned so the driver can see the tracking fault. */
-export async function syncNativeTracking(shiftId: string | null): Promise<{ started: boolean; reason?: string } | null> {
+/** A failed start is returned so the driver can see the tracking fault.
+ * A provisional start captures to SQLite before server confirmation, but withholds upload until
+ * the shift is confirmed. Calling start again without provisional activates the same service.
+ */
+export async function syncNativeTracking(
+  shiftId: string | null,
+  options: { provisional?: boolean } = {},
+): Promise<{ started: boolean; reason?: string } | null> {
   const tracker = plugin()
   if (!tracker) return null
   try {
@@ -96,7 +102,7 @@ export async function syncNativeTracking(shiftId: string | null): Promise<{ star
       await tracker.stop()
       return null
     }
-    return await tracker.start({ shiftId, origin: globalThis.location?.origin ?? '' })
+    return await tracker.start({ shiftId, origin: globalThis.location?.origin ?? '', provisional: options.provisional ?? false })
   } catch {
     return { started: false, reason: 'service_start_failed' }
   }

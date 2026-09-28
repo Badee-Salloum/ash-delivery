@@ -293,6 +293,7 @@ public class AshTrackerPlugin extends Plugin {
         // about to send. Passed in rather than hardcoded: staging and production differ.
         String origin = call.getString("origin");
         intent.putExtra(TrackerService.EXTRA_ORIGIN, origin != null ? origin : getBridge().getServerUrl());
+        intent.putExtra(TrackerService.EXTRA_PROVISIONAL, Boolean.TRUE.equals(call.getBoolean("provisional")));
         if (!locationEnabled(getContext())) {
             call.resolve(new JSObject().put("started", false).put("reason", "location_disabled"));
             return;
@@ -323,7 +324,9 @@ public class AshTrackerPlugin extends Plugin {
     @PluginMethod
     public void stop(PluginCall call) {
         getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE).edit()
-                .remove(TrackerService.KEY_SHIFT_ID).remove(TrackerService.KEY_ORIGIN).apply();
+                .remove(TrackerService.KEY_SHIFT_ID).remove(TrackerService.KEY_ORIGIN)
+                .remove(TrackerService.KEY_PROVISIONAL_SHIFT_ID)
+                .remove(TrackerService.KEY_PROVISIONAL_STARTED_AT_MS).apply();
         getContext().stopService(new Intent(getContext(), TrackerService.class));
         // The service may already be dead when the WebView sees the closed shift. Clear its
         // separate reminder in that case too; the ongoing foreground notice is OS-managed.

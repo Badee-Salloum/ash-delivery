@@ -163,7 +163,7 @@ export interface AppOptions {
   /** The hardware-tracker ingest seam. Off unless both this and a gateway token are set. */
   trackerIngestEnabled?: boolean
   trackerGatewayToken?: string | undefined
-  /** Zero disables the rollout gate until every phone is updated. */
+  /** Zero disables the new-shift Android build gate. */
   minDriverAndroidTrackerBuild?: number
 }
 

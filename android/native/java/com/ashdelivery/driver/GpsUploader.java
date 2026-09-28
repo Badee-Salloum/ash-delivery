@@ -124,6 +124,30 @@ final class GpsUploader {
         }
     }
 
+    /** Resolve a pre-confirmation tracker after a lost start-package response or WebView exit.
+     * Draft and network/auth failures keep its SQLite capture running without uploading.
+     */
+    static String provisionalShiftStatus(Context context, String shiftId, String origin) {
+        if ("offline".equals(networkLabel(context))) return "unknown";
+        HttpURLConnection connection = null;
+        String url = origin + "/api/shifts/" + shiftId + "/gps/status";
+        try {
+            connection = open(url, "GET");
+            int code = connection.getResponseCode();
+            if (code == 404 || code == 409) return "ended";
+            if (code != 200) return "unknown";
+            writeBackCookies(url, connection);
+            JSONObject response = new JSONObject(readBody(connection));
+            if (!response.has("live")) return "unknown";
+            if (response.optBoolean("live", false)) return "live";
+            return "draft".equals(response.optString("state")) ? "draft" : "ended";
+        } catch (Exception error) {
+            return "unknown";
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
     static boolean sendDiagnostics(Context context, GpsFixStore store, String shiftId, String origin, String serviceState) {
         HttpURLConnection connection = null;
         try {

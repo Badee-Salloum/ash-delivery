@@ -105,6 +105,7 @@ public class TrackerService extends Service {
 
     public static final String EXTRA_SHIFT_ID = "shiftId";
     public static final String EXTRA_ORIGIN = "origin";
+    public static final String EXTRA_PROVISIONAL = "provisional";
 
     private static final String CHANNEL_ID = "ash_tracking";
     private static final int NOTIFICATION_ID = 4711;
@@ -119,6 +120,9 @@ public class TrackerService extends Service {
     static final String PREFS = "ash_tracker";
     static final String KEY_SHIFT_ID = "shiftId";
     static final String KEY_ORIGIN = "origin";
+    static final String KEY_PROVISIONAL_SHIFT_ID = "provisionalShiftId";
+    static final String KEY_PROVISIONAL_STARTED_AT_MS = "provisionalStartedAtMs";
+    private static final long PROVISIONAL_MAX_MS = 2 * 60_000L;
 
     /**
      * How often a fix is requested, and how often the buffer is flushed.
@@ -159,6 +163,8 @@ public class TrackerService extends Service {
     private String shiftId;
     private String origin;
     private volatile boolean stopped = false;
+    /** Capture begins before the start-package request, but draft fixes cannot be uploaded yet. */
+    private volatile boolean provisional = false;
     /** Elapsed-realtime of the last fix, for the watchdog. Set when updates start so it does not fire early. */
     private volatile long lastFixElapsedMs = 0L;
     /** A provider callback is not a captured point until SQLite has committed it. */
@@ -195,6 +201,10 @@ public class TrackerService extends Service {
         @Override
         public void run() {
             if (stopped) return;
+            if (provisional && provisionalExpired()) {
+                stopEndedShift(shiftId);
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             if (now - lastFixElapsedMs > STALE_AFTER_MS && now - lastRearmElapsedMs > STALE_AFTER_MS) rearmUpdates();
             updateNotice(now);
@@ -230,6 +240,17 @@ public class TrackerService extends Service {
             return START_NOT_STICKY;
         }
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        boolean requestedProvisional = intent != null && intent.hasExtra(EXTRA_PROVISIONAL)
+                ? intent.getBooleanExtra(EXTRA_PROVISIONAL, false)
+                : id.equals(prefs.getString(KEY_PROVISIONAL_SHIFT_ID, null));
+        if (requestedProvisional && id.equals(prefs.getString(KEY_PROVISIONAL_SHIFT_ID, null))) {
+            long began = prefs.getLong(KEY_PROVISIONAL_STARTED_AT_MS, 0L);
+            if (began > 0L && System.currentTimeMillis() - began >= PROVISIONAL_MAX_MS) {
+                forget();
+                stopSelf();
+                return START_NOT_STICKY;
+            }
+        }
 
         /*
          * A permission-less restart must stop, not crash. On Android 14+ the location foreground
@@ -247,6 +268,7 @@ public class TrackerService extends Service {
         if (serviceRunning && id.equals(activeShiftId) && base.equals(origin)) {
             // Polling the shift may ask for start again. Do not reset the no-fix timer or
             // register a second provider callback: both would hide a real tracking outage.
+            if (!requestedProvisional && provisional) activateUploads(id);
             submitFlush();
             return START_STICKY;
         }
@@ -255,10 +277,25 @@ public class TrackerService extends Service {
             cancelAlertNotification();
         }
 
-        prefs.edit().putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base).apply();
+        SharedPreferences.Editor assignment = prefs.edit()
+                .putString(KEY_SHIFT_ID, id).putString(KEY_ORIGIN, base);
+        if (requestedProvisional) {
+            long began = id.equals(prefs.getString(KEY_PROVISIONAL_SHIFT_ID, null))
+                    ? prefs.getLong(KEY_PROVISIONAL_STARTED_AT_MS, 0L) : 0L;
+            assignment.putString(KEY_PROVISIONAL_SHIFT_ID, id)
+                    .putLong(KEY_PROVISIONAL_STARTED_AT_MS, began > 0L ? began : System.currentTimeMillis());
+        } else assignment.remove(KEY_PROVISIONAL_SHIFT_ID).remove(KEY_PROVISIONAL_STARTED_AT_MS);
+        // A provisional tracker must not survive a process restart with its two-minute clock
+        // reset. Persist that clock before acknowledging the foreground service as running.
+        if (requestedProvisional && !assignment.commit()) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (!requestedProvisional) assignment.apply();
         shiftId = id;
         origin = base;
         stopped = false;
+        provisional = requestedProvisional;
         lastNoticeText = R.string.tracking_text;
         serviceRunning = true;
         activeShiftId = id;
@@ -479,7 +516,23 @@ public class TrackerService extends Service {
     /** Drop the persisted assignment, so a later restart does not resume a shift that is over. */
     private void forget() {
         getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .remove(KEY_SHIFT_ID).remove(KEY_ORIGIN).apply();
+                .remove(KEY_SHIFT_ID).remove(KEY_ORIGIN).remove(KEY_PROVISIONAL_SHIFT_ID)
+                .remove(KEY_PROVISIONAL_STARTED_AT_MS).apply();
+    }
+
+    private boolean provisionalExpired() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        long began = prefs.getLong(KEY_PROVISIONAL_STARTED_AT_MS, 0L);
+        return began > 0L && System.currentTimeMillis() - began >= PROVISIONAL_MAX_MS;
+    }
+
+    /** The start package is committed. Keep the current location callback and release queued fixes. */
+    private void activateUploads(String id) {
+        if (stopped || !id.equals(shiftId)) return;
+        getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove(KEY_PROVISIONAL_SHIFT_ID).remove(KEY_PROVISIONAL_STARTED_AT_MS).commit();
+        provisional = false;
+        GpsUploadWorker.kickNow(this);
     }
 
     private boolean hasLocationPermission() {
@@ -555,6 +608,12 @@ public class TrackerService extends Service {
                 reason = R.string.tracking_alert_location_disabled;
             else reason = R.string.tracking_alert_no_fix;
             showTrackingAlert(id, reason);
+            return;
+        }
+        // During manager/start-package confirmation capture is expected, but upload is held by
+        // design. Do not call that expected wait an upload outage.
+        if (provisional) {
+            clearTrackingAlert(id);
             return;
         }
         if (now - Math.max(started, uploaded) < ALERT_INTERVAL_MS) {
@@ -673,6 +732,20 @@ public class TrackerService extends Service {
             try { lock.acquire(45_000L); } catch (Exception ignored) { lock = null; }
         }
         try {
+            if (provisional) {
+                // The service was started while the shift was still draft. A draft has no GPS
+                // capture window yet, and the ordinary status/ingest path would stop this service.
+                // If the start-package response was lost, the status poll promotes it once the
+                // server records driver confirmation, even with the WebView closed.
+                long now = SystemClock.elapsedRealtime();
+                if (lastStatusCheckElapsedMs == 0 || now - lastStatusCheckElapsedMs >= STATUS_INTERVAL_MS) {
+                    lastStatusCheckElapsedMs = now;
+                    String status = GpsUploader.provisionalShiftStatus(this, id, base);
+                    if ("live".equals(status)) activateUploads(id);
+                    else if ("ended".equals(status)) stopEndedShift(id);
+                }
+                if (provisional || stopped) return;
+            }
             GpsUploader.Outcome outcome = GpsUploader.flushOnce(this, fixStore, id, base);
             if (outcome == GpsUploader.Outcome.SHIFT_OVER) {
                 stopEndedShift(id);

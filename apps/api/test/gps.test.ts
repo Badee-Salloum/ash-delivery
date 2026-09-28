@@ -234,6 +234,24 @@ describe('live GPS (SRS K)', () => {
       expect((await get(driver, `/shifts/${id}/gps/status`)).json()).toMatchObject({ live: true })
     })
 
+    it('blocks a direct browser start when the Android build gate is enabled', async () => {
+      await h.app.close()
+      h = await makeHarness({ minDriverAndroidTrackerBuild: 2 })
+      const driver = await h.loginAs('driver1')
+      const id = (await post(driver, '/shifts', {
+        driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1,
+      })).json().id as string
+      await h.uploadPhoto(driver, id, 'start', 'odometer')
+      const response = await h.app.inject({
+        method: 'PUT', url: `/shifts/${id}/start-package`,
+        headers: { cookie: h.cookie(driver), origin: 'https://ash-driver.vercel.app' },
+        payload: { odometerKm: 100, batteryPercent: 90 },
+      })
+      expect(response.statusCode, response.body).toBe(409)
+      expect(response.json()).toMatchObject({ error: 'gps_preflight_required' })
+      expect(h.deps.shifts.rows.get(id)?.state).toBe('draft')
+    })
+
     it('accepts identified fixes after cancellation only when captured inside the tracking window', async () => {
       const driver = await h.loginAs('driver1')
       const manager = await h.loginAs('manager')

@@ -61,6 +61,9 @@ public final class GpsUploadWorker extends Worker {
             boolean retry = false;
             for (GpsFixStore.Assignment assignment : assignments) {
                 SharedPreferences prefs = context.getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+                // Foreground capture may begin while start-package is still a draft. The server
+                // has no tracking window then; wait for the service's confirmed transition.
+                if (assignment.shiftId.equals(prefs.getString(TrackerService.KEY_PROVISIONAL_SHIFT_ID, null))) continue;
                 boolean sameActive = assignment.shiftId.equals(prefs.getString(TrackerService.KEY_SHIFT_ID, null));
                 String serviceState = TrackerService.serviceRunning &&
                         assignment.shiftId.equals(TrackerService.activeShiftId) ? "running" :
@@ -82,7 +85,12 @@ public final class GpsUploadWorker extends Worker {
                     store.markReported(assignment.shiftId, reportVersion);
                 }
             }
-            if (!store.pendingAssignments().isEmpty()) retry = true;
+            // An exclusively provisional queue is intentionally held, not a failed upload.
+            SharedPreferences prefs = context.getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+            String provisionalId = prefs.getString(TrackerService.KEY_PROVISIONAL_SHIFT_ID, null);
+            for (GpsFixStore.Assignment assignment : store.pendingAssignments()) {
+                if (!assignment.shiftId.equals(provisionalId)) { retry = true; break; }
+            }
             return retry ? Result.retry() : Result.success();
         } catch (Exception error) {
             store.recordFailure("worker_error");

@@ -10,6 +10,9 @@ import {
 } from './pending-evidence-storage.ts'
 import { clearAllEndDrafts, sweepExpiredEndDrafts } from './end-draft-storage.ts'
 import { UpdateBar } from './UpdateBar.tsx'
+import { nativeTrackerAvailable } from './native-tracker.ts'
+
+const ANDROID_APK_URL = 'https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v2.0.0/ash-driver-v2-signed.apk'
 
 interface Assignment {
   driverId: string
@@ -165,6 +168,31 @@ export function DriverApp(): ReactNode {
       <UpdateBar safeBoundary={safeUpdateBoundary} />
       {content}
     </>
+  )
+
+  // The public URL remains an installation page. A browser has no durable Android foreground
+  // tracker, so it must not offer the shift workflow even if a cached PWA still loads.
+  if (!nativeTrackerAvailable()) return withUpdateBar(
+    <Screen title={t.app.title}>
+      <Card>
+        <div className="flex flex-col gap-4 text-center">
+          <h2 className="text-xl font-bold text-ink">
+            {lang === 'ar' ? 'تطبيق السائق مطلوب لبدء النوبة' : 'Install the driver app to start a shift'}
+          </h2>
+          <p className="text-ink-secondary">
+            {lang === 'ar'
+              ? 'نزّل نسخة Android الجديدة وثبّتها، ثم افتح التطبيق من هاتفك مع تفعيل الموقع الدقيق.'
+              : 'Download and install the new Android app, then open it on your phone with precise location enabled.'}
+          </p>
+          <a
+            href={ANDROID_APK_URL}
+            className="inline-flex min-h-14 items-center justify-center rounded-2xl bg-brand px-5 text-center text-lg font-semibold text-on-brand outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface-card"
+          >
+            {lang === 'ar' ? 'تنزيل تطبيق السائق' : 'Download driver app'}
+          </a>
+        </div>
+      </Card>
+    </Screen>,
   )
 
   if (!session) return withUpdateBar(<Login />)

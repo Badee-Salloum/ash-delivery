@@ -1040,10 +1040,13 @@ export function ShiftFlow({
    * no plugin and this does nothing at all.
    */
   useEffect(() => {
+    // A live assignment may still be loading after the WebView reopens. Stopping here would turn
+    // a slow state fetch (or a temporary offline fetch) into a real tracking gap.
+    if (resume && shift === null) return
     void syncNativeTracking(trackedShiftId).then((result) => {
       if (result?.started === false) toast.error(t.gpsTracking.service_start_failed)
     })
-  }, [trackedShiftId])
+  }, [trackedShiftId, resume?.id, shift?.id])
 
   const applyServerState = useCallback(
     (state: string): boolean => {
@@ -1790,14 +1793,28 @@ function StartPackage({
         onOpened(submitted.id)
       }
     }
+    const finishConfirmed = async (submitted: Parameters<typeof showConfirmed>[0]): Promise<void> => {
+      if (nativeTrackerAvailable()) {
+        // Release the provisional queue before leaving the start screen. A resumed or retried
+        // confirmation takes this path too, so a lost HTTP response cannot strand capture.
+        const tracking = await syncNativeTracking(submitted.id)
+        if (tracking?.started) void setupNativeTrackingReliability().catch(() => undefined)
+        else toast.error(t.gpsTracking.service_start_failed)
+      }
+      showConfirmed(submitted)
+    }
     try {
       const alreadyConfirmed = await api.shiftState(shiftId).catch(() => null)
       if (alreadyConfirmed && (alreadyConfirmed.state === 'open' || alreadyConfirmed.state === 'awaiting_open_approval')) {
-        showConfirmed(alreadyConfirmed)
+        await finishConfirmed(alreadyConfirmed)
         return
       }
       const preflight = await preflightNativeTracker()
       nativePreflightUnavailable = nativeTrackerAvailable() && preflight === null
+      if (nativePreflightUnavailable) {
+        setGpsGateError('upgradeRequired')
+        return
+      }
       if (preflight) {
         if (!preflight.ready) {
           setGpsGateError(preflight.reason ?? 'provider_error')
@@ -1814,6 +1831,17 @@ function StartPackage({
           precise: true,
           locationEnabled: true,
         })
+      }
+      if (nativeTrackerAvailable()) {
+        // Start the real foreground service while the shift is still draft, and wait for Android
+        // to confirm it is running before opening the server's tracking window. Provisional fixes
+        // are saved in SQLite but are held from upload until start-package is committed.
+        const tracking = await syncNativeTracking(shiftId, { provisional: true })
+        if (tracking?.started !== true) {
+          setGpsGateError(tracking?.reason ?? 'service_start_failed')
+          await syncNativeTracking(null)
+          return
+        }
       }
       // The driver submits only the odometer + photo. The cash float and wallet top-up are the
       // branch's money, entered by the manager at approval. Charge is captured per pack, so the
@@ -1833,23 +1861,22 @@ function StartPackage({
         // What the reader was looking at, so the correction he just made becomes an example.
         odometerStrip: odoStrip,
       })
-      showConfirmed(submitted)
-      // Start capture as soon as the driver confirms, including while the manager is approving.
-      // Ask for notification/background reliability permissions only after capture has started:
-      // a system dialog must never delay the first GPS points or the server confirmation.
-      if (nativeTrackerAvailable()) {
-        void syncNativeTracking(submitted.id)
-          .then((result) => result?.started ? setupNativeTrackingReliability() : undefined)
-          .catch(() => undefined)
-      }
+      await finishConfirmed(submitted)
     } catch (e) {
       // The POST may have committed while its response was lost. Read the server state before
       // offering another tap, so retrying cannot strand a confirmed shift at the start screen.
       if (startRequestSent) {
         const recovered = await api.shiftState(shiftId).catch(() => null)
         if (recovered && (recovered.state === 'open' || recovered.state === 'awaiting_open_approval')) {
-          showConfirmed(recovered)
+          await finishConfirmed(recovered)
           return
+        }
+        // A 4xx response means the request was rejected. A timeout with a draft snapshot is
+        // still ambiguous: the original request may commit after this read, so keep capture alive
+        // and let the service's status poll promote it when confirmation appears.
+        const status = (e as { status?: number }).status
+        if (recovered?.state === 'draft' && status != null && status >= 400 && status < 500) {
+          await syncNativeTracking(null)
         }
       }
       // A driver can't read a console — a failed upload must show on the glass, not vanish.
