@@ -136,8 +136,8 @@ if (!gradle.includes('androidx.work:work-runtime')) {
 }
 
 // A monotonically increasing Android build code lets the server identify the native capability.
-gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 2')
-gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "2.0"')
+gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 3')
+gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "3.0"')
 writeFileSync(gradlePath, gradle)
 
 console.log('native sources applied: Java tracker, queue and worker, resources, manifest, gradle')
