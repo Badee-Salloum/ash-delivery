@@ -12,7 +12,7 @@ import { clearAllEndDrafts, sweepExpiredEndDrafts } from './end-draft-storage.ts
 import { UpdateBar } from './UpdateBar.tsx'
 import { nativeTrackerAvailable } from './native-tracker.ts'
 
-const ANDROID_APK_URL = 'https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v2.0.0/ash-driver-v2-signed.apk'
+const ANDROID_APK_URL = 'https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v4.0.0/ash-driver-v4-signed.apk'
 
 interface Assignment {
   driverId: string
@@ -190,6 +190,28 @@ export function DriverApp(): ReactNode {
           >
             {lang === 'ar' ? 'تنزيل تطبيق السائق' : 'Download driver app'}
           </a>
+          <div className="rounded-2xl bg-surface-muted p-4 text-start text-sm text-ink-secondary">
+            <p className="font-semibold text-ink">
+              {lang === 'ar' ? 'إذا ظهر «لم يتم تثبيت التطبيق»:' : 'If Android says “App not installed”:'}
+            </p>
+            <ol className="mt-2 list-decimal space-y-1 ps-5">
+              <li>
+                {lang === 'ar'
+                  ? 'افتح ملف APK الذي نزلته من مدير الملفات، وتأكد من توفر مساحة تخزين كافية.'
+                  : 'Open the downloaded APK from File Manager and check that the phone has enough free storage.'}
+              </li>
+              <li>
+                {lang === 'ar'
+                  ? 'على هواتف شاومي، اسمح لمصدر التثبيت المستخدم (Chrome أو مدير الملفات) بتثبيت التطبيقات غير المعروفة من إعدادات الهاتف.'
+                  : 'On Xiaomi phones, allow the installer source (Chrome or File Manager) to install unknown apps in phone settings.'}
+              </li>
+            </ol>
+            <p className="mt-2">
+              {lang === 'ar'
+                ? 'إذا كانت نسخة سابقة من ASH مثبتة، لا تحذفها قبل التأكد من رفع نقاط GPS المعلقة؛ حذف التطبيق يمحو بياناته المحلية.'
+                : 'If an older ASH app is installed, check that pending GPS points have uploaded before uninstalling it. Uninstalling erases its local data.'}
+            </p>
+          </div>
         </div>
       </Card>
     </Screen>,
