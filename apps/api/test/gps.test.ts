@@ -225,8 +225,15 @@ describe('live GPS (SRS K)', () => {
         precise: true, locationEnabled: true,
       })).json().error).toBe('gps_fix_not_fresh')
       expect((await post(driver, `/shifts/${id}/gps/readiness`, {
+        appBuild: 10, capturedAtMs: Number.MAX_SAFE_INTEGER, accuracyM: 12,
+        precise: true, locationEnabled: true,
+      })).statusCode).toBe(422)
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, {
         appBuild: 10, capturedAtMs: h.deps.clock.nowMs(), accuracyM: 12,
         precise: true, locationEnabled: true,
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
+        queueAvailable: true,
       })).json()).toMatchObject({ ready: true })
       expect((await put(driver, `/shifts/${id}/start-package`, {
         odometerKm: 100, batteryPercent: 90,
@@ -250,6 +257,50 @@ describe('live GPS (SRS K)', () => {
       expect(response.statusCode, response.body).toBe(409)
       expect(response.json()).toMatchObject({ error: 'gps_preflight_required' })
       expect(h.deps.shifts.rows.get(id)?.state).toBe('draft')
+    })
+
+    it('rejects each missing tracker prerequisite and invalidates earlier readiness', async () => {
+      await h.app.close()
+      h = await makeHarness({ minDriverAndroidTrackerBuild: 2 })
+      const driver = await h.loginAs('driver1')
+      const id = (await post(driver, '/shifts', {
+        driverId: DRIVER_ID, vehicleId: VEHICLE_ID, shiftNo: 1,
+      })).json().id as string
+      await h.uploadPhoto(driver, id, 'start', 'odometer')
+      const ready = {
+        appBuild: 2, capturedAtMs: h.deps.clock.nowMs(), accuracyM: 12,
+        precise: true, locationEnabled: true, backgroundPermission: true,
+        notificationPermission: true, batteryOptimizationExempt: true,
+        autostartAcknowledged: true, queueAvailable: true,
+      }
+      const cases = [
+        { field: 'precise', stored: 'readinessPrecise', error: 'gps_precise_location_required' },
+        { field: 'locationEnabled', stored: 'readinessLocationEnabled', error: 'gps_location_enabled_required' },
+        { field: 'backgroundPermission', stored: 'readinessBackgroundPermission', error: 'gps_background_permission_required' },
+        { field: 'notificationPermission', stored: 'readinessNotificationPermission', error: 'gps_notification_permission_required' },
+        { field: 'batteryOptimizationExempt', stored: 'readinessBatteryOptimizationExempt', error: 'gps_battery_optimization_exemption_required' },
+        { field: 'autostartAcknowledged', stored: 'readinessAutostartAcknowledged', error: 'gps_autostart_acknowledgement_required' },
+        { field: 'queueAvailable', stored: 'readinessQueueAvailable', error: 'gps_queue_unavailable' },
+      ] as const
+      for (const item of cases) {
+        expect((await post(driver, `/shifts/${id}/gps/readiness`, ready)).statusCode).toBe(202)
+        const denied = await post(driver, `/shifts/${id}/gps/readiness`, { ...ready, [item.field]: false })
+        expect(denied.statusCode, denied.body).toBe(409)
+        expect(denied.json().error).toBe(item.error)
+        expect(h.deps.gpsHealth.rows.get(id)?.[item.stored]).toBe(false)
+        const start = await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })
+        expect(start.statusCode, start.body).toBe(409)
+        expect(start.json().error).toBe('gps_preflight_required')
+        expect(h.deps.shifts.rows.get(id)?.state).toBe('draft')
+      }
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, ready)).statusCode).toBe(202)
+      const withoutExemption = { ...ready } as Record<string, unknown>
+      delete withoutExemption.batteryOptimizationExempt
+      expect((await post(driver, `/shifts/${id}/gps/readiness`, withoutExemption)).json().error)
+        .toBe('gps_battery_optimization_exemption_required')
+      expect(h.deps.gpsHealth.rows.get(id)?.readinessBatteryOptimizationExempt).toBeNull()
+      expect((await put(driver, `/shifts/${id}/start-package`, { odometerKm: 100, batteryPercent: 90 })).statusCode)
+        .toBe(409)
     })
 
     it('accepts identified fixes after cancellation only when captured inside the tracking window', async () => {
@@ -389,6 +440,8 @@ describe('live GPS (SRS K)', () => {
       const id = await toOpen(driver, manager)
       const diagnostic = await post(driver, `/shifts/${id}/gps/diagnostics`, {
         appBuild: 10, service: 'running', permission: 'precise', locationEnabled: true,
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
         network: 'offline', pendingCount: 12, lastCapturedAtMs: h.deps.clock.nowMs(),
         lastUploadedAtMs: null, droppedExpired: 0, droppedCapacity: 0, droppedStorage: 3,
         rejectionReasons: {},
@@ -396,9 +449,40 @@ describe('live GPS (SRS K)', () => {
       expect(diagnostic.json()).toMatchObject({ recorded: true, cause: 'offline' })
       expect((await get(manager, `/shifts/${id}/gps/diagnostics`)).json()).toMatchObject({
         pendingCount: 12, droppedStorage: 3, cause: 'offline',
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
       })
       h.deps.clock.advance(11 * 60_000)
       expect((await get(driver, `/shifts/${id}/gps/status`)).json().health.cause).toBe('unknown')
+    })
+
+    it('records current background settings and names each missing setting in diagnostics', async () => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await toOpen(driver, manager)
+      const healthy = {
+        appBuild: 2, service: 'running', permission: 'precise', locationEnabled: true,
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
+        network: 'online', pendingCount: 0, lastCapturedAtMs: h.deps.clock.nowMs(),
+        lastUploadedAtMs: h.deps.clock.nowMs(),
+      }
+      const cases = [
+        { field: 'backgroundPermission', cause: 'background_permission' },
+        { field: 'notificationPermission', cause: 'notification_permission' },
+        { field: 'batteryOptimizationExempt', cause: 'battery_optimization' },
+        { field: 'autostartAcknowledged', cause: 'autostart_unconfirmed' },
+      ] as const
+      for (const item of cases) {
+        const response = await post(driver, `/shifts/${id}/gps/diagnostics`, {
+          ...healthy, [item.field]: false,
+        })
+        expect(response.statusCode, response.body).toBe(202)
+        expect(response.json().cause).toBe(item.cause)
+        expect((await get(manager, `/shifts/${id}/gps/diagnostics`)).json()).toMatchObject({
+          [item.field]: false, cause: item.cause,
+        })
+      }
     })
 
     it('accepts a batch, stores it in CAPTURE order, and counts what was new', async () => {

@@ -373,17 +373,40 @@ if (!DATABASE_URL) {
   describe('GPS tracker health', () => {
     it('persists storage failures and never reduces a cumulative loss count', async () => {
       const deps = await makeDeps()
+      await deps.gpsHealth.recordReadiness({
+        shiftId: SHIFT, atMs: Date.now(), capturedAtMs: Date.now(), accuracyM: 12,
+        appBuild: 10, precise: true, locationEnabled: true,
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
+        queueAvailable: true,
+      })
       const heartbeat = {
         shiftId: SHIFT, readinessAtMs: null, readinessCapturedAtMs: null,
-        readinessAccuracyM: null, appBuild: 10, heartbeatAtMs: Date.now(),
+        readinessAccuracyM: null, readinessPrecise: null, readinessLocationEnabled: null,
+        readinessBackgroundPermission: null, readinessNotificationPermission: null,
+        readinessBatteryOptimizationExempt: null, readinessAutostartAcknowledged: null,
+        readinessQueueAvailable: null,
+        appBuild: 10, heartbeatAtMs: Date.now(),
         service: 'running' as const, permission: 'precise' as const,
-        locationEnabled: true, network: 'online' as const, pendingCount: 0,
+        locationEnabled: true, backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
+        network: 'online' as const, pendingCount: 0,
         lastCapturedAtMs: null, lastUploadedAtMs: null,
         droppedExpired: 0, droppedCapacity: 0, droppedStorage: 3,
         rejectionReasons: {},
       }
       await deps.gpsHealth.recordHeartbeat(heartbeat)
       expect((await deps.gpsHealth.findByShift(SHIFT))?.droppedStorage).toBe(3)
+      expect(await deps.gpsHealth.findByShift(SHIFT)).toMatchObject({
+        backgroundPermission: true, notificationPermission: true,
+        batteryOptimizationExempt: true, autostartAcknowledged: true,
+      })
+      expect(await deps.gpsHealth.findByShift(SHIFT)).toMatchObject({
+        readinessPrecise: true, readinessLocationEnabled: true,
+        readinessBackgroundPermission: true, readinessNotificationPermission: true,
+        readinessBatteryOptimizationExempt: true, readinessAutostartAcknowledged: true,
+        readinessQueueAvailable: true,
+      })
       await deps.gpsHealth.recordHeartbeat({ ...heartbeat, droppedStorage: 1 })
       expect((await deps.gpsHealth.findByShift(SHIFT))?.droppedStorage).toBe(3)
       const events = await pool.query<{ detail: { droppedStorage: number } }>(

@@ -159,6 +159,10 @@ final class GpsUploader {
             body.put("service", serviceState);
             body.put("permission", AshTrackerPlugin.permissionLabel(context));
             body.put("locationEnabled", AshTrackerPlugin.locationEnabled(context));
+            body.put("backgroundPermission", AshTrackerPlugin.backgroundPermission(context));
+            body.put("notificationPermission", AshTrackerPlugin.notificationPermission(context));
+            body.put("batteryOptimizationExempt", AshTrackerPlugin.batteryOptimizationExempt(context));
+            body.put("autostartAcknowledged", AshTrackerPlugin.autostartAcknowledged(context));
             body.put("network", networkLabel(context));
             body.put("pendingCount", queue.optInt("pendingCount", 0));
             body.put("lastCapturedAtMs", nullablePositive(prefs.getLong("lastCapturedAtMs:" + shiftId, 0)));

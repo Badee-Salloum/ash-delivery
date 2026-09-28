@@ -51,6 +51,7 @@ import type {
   GpsPingSource,
   GpsTrackerHealth,
   GpsTrackerHealthRepo,
+  GpsTrackerReadiness,
   TrackerDeviceRecord,
   TrackerDeviceRepo,
   OrderPointRecord,
@@ -2376,13 +2377,20 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
 export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
   readonly rows = new Map<string, GpsTrackerHealth>()
 
-  async recordReadiness(input: { shiftId: string; atMs: number; capturedAtMs: number; accuracyM: number; appBuild: number }): Promise<void> {
+  async recordReadiness(input: GpsTrackerReadiness): Promise<void> {
     const previous = this.rows.get(input.shiftId)
     this.rows.set(input.shiftId, {
       ...emptyGpsTrackerHealth(input.shiftId), ...previous,
       readinessAtMs: input.atMs,
       readinessCapturedAtMs: input.capturedAtMs,
       readinessAccuracyM: input.accuracyM,
+      readinessPrecise: input.precise,
+      readinessLocationEnabled: input.locationEnabled,
+      readinessBackgroundPermission: input.backgroundPermission,
+      readinessNotificationPermission: input.notificationPermission,
+      readinessBatteryOptimizationExempt: input.batteryOptimizationExempt,
+      readinessAutostartAcknowledged: input.autostartAcknowledged,
+      readinessQueueAvailable: input.queueAvailable,
       appBuild: input.appBuild,
     })
   }
@@ -2394,6 +2402,13 @@ export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
       readinessAtMs: previous?.readinessAtMs ?? null,
       readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
       readinessAccuracyM: previous?.readinessAccuracyM ?? null,
+      readinessPrecise: previous?.readinessPrecise ?? null,
+      readinessLocationEnabled: previous?.readinessLocationEnabled ?? null,
+      readinessBackgroundPermission: previous?.readinessBackgroundPermission ?? null,
+      readinessNotificationPermission: previous?.readinessNotificationPermission ?? null,
+      readinessBatteryOptimizationExempt: previous?.readinessBatteryOptimizationExempt ?? null,
+      readinessAutostartAcknowledged: previous?.readinessAutostartAcknowledged ?? null,
+      readinessQueueAvailable: previous?.readinessQueueAvailable ?? null,
       droppedExpired: Math.max(previous?.droppedExpired ?? 0, input.droppedExpired),
       droppedCapacity: Math.max(previous?.droppedCapacity ?? 0, input.droppedCapacity),
       droppedStorage: Math.max(previous?.droppedStorage ?? 0, input.droppedStorage),
@@ -2415,8 +2430,15 @@ export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
 
 const emptyGpsTrackerHealth = (shiftId: string): GpsTrackerHealth => ({
   shiftId, readinessAtMs: null, readinessCapturedAtMs: null, readinessAccuracyM: null,
+  readinessPrecise: null, readinessLocationEnabled: null,
+  readinessBackgroundPermission: null, readinessNotificationPermission: null,
+  readinessBatteryOptimizationExempt: null,
+  readinessAutostartAcknowledged: null,
+  readinessQueueAvailable: null,
   appBuild: null, heartbeatAtMs: null, service: null, permission: null,
-  locationEnabled: null, network: null, pendingCount: null,
+  locationEnabled: null, backgroundPermission: null, notificationPermission: null,
+  batteryOptimizationExempt: null, autostartAcknowledged: null,
+  network: null, pendingCount: null,
   lastCapturedAtMs: null, lastUploadedAtMs: null,
   droppedExpired: 0, droppedCapacity: 0, droppedStorage: 0, rejectionReasons: {},
 })

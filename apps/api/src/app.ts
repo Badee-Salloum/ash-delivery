@@ -1015,7 +1015,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             readiness.readinessAtMs === null || nowMs - readiness.readinessAtMs > 120_000 ||
             readiness.readinessCapturedAtMs === null ||
             Math.abs(nowMs - readiness.readinessCapturedAtMs) > 120_000 ||
-            readiness.readinessAccuracyM === null || readiness.readinessAccuracyM > 100) {
+            readiness.readinessAccuracyM === null || readiness.readinessAccuracyM > 100 ||
+            readiness.readinessPrecise !== true || readiness.readinessLocationEnabled !== true ||
+            readiness.readinessBackgroundPermission !== true ||
+            readiness.readinessNotificationPermission !== true ||
+            readiness.readinessBatteryOptimizationExempt !== true ||
+            readiness.readinessAutostartAcknowledged !== true ||
+            readiness.readinessQueueAvailable !== true) {
           throw new ServiceError(409, 'gps_preflight_required', {
             minAndroidBuild: opts.minDriverAndroidTrackerBuild,
           })
@@ -2442,6 +2448,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         nowMs - health.heartbeatAtMs > GPS_SILENCE_GRACE_MS) return 'unknown'
     if (health.permission !== 'precise') return 'permission'
     if (health.locationEnabled === false) return 'location_disabled'
+    if (health.backgroundPermission === false) return 'background_permission'
+    if (health.notificationPermission === false) return 'notification_permission'
+    if (health.batteryOptimizationExempt === false) return 'battery_optimization'
+    // Acknowledgement says the driver visited OEM autostart settings; it cannot prove the toggle.
+    if (health.autostartAcknowledged === false) return 'autostart_unconfirmed'
     if (health.service !== 'running') return 'service_stopped'
     if (health.network === 'offline') return 'offline'
     if (health.lastCapturedAtMs === null || nowMs - health.lastCapturedAtMs > GPS_SILENCE_GRACE_MS) return 'capture_stopped'
@@ -2515,10 +2526,39 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       if (body.appBuild < (opts.minDriverAndroidTrackerBuild ?? 0)) {
         return reply.code(426).send({ error: 'android_update_required', minAndroidBuild: opts.minDriverAndroidTrackerBuild })
       }
+      // Persist all checkable settings before returning a permission refusal. A later failed
+      // permission check replaces earlier true flags, so the start route never trusts them.
       await deps.gpsHealth.recordReadiness({
         shiftId: id, atMs: nowMs, capturedAtMs: body.capturedAtMs,
         accuracyM: body.accuracyM, appBuild: body.appBuild,
+        precise: body.precise, locationEnabled: body.locationEnabled,
+        backgroundPermission: body.backgroundPermission ?? null,
+        notificationPermission: body.notificationPermission ?? null,
+        batteryOptimizationExempt: body.batteryOptimizationExempt ?? null,
+        autostartAcknowledged: body.autostartAcknowledged ?? null,
+        queueAvailable: body.queueAvailable ?? null,
       })
+      if (!body.precise) return reply.code(409).send({ error: 'gps_precise_location_required' })
+      if (!body.locationEnabled) return reply.code(409).send({ error: 'gps_location_enabled_required' })
+      if ((opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
+        if (body.backgroundPermission !== true) {
+          return reply.code(409).send({ error: 'gps_background_permission_required' })
+        }
+        if (body.notificationPermission !== true) {
+          return reply.code(409).send({ error: 'gps_notification_permission_required' })
+        }
+        if (body.batteryOptimizationExempt !== true) {
+          return reply.code(409).send({ error: 'gps_battery_optimization_exemption_required' })
+        }
+        // OEM autostart screens expose no stable Android API. This is an acknowledged visit,
+        // not a remotely verifiable device setting.
+        if (body.autostartAcknowledged !== true) {
+          return reply.code(409).send({ error: 'gps_autostart_acknowledgement_required' })
+        }
+        if (body.queueAvailable !== true) {
+          return reply.code(409).send({ error: 'gps_queue_unavailable' })
+        }
+      }
       return reply.code(202).send({ ready: true, expiresAt: new Date(nowMs + 120_000).toISOString() })
     },
   )
@@ -2538,10 +2578,21 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         readinessAtMs: previous?.readinessAtMs ?? null,
         readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
         readinessAccuracyM: previous?.readinessAccuracyM ?? null,
+        readinessPrecise: previous?.readinessPrecise ?? null,
+        readinessLocationEnabled: previous?.readinessLocationEnabled ?? null,
+        readinessBackgroundPermission: previous?.readinessBackgroundPermission ?? null,
+        readinessNotificationPermission: previous?.readinessNotificationPermission ?? null,
+        readinessBatteryOptimizationExempt: previous?.readinessBatteryOptimizationExempt ?? null,
+        readinessAutostartAcknowledged: previous?.readinessAutostartAcknowledged ?? null,
+        readinessQueueAvailable: previous?.readinessQueueAvailable ?? null,
         appBuild: body.appBuild ?? previous?.appBuild ?? null,
         heartbeatAtMs: nowMs,
         service: body.service, permission: body.permission,
         locationEnabled: body.locationEnabled, network: body.network,
+        backgroundPermission: body.backgroundPermission ?? null,
+        notificationPermission: body.notificationPermission ?? null,
+        batteryOptimizationExempt: body.batteryOptimizationExempt ?? null,
+        autostartAcknowledged: body.autostartAcknowledged ?? null,
         pendingCount: body.pendingCount,
         lastCapturedAtMs: body.lastCapturedAtMs ?? null,
         lastUploadedAtMs: body.lastUploadedAtMs ?? null,

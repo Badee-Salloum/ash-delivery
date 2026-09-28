@@ -916,11 +916,18 @@ export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
 
 /** Preflight metadata; location coordinates never leave the handset until confirmation. */
 export const gpsReadinessRequest = z.object({
-  appBuild: z.number().int().positive(),
+  appBuild: z.number().int().min(1).max(2_147_483_647),
   capturedAtMs: z.number().int(),
   accuracyM: z.number().min(0).max(100),
-  precise: z.literal(true),
-  locationEnabled: z.literal(true),
+  precise: z.boolean(),
+  locationEnabled: z.boolean(),
+  /** Optional on the wire until all pre-rollout clients have upgraded. Required by the build gate. */
+  backgroundPermission: z.boolean().optional(),
+  notificationPermission: z.boolean().optional(),
+  batteryOptimizationExempt: z.boolean().optional(),
+  /** Driver acknowledgement after opening OEM autostart settings; Android cannot verify the toggle. */
+  autostartAcknowledged: z.boolean().optional(),
+  queueAvailable: z.boolean().optional(),
 })
 
 /** A coordinate-free heartbeat. Counters are cumulative on this handset/shift. */
@@ -929,6 +936,11 @@ export const gpsDiagnosticsRequest = z.object({
   service: z.enum(['running', 'stopped', 'unknown']),
   permission: z.enum(['precise', 'approximate', 'denied', 'unknown']),
   locationEnabled: z.boolean().nullable(),
+  backgroundPermission: z.boolean().optional(),
+  notificationPermission: z.boolean().optional(),
+  batteryOptimizationExempt: z.boolean().optional(),
+  /** Driver declaration after OEM settings visit; the toggle is not programmatically verifiable. */
+  autostartAcknowledged: z.boolean().optional(),
   network: z.enum(['online', 'offline', 'unknown']),
   pendingCount: z.number().int().min(0).max(60_000),
   lastCapturedAtMs: z.number().int().nullable().optional(),

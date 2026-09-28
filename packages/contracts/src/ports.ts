@@ -2841,11 +2841,22 @@ export interface GpsTrackerHealth {
   readinessAtMs: number | null
   readinessCapturedAtMs: number | null
   readinessAccuracyM: number | null
+  readinessPrecise: boolean | null
+  readinessLocationEnabled: boolean | null
+  readinessBackgroundPermission: boolean | null
+  readinessNotificationPermission: boolean | null
+  readinessBatteryOptimizationExempt: boolean | null
+  readinessAutostartAcknowledged: boolean | null
+  readinessQueueAvailable: boolean | null
   appBuild: number | null
   heartbeatAtMs: number | null
   service: 'running' | 'stopped' | 'unknown' | null
   permission: 'precise' | 'approximate' | 'denied' | 'unknown' | null
   locationEnabled: boolean | null
+  backgroundPermission: boolean | null
+  notificationPermission: boolean | null
+  batteryOptimizationExempt: boolean | null
+  autostartAcknowledged: boolean | null
   network: 'online' | 'offline' | 'unknown' | null
   pendingCount: number | null
   lastCapturedAtMs: number | null
@@ -2856,8 +2867,23 @@ export interface GpsTrackerHealth {
   rejectionReasons: Record<string, number>
 }
 
+export interface GpsTrackerReadiness {
+  shiftId: string
+  atMs: number
+  capturedAtMs: number
+  accuracyM: number
+  appBuild: number
+  precise: boolean
+  locationEnabled: boolean
+  backgroundPermission: boolean | null
+  notificationPermission: boolean | null
+  batteryOptimizationExempt: boolean | null
+  autostartAcknowledged: boolean | null
+  queueAvailable: boolean | null
+}
+
 export interface GpsTrackerHealthRepo {
-  recordReadiness(input: { shiftId: string; atMs: number; capturedAtMs: number; accuracyM: number; appBuild: number }): Promise<void>
+  recordReadiness(input: GpsTrackerReadiness): Promise<void>
   recordHeartbeat(input: GpsTrackerHealth): Promise<void>
   findByShift(shiftId: string): Promise<GpsTrackerHealth | null>
   listByShiftIds(shiftIds: readonly string[]): Promise<GpsTrackerHealth[]>

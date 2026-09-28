@@ -88,6 +88,10 @@ export function GpsLive(): ReactNode {
     unknown: t.gpsLive.causeUnknown,
     permission: t.gpsLive.causePermission,
     location_disabled: t.gpsLive.causeLocationDisabled,
+    background_permission: t.gpsLive.causeBackgroundPermission,
+    notification_permission: t.gpsLive.causeNotificationPermission,
+    battery_optimization: t.gpsLive.causeBatteryOptimization,
+    autostart_unconfirmed: t.gpsLive.causeAutostartUnconfirmed,
     service_stopped: t.gpsLive.causeServiceStopped,
     offline: t.gpsLive.causeOffline,
     capture_stopped: t.gpsLive.causeCaptureStopped,
@@ -192,6 +196,14 @@ export function GpsLive(): ReactNode {
                       item.service === 'stopped' ? t.gpsTracking.disabled : t.gpsTracking.unknown}</span>
                     <span>{t.gpsTracking.network}: {item.network === 'online' ? t.gpsTracking.online :
                       item.network === 'offline' ? t.gpsTracking.offline : t.gpsTracking.unknown}</span>
+                    <span>{t.gpsTracking.backgroundPermission}: {item.backgroundPermission == null ? t.gpsTracking.unknown :
+                      item.backgroundPermission ? t.gpsTracking.enabled : t.gpsTracking.disabled}</span>
+                    <span>{t.gpsTracking.notificationPermission}: {item.notificationPermission == null ? t.gpsTracking.unknown :
+                      item.notificationPermission ? t.gpsTracking.enabled : t.gpsTracking.disabled}</span>
+                    <span>{t.gpsTracking.batteryOptimization}: {item.batteryOptimizationExempt == null ? t.gpsTracking.unknown :
+                      item.batteryOptimizationExempt ? t.gpsTracking.enabled : t.gpsTracking.disabled}</span>
+                    <span>{t.gpsTracking.autostartStatus}: {item.autostartAcknowledged == null ? t.gpsTracking.unknown :
+                      item.autostartAcknowledged ? t.gpsTracking.autostartDeclared : t.gpsTracking.autostartNotDeclared}</span>
                     <span>{t.gpsLive.pending.replace('{n}', String(item.pendingCount ?? 0))}</span>
                     {lost > 0 ? <span className="text-danger-ink">{t.gpsLive.dropped.replace('{n}', String(lost))}</span> : null}
                     {(item.droppedStorage ?? 0) > 0 ? <span className="text-danger-ink">{t.gpsLive.lostStorage.replace('{n}', String(item.droppedStorage))}</span> : null}

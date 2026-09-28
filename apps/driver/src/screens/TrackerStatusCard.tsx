@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { formatDateTimeSeconds, formatGpsFailureReason } from '@ash/client'
 import { useApp } from '../app-context.tsx'
-import { nativeTrackerStatus, setupNativeTrackingReliability, syncNativeTracking, type NativeTrackerStatus } from '../native-tracker.ts'
+import { nativeTrackerStatus, openNativeTrackingSettings, setupNativeTrackingReliability, syncNativeTracking, type NativeTrackerStatus } from '../native-tracker.ts'
 import { Button, Card } from '../ui.tsx'
 
 /** Phone-local health remains useful when the network is down. No coordinates enter diagnostics. */
@@ -57,6 +57,8 @@ export function TrackerStatusCard({ shiftId }: { shiftId: string }): ReactNode {
         <dt>{t.gpsTracking.network}</dt><dd>{status.network === 'unknown' ? t.gpsTracking.unknown : (status.network ?? (online ? 'online' : 'offline')) === 'online' ? t.gpsTracking.online : t.gpsTracking.offline}</dd>
         {status.backgroundPermission !== undefined ? <><dt>{t.gpsTracking.backgroundPermission}</dt><dd>{status.backgroundPermission ? t.gpsTracking.enabled : t.gpsTracking.disabled}</dd></> : null}
         {status.notificationPermission !== undefined ? <><dt>{t.gpsTracking.notificationPermission}</dt><dd>{status.notificationPermission ? t.gpsTracking.enabled : t.gpsTracking.disabled}</dd></> : null}
+        {status.batteryOptimizationExempt !== undefined ? <><dt>{t.gpsTracking.batteryOptimization}</dt><dd>{status.batteryOptimizationExempt ? t.gpsTracking.enabled : t.gpsTracking.disabled}</dd></> : null}
+        {status.autostartGuidanceRequired ? <><dt>{t.gpsTracking.autostartStatus}</dt><dd>{status.autostartAcknowledged ? t.gpsTracking.autostartDeclared : t.gpsTracking.autostartNotDeclared}</dd></> : null}
         <dt>{t.gpsTracking.lastCapture}</dt><dd className="num">{stamp(status.lastCapturedAtMs)}</dd>
         <dt>{t.gpsTracking.lastUpload}</dt><dd className="num">{stamp(status.lastUploadedAtMs)}</dd>
       </dl>
@@ -71,8 +73,13 @@ export function TrackerStatusCard({ shiftId }: { shiftId: string }): ReactNode {
       ) : null}
       {(status.storageFailedCount ?? 0) > 0 ? <p role="alert" className="mt-1 text-sm font-semibold text-danger-ink">{t.gpsTracking.storageFailed.replace('{n}', String(status.storageFailedCount))}</p> : null}
       {lastFailure && !sessionExpired ? <p className="mt-1 text-xs text-warning-ink">{t.gpsTracking.failure.replace('{reason}', formatGpsFailureReason(lastFailure, t.gpsTracking))}</p> : null}
-      {(status.backgroundPermission === false || status.notificationPermission === false) ? (
-        <Button className="mt-2" onClick={() => void setupNativeTrackingReliability().then(refresh).catch(refresh)}>{t.gpsTracking.setupReliability}</Button>
+      {(status.backgroundPermission === false || status.notificationPermission === false || status.batteryOptimizationExempt === false) ? (
+        <Button className="mt-2" onClick={() => void setupNativeTrackingReliability().then(async (readiness) => {
+          if (readiness?.backgroundPermission === false) await openNativeTrackingSettings('background')
+          else if (readiness?.notificationPermission === false) await openNativeTrackingSettings('notifications')
+          else if (readiness?.batteryOptimizationExempt === false) await openNativeTrackingSettings('battery')
+          refresh()
+        }).catch(refresh)}>{t.gpsTracking.setupReliability}</Button>
       ) : null}
       {alert ? (
         <Button className="mt-2" onClick={() => {

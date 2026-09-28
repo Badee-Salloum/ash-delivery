@@ -7,6 +7,19 @@ export interface NativePreflight {
   accuracyM?: number
   nativeVersionCode?: number
   platform?: 'android'
+  backgroundPermission?: boolean
+  notificationPermission?: boolean
+  batteryOptimizationExempt?: boolean
+  autostartGuidanceRequired?: boolean
+  autostartAcknowledged?: boolean
+}
+
+export interface NativeReliability {
+  precisePermission: boolean
+  locationEnabled: boolean
+  backgroundPermission: boolean
+  notificationPermission: boolean
+  batteryOptimizationExempt: boolean
 }
 
 export interface NativeTrackerStatus {
@@ -18,6 +31,9 @@ export interface NativeTrackerStatus {
   network?: 'online' | 'offline' | 'unknown'
   backgroundPermission?: boolean
   notificationPermission?: boolean
+  batteryOptimizationExempt?: boolean
+  autostartGuidanceRequired?: boolean
+  autostartAcknowledged?: boolean
   serviceRunning?: boolean
   activeShiftId?: string | null
   lastCapturedAtMs?: number | null
@@ -34,7 +50,9 @@ export interface NativeTrackerStatus {
 
 interface AshTrackerPlugin {
   preflight?(): Promise<NativePreflight>
-  setupReliability?(): Promise<{ backgroundPermission: boolean; notificationPermission: boolean }>
+  setupReliability?(): Promise<NativeReliability>
+  openTrackingSettings?(options: { target: 'app' | 'location' | 'background' | 'notifications' | 'battery' | 'autostart' }): Promise<{ opened: boolean }>
+  acknowledgeAutostart?(): Promise<{ acknowledged: boolean }>
   start(options: { shiftId: string; origin: string; provisional?: boolean }): Promise<{ started: boolean; reason?: string }>
   stop(): Promise<void>
   status(): Promise<NativeTrackerStatus>
@@ -78,9 +96,18 @@ export async function nativeTrackerStatus(): Promise<NativeTrackerStatus | null>
   }
 }
 
-export async function setupNativeTrackingReliability(): Promise<void> {
+export async function setupNativeTrackingReliability(): Promise<NativeReliability | null> {
   const tracker = plugin()
-  if (tracker?.setupReliability) await tracker.setupReliability()
+  if (!tracker?.setupReliability) return null
+  try { return await tracker.setupReliability() } catch { return null }
+}
+
+export async function openNativeTrackingSettings(target: 'app' | 'location' | 'background' | 'notifications' | 'battery' | 'autostart'): Promise<boolean> {
+  try { return (await plugin()?.openTrackingSettings?.({ target }))?.opened === true } catch { return false }
+}
+
+export async function acknowledgeNativeAutostart(): Promise<boolean> {
+  try { return (await plugin()?.acknowledgeAutostart?.())?.acknowledged === true } catch { return false }
 }
 
 export async function retryNativeUploads(): Promise<void> {

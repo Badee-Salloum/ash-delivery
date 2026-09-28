@@ -16,7 +16,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.provider.Settings;
-import android.widget.Toast;
 
 import androidx.core.content.ContextCompat;
 
@@ -76,9 +75,9 @@ import org.json.JSONObject;
                         alias = AshTrackerPlugin.NOTIFICATIONS,
                         strings = { Manifest.permission.POST_NOTIFICATIONS }
                 ),
-                // «Allow all the time». Not for ordinary tracking — the foreground service works on
-                // in-use location while the app has been opened — but so BootReceiver can restart
-                // the service after a reboot, which the platform only permits with this grant.
+                // «Allow all the time» lets BootReceiver restart capture after a reboot. It is a
+                // checked prerequisite before a new shift, even though foreground capture can
+                // continue with the screen off after the app has already started its service.
                 @Permission(
                         alias = AshTrackerPlugin.BACKGROUND,
                         strings = { Manifest.permission.ACCESS_BACKGROUND_LOCATION }
@@ -120,7 +119,12 @@ public class AshTrackerPlugin extends Plugin {
 
     private JSObject preflightResult(boolean ready, String reason, Location location) {
         JSObject out = new JSObject().put("ready", ready)
-                .put("platform", "android").put("nativeVersionCode", appBuild(getContext()));
+                .put("platform", "android").put("nativeVersionCode", appBuild(getContext()))
+                .put("backgroundPermission", hasBackgroundPermission())
+                .put("notificationPermission", hasNotificationPermission())
+                .put("batteryOptimizationExempt", batteryOptimizationExempt())
+                .put("autostartGuidanceRequired", autostartGuidanceRequired())
+                .put("autostartAcknowledged", autostartAcknowledged());
         if (reason != null) out.put("reason", reason);
         if (location != null) {
             out.put("capturedAtMs", location.getTime());
@@ -219,10 +223,26 @@ public class AshTrackerPlugin extends Plugin {
         probePlatformListener = null;
     }
 
-    /** Optional reliability setup. It never delays or gates capture at shift confirmation. */
+    /** Request the runtime grants that can be requested here before opening a shift.
+     * Android 11+ grants all-time location only in Settings; the web screen opens that page.
+     */
     @PluginMethod
     public void setupReliability(PluginCall call) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !hasBackgroundPermission() && !askedBackground()) {
+        if (!hasLocationPermission()) {
+            requestPermissionForAlias(LOCATION, call, "onReliabilityLocation");
+            return;
+        }
+        continueReliability(call);
+    }
+
+    @PermissionCallback
+    private void onReliabilityLocation(PluginCall call) {
+        if (!hasLocationPermission()) call.resolve(reliabilityResult());
+        else continueReliability(call);
+    }
+
+    private void continueReliability(PluginCall call) {
+        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && !hasBackgroundPermission() && !askedBackground()) {
             markAskedBackground();
             requestPermissionForAlias(BACKGROUND, call, "onReliabilityBackground");
             return;
@@ -238,14 +258,74 @@ public class AshTrackerPlugin extends Plugin {
             requestPermissionForAlias(NOTIFICATIONS, call, "onReliabilityNotification");
             return;
         }
-        call.resolve(new JSObject().put("backgroundPermission", hasBackgroundPermission())
-                .put("notificationPermission", hasNotificationPermission()));
+        call.resolve(reliabilityResult());
     }
 
     @PermissionCallback
     private void onReliabilityNotification(PluginCall call) {
-        call.resolve(new JSObject().put("backgroundPermission", hasBackgroundPermission())
-                .put("notificationPermission", hasNotificationPermission()));
+        call.resolve(reliabilityResult());
+    }
+
+    private JSObject reliabilityResult() {
+        return new JSObject().put("precisePermission", hasLocationPermission())
+                .put("locationEnabled", locationEnabled(getContext()))
+                .put("backgroundPermission", hasBackgroundPermission())
+                .put("notificationPermission", hasNotificationPermission())
+                .put("batteryOptimizationExempt", batteryOptimizationExempt());
+    }
+
+    /** Open the exact system screen for a missing prerequisite. The caller rechecks on return. */
+    @PluginMethod
+    public void openTrackingSettings(PluginCall call) {
+        String target = call.getString("target");
+        Intent intent;
+        if ("battery".equals(target) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+            intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+        } else if ("notifications".equals(target) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+            intent.putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName());
+        } else if ("location".equals(target)) {
+            intent = new Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS);
+        } else if ("autostart".equals(target)) {
+            List<Intent> candidates = autostartCandidates(deviceMaker());
+            candidates.add(appDetailsIntent());
+            for (Intent candidate : candidates) {
+                if (openSettingsIntent(candidate)) {
+                    getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE)
+                            .edit().putBoolean("autostartSettingsVisited", true).apply();
+                    call.resolve(new JSObject().put("opened", true));
+                    return;
+                }
+            }
+            call.resolve(new JSObject().put("opened", false));
+            return;
+        } else intent = appDetailsIntent();
+        boolean opened = openSettingsIntent(intent);
+        if (!opened) opened = openSettingsIntent(appDetailsIntent());
+        call.resolve(new JSObject().put("opened", opened));
+    }
+
+    @PluginMethod
+    public void acknowledgeAutostart(PluginCall call) {
+        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
+        boolean visited = prefs.getBoolean("autostartSettingsVisited", false);
+        if (visited) prefs.edit().putBoolean("autostartAcknowledged", true).apply();
+        call.resolve(new JSObject().put("acknowledged", visited));
+    }
+
+    private Intent appDetailsIntent() {
+        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+        intent.setData(Uri.parse("package:" + getContext().getPackageName()));
+        return intent;
+    }
+
+    private boolean openSettingsIntent(Intent intent) {
+        try {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            return true;
+        } catch (Exception unavailable) { return false; }
     }
 
     /**
@@ -312,11 +392,6 @@ public class AshTrackerPlugin extends Plugin {
             JSObject result = new JSObject().put("started", running);
             if (!running) result.put("reason", "service_start_failed");
             call.resolve(result);
-            if (running) {
-                boolean batteryStepDone = batteryStepDone();
-                maybeRequestBatteryExemption();
-                if (batteryStepDone) maybeGuideAutostart();
-            }
         }, 750L);
     }
 
@@ -375,6 +450,9 @@ public class AshTrackerPlugin extends Plugin {
                     .put("permissionState", permissionLabel(getContext()))
                     .put("backgroundPermission", hasBackgroundPermission())
                     .put("notificationPermission", Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasNotificationPermission())
+                    .put("batteryOptimizationExempt", batteryOptimizationExempt())
+                    .put("autostartGuidanceRequired", autostartGuidanceRequired())
+                    .put("autostartAcknowledged", autostartAcknowledged())
                     .put("locationEnabled", locationEnabled(getContext()))
                     .put("network", GpsUploader.networkLabel(getContext()))
                     .put("serviceRunning", TrackerService.serviceRunning)
@@ -435,15 +513,52 @@ public class AshTrackerPlugin extends Plugin {
     }
 
     private boolean hasNotificationPermission() {
+        return notificationPermission(getContext());
+    }
+
+    static boolean notificationPermission(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true;
-        return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS)
+        return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
                 == PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean hasBackgroundPermission() {
+        return backgroundPermission(getContext());
+    }
+
+    static boolean backgroundPermission(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true;
-        return ContextCompat.checkSelfPermission(getContext(), Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        return ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean batteryOptimizationExempt() {
+        return batteryOptimizationExempt(getContext());
+    }
+
+    static boolean batteryOptimizationExempt(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(context.getPackageName());
+    }
+
+    private String deviceMaker() {
+        return Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase();
+    }
+
+    private boolean autostartGuidanceRequired() {
+        return !autostartCandidates(deviceMaker()).isEmpty();
+    }
+
+    private boolean autostartAcknowledged() {
+        return autostartAcknowledged(getContext());
+    }
+
+    static boolean autostartAcknowledged(Context context) {
+        String maker = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase();
+        if (autostartCandidates(maker).isEmpty()) return true;
+        return context.getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE)
+                .getBoolean("autostartAcknowledged", false);
     }
 
     private boolean askedBackground() {
@@ -456,88 +571,6 @@ public class AshTrackerPlugin extends Plugin {
                 .edit().putBoolean("askedBackground", true).apply();
     }
 
-    /**
-     * Ask ONCE for exemption from battery optimisation.
-     *
-     * This is the single biggest reason a foreground service is killed in the field: OEM power
-     * managers (MIUI, ColorOS, EMUI, One UI) stop even a foreground service unless the app is
-     * whitelisted. The system dialog is shown once per install and only when not already exempt; if
-     * the driver declines we do not nag him every shift. Fired after the service starts, so tracking
-     * is never delayed waiting on it.
-     */
-    private void maybeRequestBatteryExemption() {
-        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
-        String pkg = getContext().getPackageName();
-        if (pm != null && pm.isIgnoringBatteryOptimizations(pkg)) return;
-        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
-        if (prefs.getBoolean("askedBattery", false)) return;
-        prefs.edit().putBoolean("askedBattery", true).apply();
-        try {
-            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-            intent.setData(Uri.parse("package:" + pkg));
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(intent);
-        } catch (Exception ignored) {
-            // No activity to handle it (rare). The service still runs; it is just more killable.
-        }
-    }
-
-    /** True once the battery-optimisation step has happened (asked, or already exempt). */
-    private boolean batteryStepDone() {
-        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
-        if (prefs.getBoolean("askedBattery", false)) return true;
-        PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
-        return pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
-    }
-
-    /**
-     * Send the driver, ONCE, to his OEM's «autostart» screen so he can allow-list the app.
-     *
-     * The last background-reliability gap that cannot be closed in code: MIUI, ColorOS, EMUI,
-     * FuntouchOS and One UI block BOOT_COMPLETED and force-stop apps that are not on their own
-     * autostart / «don't kill» list — a switch only the user can flip, buried in the OEM security
-     * centre. Stock Android has no such screen, so this fires only on those makers, best-effort: it
-     * tries the known component for the device and falls back to the app's own settings page, always
-     * showing a one-line Arabic reason first so the driver knows why he is there.
-     */
-    private void maybeGuideAutostart() {
-        String maker = Build.MANUFACTURER == null ? "" : Build.MANUFACTURER.toLowerCase();
-        List<Intent> candidates = autostartCandidates(maker);
-        if (candidates.isEmpty()) return; // stock Android or an unknown maker: nothing to open
-        SharedPreferences prefs = getContext().getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
-        if (prefs.getBoolean("askedAutostart", false)) return;
-        prefs.edit().putBoolean("askedAutostart", true).apply();
-
-        // Last resort: the app's own settings page, where every OEM buries these controls somewhere.
-        Intent details = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-        details.setData(Uri.parse("package:" + getContext().getPackageName()));
-        candidates.add(details);
-
-        for (Intent candidate : candidates) {
-            try {
-                if (getContext().getPackageManager().resolveActivity(candidate, 0) != null) {
-                    showAutostartHint();
-                    candidate.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    getContext().startActivity(candidate);
-                    return;
-                }
-            } catch (Exception unavailable) {
-                // Try the next candidate; a component that does not exist on this build just fails.
-            }
-        }
-    }
-
-    private void showAutostartHint() {
-        try {
-            if (getActivity() != null) {
-                getActivity().runOnUiThread(() ->
-                        Toast.makeText(getContext(), getContext().getString(R.string.tracking_autostart_hint), Toast.LENGTH_LONG).show());
-            }
-        } catch (Exception ignored) {
-            // A missing UI thread just means no toast; the settings screen still opens.
-        }
-    }
-
     private static Intent componentIntent(String pkg, String cls) {
         Intent intent = new Intent();
         intent.setComponent(new ComponentName(pkg, cls));
@@ -545,7 +578,7 @@ public class AshTrackerPlugin extends Plugin {
     }
 
     /** The known «autostart / don't-kill» screens per OEM. Empty for stock Android. */
-    private List<Intent> autostartCandidates(String maker) {
+    private static List<Intent> autostartCandidates(String maker) {
         List<Intent> list = new ArrayList<>();
         if (maker.contains("xiaomi") || maker.contains("redmi") || maker.contains("poco")) {
             list.add(componentIntent("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"));

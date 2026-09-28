@@ -56,7 +56,11 @@ import {
 } from '../close-draft-revision.ts'
 import { useApp } from '../app-context.tsx'
 import { useToast } from '../feedback.tsx'
-import { nativeTrackerAvailable, preflightNativeTracker, setupNativeTrackingReliability, syncNativeTracking } from '../native-tracker.ts'
+import {
+  acknowledgeNativeAutostart, nativeTrackerAvailable, nativeTrackerStatus,
+  openNativeTrackingSettings, preflightNativeTracker, setupNativeTrackingReliability,
+  syncNativeTracking, type NativeReliability,
+} from '../native-tracker.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { TrackerStatusCard } from './TrackerStatusCard.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
@@ -657,6 +661,16 @@ const withWalletAuthority = (
  * is exactly the presence evidence the close wants.
  */
 const TRACKED_SHIFT_STATES = new Set(['awaiting_open_approval', 'open', 'suspended', 'pending_review'])
+
+type TrackingSettingsTarget = 'app' | 'location' | 'background' | 'notifications' | 'battery'
+function missingTrackingPermission(readiness: NativeReliability): { reason: string; target: TrackingSettingsTarget } | null {
+  if (!readiness.precisePermission) return { reason: 'permission_denied', target: 'app' }
+  if (!readiness.locationEnabled) return { reason: 'location_disabled', target: 'location' }
+  if (!readiness.backgroundPermission) return { reason: 'background_permission_required', target: 'background' }
+  if (!readiness.notificationPermission) return { reason: 'notification_permission_required', target: 'notifications' }
+  if (!readiness.batteryOptimizationExempt) return { reason: 'battery_optimization_required', target: 'battery' }
+  return null
+}
 
 const PHASE_FOR: Record<string, Phase> = {
   draft: 'start',
@@ -1633,6 +1647,35 @@ function StartPackage({
   const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [gpsGateError, setGpsGateError] = useState<string | null>(null)
+  useEffect(() => {
+    if (!nativeTrackerAvailable() || !gpsGateError || gpsGateError === 'upgradeRequired') return
+    let active = true
+    const recheck = (): void => {
+      if (document.visibilityState === 'hidden') return
+      void nativeTrackerStatus().then((status) => {
+        if (!active || !status) return
+        if (typeof status.backgroundPermission !== 'boolean' ||
+            typeof status.notificationPermission !== 'boolean' ||
+            typeof status.batteryOptimizationExempt !== 'boolean') return
+        const missing = missingTrackingPermission({
+          precisePermission: status.permissionState === 'precise',
+          locationEnabled: status.locationEnabled === true,
+          backgroundPermission: status.backgroundPermission,
+          notificationPermission: status.notificationPermission,
+          batteryOptimizationExempt: status.batteryOptimizationExempt,
+        })
+        setGpsGateError(missing?.reason ?? (status.queueAvailable !== true ? 'queueUnavailable' :
+          status.autostartGuidanceRequired && !status.autostartAcknowledged ? 'autostartGuidance' : null))
+      })
+    }
+    document.addEventListener('visibilitychange', recheck)
+    window.addEventListener('focus', recheck)
+    return () => {
+      active = false
+      document.removeEventListener('visibilitychange', recheck)
+      window.removeEventListener('focus', recheck)
+    }
+  }, [gpsGateError])
   const [odo, setOdo] = useState(
     restore?.odometerKm === null || restore?.odometerKm === undefined ? '' : String(restore.odometerKm),
   )
@@ -1766,6 +1809,46 @@ function StartPackage({
       })
   }, [api, assignment, shiftId])
 
+  async function retryGpsGate(): Promise<void> {
+    if (!nativeTrackerAvailable()) {
+      setGpsGateError('upgradeRequired')
+      return
+    }
+    setBusy(true)
+    try {
+      const reliability = await setupNativeTrackingReliability()
+      if (!reliability || typeof reliability.batteryOptimizationExempt !== 'boolean' ||
+          typeof reliability.precisePermission !== 'boolean') {
+        setGpsGateError('upgradeRequired')
+        return
+      }
+      const missing = missingTrackingPermission(reliability)
+      if (missing) {
+        setGpsGateError(missing.reason)
+        void openNativeTrackingSettings(missing.target)
+        return
+      }
+      const preflight = await preflightNativeTracker()
+      if (!preflight || typeof preflight.autostartGuidanceRequired !== 'boolean' ||
+          typeof preflight.autostartAcknowledged !== 'boolean') {
+        setGpsGateError('upgradeRequired')
+        return
+      }
+      if (!preflight.ready) {
+        setGpsGateError(preflight.reason ?? 'provider_error')
+        return
+      }
+      if (preflight.autostartGuidanceRequired && !preflight.autostartAcknowledged) {
+        setGpsGateError('autostartGuidance')
+        return
+      }
+      const status = await nativeTrackerStatus()
+      setGpsGateError(status?.queueAvailable === true ? null : 'queueUnavailable')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function confirm(): Promise<void> {
     if (!shiftId) return
     if (odoCloud?.status === 'reading') return
@@ -1798,8 +1881,7 @@ function StartPackage({
         // Release the provisional queue before leaving the start screen. A resumed or retried
         // confirmation takes this path too, so a lost HTTP response cannot strand capture.
         const tracking = await syncNativeTracking(submitted.id)
-        if (tracking?.started) void setupNativeTrackingReliability().catch(() => undefined)
-        else toast.error(t.gpsTracking.service_start_failed)
+        if (!tracking?.started) toast.error(t.gpsTracking.service_start_failed)
       }
       showConfirmed(submitted)
     }
@@ -1808,6 +1890,20 @@ function StartPackage({
       if (alreadyConfirmed && (alreadyConfirmed.state === 'open' || alreadyConfirmed.state === 'awaiting_open_approval')) {
         await finishConfirmed(alreadyConfirmed)
         return
+      }
+      if (nativeTrackerAvailable()) {
+        const reliability = await setupNativeTrackingReliability()
+        if (!reliability || typeof reliability.precisePermission !== 'boolean' ||
+            typeof reliability.batteryOptimizationExempt !== 'boolean') {
+          setGpsGateError('upgradeRequired')
+          return
+        }
+        const missing = missingTrackingPermission(reliability)
+        if (missing) {
+          setGpsGateError(missing.reason)
+          void openNativeTrackingSettings(missing.target)
+          return
+        }
       }
       const preflight = await preflightNativeTracker()
       nativePreflightUnavailable = nativeTrackerAvailable() && preflight === null
@@ -1820,8 +1916,37 @@ function StartPackage({
           setGpsGateError(preflight.reason ?? 'provider_error')
           return
         }
+        if (typeof preflight.backgroundPermission !== 'boolean' ||
+            typeof preflight.notificationPermission !== 'boolean' ||
+            typeof preflight.batteryOptimizationExempt !== 'boolean' ||
+            typeof preflight.autostartGuidanceRequired !== 'boolean' ||
+            typeof preflight.autostartAcknowledged !== 'boolean') {
+          setGpsGateError('upgradeRequired')
+          return
+        }
+        const missing = missingTrackingPermission({
+          precisePermission: true,
+          locationEnabled: true,
+          backgroundPermission: preflight.backgroundPermission,
+          notificationPermission: preflight.notificationPermission,
+          batteryOptimizationExempt: preflight.batteryOptimizationExempt,
+        })
+        if (missing) {
+          setGpsGateError(missing.reason)
+          void openNativeTrackingSettings(missing.target)
+          return
+        }
+        if (preflight.autostartGuidanceRequired && !preflight.autostartAcknowledged) {
+          setGpsGateError('autostartGuidance')
+          return
+        }
         if (preflight.nativeVersionCode == null || preflight.capturedAtMs == null || preflight.accuracyM == null) {
           setGpsGateError('provider_error')
+          return
+        }
+        const queue = await nativeTrackerStatus()
+        if (queue?.queueAvailable !== true) {
+          setGpsGateError('queueUnavailable')
           return
         }
         await api.confirmGpsReadiness(shiftId, {
@@ -1830,6 +1955,11 @@ function StartPackage({
           accuracyM: preflight.accuracyM,
           precise: true,
           locationEnabled: true,
+          backgroundPermission: preflight.backgroundPermission,
+          notificationPermission: preflight.notificationPermission,
+          batteryOptimizationExempt: preflight.batteryOptimizationExempt,
+          autostartAcknowledged: preflight.autostartAcknowledged,
+          queueAvailable: true,
         })
       }
       if (nativeTrackerAvailable()) {
@@ -1839,6 +1969,24 @@ function StartPackage({
         const tracking = await syncNativeTracking(shiftId, { provisional: true })
         if (tracking?.started !== true) {
           setGpsGateError(tracking?.reason ?? 'service_start_failed')
+          await syncNativeTracking(null)
+          return
+        }
+        const running = await nativeTrackerStatus()
+        if (running?.queueAvailable !== true || running.serviceRunning !== true || running.activeShiftId !== shiftId) {
+          setGpsGateError(running?.queueAvailable === false ? 'queueUnavailable' : 'service_start_failed')
+          await syncNativeTracking(null)
+          return
+        }
+        const afterStartMissing = missingTrackingPermission({
+          precisePermission: running.permissionState === 'precise',
+          locationEnabled: running.locationEnabled === true,
+          backgroundPermission: running.backgroundPermission === true,
+          notificationPermission: running.notificationPermission === true,
+          batteryOptimizationExempt: running.batteryOptimizationExempt === true,
+        })
+        if (afterStartMissing || (running.autostartGuidanceRequired && !running.autostartAcknowledged)) {
+          setGpsGateError(afterStartMissing?.reason ?? 'autostartGuidance')
           await syncNativeTracking(null)
           return
         }
@@ -1882,6 +2030,11 @@ function StartPackage({
       // A driver can't read a console — a failed upload must show on the glass, not vanish.
       const code = (e as { error?: string }).error
       if (code === 'android_update_required' || (code === 'gps_preflight_required' && (!nativeTrackerAvailable() || nativePreflightUnavailable))) setGpsGateError('upgradeRequired')
+      else if (code === 'gps_background_permission_required') setGpsGateError('background_permission_required')
+      else if (code === 'gps_notification_permission_required') setGpsGateError('notification_permission_required')
+      else if (code === 'gps_battery_optimization_exemption_required') setGpsGateError('battery_optimization_required')
+      else if (code === 'gps_autostart_acknowledgement_required') setGpsGateError('autostartGuidance')
+      else if (code === 'gps_queue_unavailable') setGpsGateError('queueUnavailable')
       else if (code?.startsWith('gps_')) setGpsGateError('startBlocked')
       toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
     } finally {
@@ -1970,6 +2123,11 @@ function StartPackage({
     ...(shiftId === null ? [t.shift.shiftNotCreated] : []),
   ]
   const ready = missing.length === 0
+  const gpsSettingsTarget: TrackingSettingsTarget | null = gpsGateError === 'permission_denied' ? 'app'
+    : gpsGateError === 'location_disabled' ? 'location'
+    : gpsGateError === 'background_permission_required' ? 'background'
+    : gpsGateError === 'notification_permission_required' ? 'notifications'
+    : gpsGateError === 'battery_optimization_required' ? 'battery' : null
 
   return (
     <Screen
@@ -1988,7 +2146,32 @@ function StartPackage({
                 : t.gpsTracking.startBlocked}
             </p>
           ) : null}
-          <Button variant="success" disabled={!ready || busy} onClick={confirm}>
+          {gpsSettingsTarget ? (
+            <Button variant="ghost" onClick={() => void openNativeTrackingSettings(gpsSettingsTarget)}>
+              {t.gpsTracking.openTrackingSettings}
+            </Button>
+          ) : null}
+          {gpsGateError === 'autostartGuidance' ? (
+            <>
+              <Button variant="ghost" onClick={() => void openNativeTrackingSettings('autostart')}>
+                {t.gpsTracking.openTrackingSettings}
+              </Button>
+              <Button variant="ghost" onClick={() => void acknowledgeNativeAutostart().then((acknowledged) => {
+                if (acknowledged) setGpsGateError(null)
+              })}>
+                {t.gpsTracking.autostartAcknowledge}
+              </Button>
+            </>
+          ) : null}
+          {gpsGateError === 'upgradeRequired' ? (
+            <a className="text-sm font-semibold text-primary underline" href="https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v2.0.0/ash-driver-v2-signed.apk">
+              {t.gpsTracking.downloadAndroidApp}
+            </a>
+          ) : null}
+          {gpsGateError && gpsGateError !== 'upgradeRequired' && gpsGateError !== 'autostartGuidance' ? (
+            <Button variant="ghost" disabled={busy} onClick={retryGpsGate}>{t.gpsTracking.retry}</Button>
+          ) : null}
+          <Button variant="success" disabled={!ready || busy || gpsGateError !== null} onClick={confirm}>
             {busy ? t.common.loading : t.shift.confirmStart}
           </Button>
         </div>

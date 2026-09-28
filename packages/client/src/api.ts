@@ -550,6 +550,10 @@ export interface GpsDiagnostics {
   service: 'running' | 'stopped' | 'unknown'
   permission: 'precise' | 'approximate' | 'denied' | 'unknown'
   locationEnabled: boolean | null
+  backgroundPermission?: boolean | null
+  notificationPermission?: boolean | null
+  batteryOptimizationExempt?: boolean | null
+  autostartAcknowledged?: boolean | null
   network: 'online' | 'offline' | 'unknown'
   pendingCount: number
   lastCapturedAtMs?: number | null
@@ -562,8 +566,10 @@ export interface GpsDiagnostics {
   cause?: string
 }
 
-export type GpsHealthCause = 'unknown' | 'permission' | 'location_disabled' | 'service_stopped' |
-  'offline' | 'capture_stopped' | 'upload_stalled' | 'healthy'
+export type GpsHealthCause = 'unknown' | 'permission' | 'location_disabled' |
+  'background_permission' | 'notification_permission' | 'battery_optimization' |
+  'autostart_unconfirmed' | 'service_stopped' | 'offline' | 'capture_stopped' |
+  'upload_stalled' | 'healthy'
 
 export interface GpsLiveHealth extends Partial<GpsDiagnostics> {
   shiftId: string
@@ -2374,8 +2380,13 @@ export class ApiClient {
     appBuild: number
     capturedAtMs: number
     accuracyM: number
-    precise: true
-    locationEnabled: true
+    precise: boolean
+    locationEnabled: boolean
+    backgroundPermission: boolean
+    notificationPermission: boolean
+    batteryOptimizationExempt: boolean
+    autostartAcknowledged: boolean
+    queueAvailable: boolean
   }) {
     return this.post<{ ready: true; expiresAt: string }>(`/shifts/${shiftId}/gps/readiness`, body)
   }
