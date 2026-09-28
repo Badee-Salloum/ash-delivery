@@ -2164,7 +2164,7 @@ function StartPackage({
             </>
           ) : null}
           {gpsGateError === 'upgradeRequired' ? (
-            <a className="text-sm font-semibold text-primary underline" href="https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v2.0.0/ash-driver-v2-signed.apk">
+            <a className="text-sm font-semibold text-primary underline" href="https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v4.0.0/ash-driver-v4-signed.apk">
               {t.gpsTracking.downloadAndroidApp}
             </a>
           ) : null}
