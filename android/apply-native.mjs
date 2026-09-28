@@ -138,6 +138,27 @@ if (!gradle.includes('androidx.work:work-runtime')) {
 // A monotonically increasing Android build code lets the server identify the native capability.
 gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 3')
 gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "3.0"')
+if (process.env.ASH_ANDROID_DIAGNOSTIC === '1') {
+  // Side-by-side install to isolate package-name collisions on one test handset.
+  // Java namespace and the remote driver URL remain identical to the normal build.
+  gradle = gradle.replace(/applicationId "com\.ashdelivery\.driver(?:\.diagnostic)?"/,
+    'applicationId "com.ashdelivery.driver.diagnostic"')
+  const stringsPath = join(main, 'res', 'values', 'strings.xml')
+  let strings = readFileSync(stringsPath, 'utf8')
+  strings = strings.replace(/(<string name="app_name">)[^<]*(<\/string>)/,
+    '$1ASH Driver Diagnostic$2')
+  strings = strings.replace(/(<string name="title_activity_main">)[^<]*(<\/string>)/,
+    '$1ASH Driver Diagnostic$2')
+  strings = strings.replace(/(<string name="package_name">)[^<]*(<\/string>)/,
+    '$1com.ashdelivery.driver.diagnostic$2')
+  strings = strings.replace(/(<string name="custom_url_scheme">)[^<]*(<\/string>)/,
+    '$1com.ashdelivery.driver.diagnostic$2')
+  writeFileSync(stringsPath, strings)
+  const configPath = join(main, 'assets', 'capacitor.config.json')
+  const config = JSON.parse(readFileSync(configPath, 'utf8'))
+  config.appId = 'com.ashdelivery.driver.diagnostic'
+  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`)
+}
 writeFileSync(gradlePath, gradle)
 
 console.log('native sources applied: Java tracker, queue and worker, resources, manifest, gradle')
