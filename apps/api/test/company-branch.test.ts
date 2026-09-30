@@ -189,6 +189,7 @@ describe('the company week closes on its own terms', () => {
     eventType: 'company_correction',
     shiftId: null,
     occurrenceKey: `c1-week-${id}`,
+    externalReference: null,
     businessDate: '2026-07-21',
     postingDate: '2026-07-21',
     weekStartDate: weekStartFor('2026-07-21'),

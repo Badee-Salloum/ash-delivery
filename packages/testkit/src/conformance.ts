@@ -1244,6 +1244,7 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
             { fundCode: 'cost_center:owner_funding', side: 'C', amount: syp(2_500), currency: 'SYP_NEW' },
           ])
           expect(found!.sypMinorPerUsd).toBeNull()
+          expect(found!.externalReference).toBeNull()
 
           expect(await deps.ledger.findStandaloneEntry(BRANCH, 'manual', 'no-such-key')).toBeNull()
           expect(await deps.ledger.findStandaloneEntry(BRANCH, 'income', 'company-fund-receipt')).toBeNull()
@@ -1514,6 +1515,61 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           // …and nothing of it survived the rollback.
           expect(await deps.ledger.findStandaloneEntry(COMPANY_BRANCH, 'company_opening_transfer', 'c1-cutover')).toBeNull()
           expect(await deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(0n)
+        } finally {
+          await ctx.cleanup?.(deps)
+        }
+      })
+
+      it('round-trips one unique historical audit reference in the HQ ledger only', async () => {
+        const deps = await fresh()
+        try {
+          const reference = 'legacy-box-2024-0001'
+          const first = companyDeposit('SYP_NEW', syp(1_000), 'opening', 'history-reference-first')
+          const second = companyDeposit('SYP_NEW', syp(2_000), 'opening', 'history-reference-second')
+          const rolledBack = new Error('historical-reference probe rolled back')
+
+          await expect(
+            deps.financialUnitOfWork.run({ lockKey: `receivables:${COMPANY_BRANCH}`, actorId: USER }, async (tx) => {
+              const [written] = await tx.ledger.post(COMPANY_BRANCH, [first], {
+                ...HQ_META,
+                externalReference: reference,
+              })
+              expect(written).toMatchObject({ externalReference: reference })
+
+              const found = await tx.ledger.findByExternalReference(COMPANY_BRANCH, reference)
+              expect(found).toMatchObject({ id: written!.id, externalReference: reference })
+              expect(await tx.ledger.findByExternalReference(BRANCH, reference)).toBeNull()
+
+              // A different client UUID/occurrence key cannot reuse the human audit reference.
+              await expect(
+                tx.ledger.post(COMPANY_BRANCH, [second], { ...HQ_META, externalReference: reference }),
+              ).resolves.toEqual([])
+              expect(await tx.ledger.findByExternalReference(COMPANY_BRANCH, reference)).toMatchObject({
+                id: written!.id,
+              })
+              throw rolledBack
+            }),
+          ).rejects.toBe(rolledBack)
+
+          // The database's trigger and the in-memory parity check both reject a reference on an
+          // operating branch before it can become an alternate global identifier.
+          await expect(
+            deps.ledger.post(BRANCH, [
+              {
+                eventType: 'manual',
+                occurrenceKey: 'history-reference-branch',
+                lines: [
+                  { fund: { kind: 'company_box' }, side: 'D', amount: syp(1_000) },
+                  { fund: { kind: 'cost_center', costCenterId: 'history_reference' }, side: 'C', amount: syp(1_000) },
+                ],
+              },
+            ], {
+              ...META,
+              shiftId: null,
+              reason: 'must remain HQ-only',
+              externalReference: reference,
+            }),
+          ).rejects.toThrow(/company ledger|branch.*company|company.*branch/i)
         } finally {
           await ctx.cleanup?.(deps)
         }

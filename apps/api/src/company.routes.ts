@@ -52,6 +52,7 @@ import {
   exchangeRate,
   fundCode,
   fundRefFromCode,
+  hasVisibleText,
   isCalendarDate,
   minor,
   monthStartFor,
@@ -71,6 +72,23 @@ const idSchema = z.string().uuid()
 const reasonSchema = z.string().trim().min(1).max(500)
 const positiveMoney = moneySchema.refine((value) => value > 0n, 'amount must be positive')
 const nonNegativeMoney = moneySchema.refine((value) => value >= 0n, 'amount cannot be negative')
+const historicalOccurredOnSchema = dateSchema.refine((value) => value >= '2000-01-01', 'historical date must be on or after 2000-01-01')
+const externalReferenceSchema = z.string().trim().min(1).max(200)
+  .refine(hasVisibleText, 'external reference must include a visible character')
+/** SYP value per USD on the normal money wire, e.g. `"130.00"` becomes frozen minor rate 13000. */
+const historicalRateSchema = positiveMoney
+
+function entryExternalReference(entry: JournalEntryRecord): string | null {
+  return entry.externalReference
+}
+
+async function findEntryByExternalReference(
+  ledger: Pick<FinancialTransactionDeps, 'ledger'>['ledger'],
+  branchId: string,
+  externalReference: string,
+): Promise<JournalEntryRecord | null> {
+  return ledger.findByExternalReference(branchId, externalReference)
+}
 
 function companyCentre(kind: 'general' | 'vehicle' | 'asset', id: string | null): CompanyExpenseCentre {
   if (kind === 'general') {
@@ -110,6 +128,54 @@ function commandMatches(existing: CompanyCommandRecord, requested: CompanyComman
     existing.id !== requested.id || existing.kind !== requested.kind || existing.branchId !== requested.branchId ||
     existing.occurredOn !== requested.occurredOn || existing.businessDate !== requested.businessDate ||
     existing.createdBy !== requested.createdBy
+  ) return false
+  switch (existing.kind) {
+    case 'deposit':
+    case 'withdrawal': {
+      if (requested.kind !== existing.kind) return false
+      return existing.equityAccount === requested.equityAccount && existing.currency === requested.currency &&
+        existing.amount === requested.amount && existing.sypMinorPerUsd === requested.sypMinorPerUsd &&
+        existing.reason === requested.reason
+    }
+    case 'expense': {
+      if (requested.kind !== 'expense') return false
+      return existing.currency === requested.currency && existing.amount === requested.amount &&
+        existing.sypMinorPerUsd === requested.sypMinorPerUsd && existing.categoryId === requested.categoryId &&
+        existing.costCenterKind === requested.costCenterKind && existing.vehicleId === requested.vehicleId &&
+        existing.assetId === requested.assetId && existing.paidFrom === requested.paidFrom &&
+        existing.receiptMediaId === requested.receiptMediaId && existing.description === requested.description
+    }
+    case 'income': {
+      if (requested.kind !== 'income') return false
+      return existing.currency === requested.currency && existing.amount === requested.amount &&
+        existing.sypMinorPerUsd === requested.sypMinorPerUsd && existing.categoryId === requested.categoryId &&
+        existing.description === requested.description
+    }
+    case 'exchange': {
+      if (requested.kind !== 'exchange') return false
+      return existing.fromCurrency === requested.fromCurrency && existing.fromAmount === requested.fromAmount &&
+        existing.toCurrency === requested.toCurrency && existing.toAmount === requested.toAmount &&
+        existing.sypMinorPerUsd === requested.sypMinorPerUsd && existing.reason === requested.reason
+    }
+    case 'reversal': {
+      if (requested.kind !== 'reversal') return false
+      return existing.targetKind === requested.targetKind && existing.targetId === requested.targetId &&
+        existing.targetEntryId === requested.targetEntryId && existing.sypMinorPerUsd === requested.sypMinorPerUsd &&
+        existing.reason === requested.reason
+    }
+  }
+}
+
+/**
+ * A historical source reference is a business identity, not a retry key.  A user may resend the
+ * same source row with a fresh UUID after losing a response; accept it only when the economic fact
+ * is exactly the one already journalled.  Booking date, author and UUID intentionally do not take
+ * part in this comparison: they are properties of the first accepted receipt.
+ */
+function historicalCommandMatches(existing: CompanyCommandRecord, requested: CompanyCommandRecord): boolean {
+  if (
+    existing.kind !== requested.kind || existing.branchId !== requested.branchId ||
+    existing.occurredOn !== requested.occurredOn
   ) return false
   switch (existing.kind) {
     case 'deposit':
@@ -233,6 +299,68 @@ function postingFromEntry(entry: JournalEntryRecord) {
   }
 }
 
+function companyCommandEvent(command: CompanyCommandRecord): JournalEntryRecord['eventType'] {
+  switch (command.kind) {
+    case 'deposit': return 'company_deposit'
+    case 'withdrawal': return 'company_withdrawal'
+    case 'expense': return 'company_expense'
+    case 'income': return 'company_income'
+    case 'exchange': return 'company_fx_exchange'
+    case 'reversal': return 'company_correction'
+  }
+}
+
+/**
+ * Guard the one-off historical intake inside the same HQ lock used to create its journal entry.
+ * This makes the zero-opening check and chronological rule authoritative rather than a courtesy
+ * supplied only by the browser. A reversal is an append-only correction, so it is excluded from
+ * the import-date floor while still being protected from a concurrent second reversal.
+ */
+async function assertHistoricalCreateState(
+  tx: Pick<FinancialTransactionDeps, 'ledger' | 'companyLedger'>,
+  draft: CompanyCommandRecord,
+): Promise<void> {
+  if (draft.kind === 'reversal') {
+    const existing = await tx.companyLedger.findReversalOf(draft.targetEntryId)
+    if (existing && existing.id !== draft.id) {
+      throw new ServiceError(409, 'company_command_already_reversed', { reversalId: existing.id })
+    }
+    return
+  }
+
+  const commands = await tx.companyLedger.listCommands(draft.branchId)
+  let hasHistoricalMovement = false
+  let latestOccurrence: CalendarDate | null = null
+  for (const command of commands) {
+    const entry = await tx.ledger.findStandaloneEntry(
+      command.branchId,
+      companyCommandEvent(command),
+      command.id,
+    )
+    if (entry === null || entry.externalReference === null) continue
+    hasHistoricalMovement = true
+    if (command.kind !== 'reversal' && (latestOccurrence === null || command.occurredOn > latestOccurrence)) {
+      latestOccurrence = command.occurredOn
+    }
+  }
+
+  if (!hasHistoricalMovement) {
+    const [syp, usd] = await Promise.all([
+      tx.ledger.fundBalance(draft.branchId, 'company_cash:SYP_NEW'),
+      tx.ledger.fundBalance(draft.branchId, 'company_cash:USD'),
+    ])
+    if (syp !== 0n || usd !== 0n) {
+      throw new ServiceError(422, 'historical_opening_balance_nonzero', {
+        pockets: { SYP_NEW: serializeMoney(syp), USD: serializeMoney(usd) },
+      })
+    }
+  }
+
+  if (latestOccurrence !== null && draft.occurredOn < latestOccurrence) {
+    throw new ServiceError(422, 'historical_movement_out_of_order', { latestOccurrence })
+  }
+}
+
 async function assertCompanyPocketBalances(
   tx: Pick<FinancialTransactionDeps, 'ledger'>,
   branchId: string,
@@ -260,13 +388,21 @@ async function assertCompanyPocketBalances(
 export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
   const permission = { config: { permission: 'company_fund.manage' as const } }
 
+  /** Historical backfill remains owner-level even if a configurable grant is broadened later. */
+  function assertHistoricalRole(req: FastifyRequest): void {
+    const role = req.actor?.roleKey
+    if (role !== 'general_manager' && role !== 'system_admin') {
+      throw new ServiceError(403, 'forbidden', { permission: 'company_fund.manage', reason: 'historical_roles_only' })
+    }
+  }
+
   async function companyBranch() {
     const branch = await deps.directory.companyBranch()
     if (!branch) throw new ServiceError(500, 'company_branch_missing')
     return branch
   }
 
-  async function companyDay(currency: Currency): Promise<{
+  async function companyDay(currency: Currency, historicalRate?: bigint): Promise<{
     companyBranchId: string
     businessDate: CalendarDate
     fxDayId: number
@@ -276,7 +412,9 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
     const businessDate = todayFor(deps)
     await assertWeekOpen(deps, branch.id, businessDate)
     const fxDayId = await ensureFxDay(deps, businessDate)
-    const rate = currency === 'USD' ? resolveFxDay(await deps.fx.list(), businessDate).sypMinorPerUsd : null
+    const rate = currency === 'USD'
+      ? historicalRate ?? resolveFxDay(await deps.fx.list(), businessDate).sypMinorPerUsd
+      : null
     return { companyBranchId: branch.id, businessDate, fxDayId, rate }
   }
 
@@ -286,22 +424,69 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
     posting: ReturnType<typeof companyDeposit>,
     fxDayId: number,
     reason: string,
+    options: {
+      externalReference?: string
+      /** UUID retries remain exact, including their booking-day receipt. */
+      idempotencyMatches?: (existing: CompanyCommandRecord, requested: CompanyCommandRecord) => boolean
+      /** A source reference may replay the same economic fact under a fresh UUID. */
+      referenceMatches?: (existing: CompanyCommandRecord, requested: CompanyCommandRecord) => boolean
+      /** Creation-only validation; never re-run it when returning an immutable receipt. */
+      beforeCreate?: (tx: FinancialTransactionDeps) => Promise<void>
+      /** Historical intake records observed shortfalls rather than rejecting them. */
+      allowNegativePocketBalance?: boolean
+    } = {},
   ): Promise<{ command: CompanyCommandRecord; replayed: boolean }> {
-    const prior = await deps.companyLedger.findCommand(draft.id)
-    if (prior) {
-      if (!commandMatches(prior, draft)) throw new ServiceError(409, 'idempotency_key_conflict')
-      return { command: prior, replayed: true }
+    const idempotencyMatches = options.idempotencyMatches ?? commandMatches
+    const referenceMatches = options.referenceMatches ?? idempotencyMatches
+    const referenceReplay = async (
+      ledger: Pick<FinancialTransactionDeps, 'ledger'>['ledger'],
+      companyLedger: Pick<FinancialTransactionDeps, 'companyLedger'>['companyLedger'],
+    ): Promise<CompanyCommandRecord | null> => {
+      if (options.externalReference === undefined) return null
+      const entry = await findEntryByExternalReference(ledger, draft.branchId, options.externalReference)
+      if (!entry) return null
+      const command = await companyLedger.findCommandByEntry(entry.id)
+      if (!command || !referenceMatches(command, draft)) {
+        throw new ServiceError(409, 'external_reference_conflict', { externalReference: options.externalReference })
+      }
+      return command
     }
+
+    // UUID replay always wins over a human-reference replay. They identify different things: a
+    // client key already spent on another command must never be able to borrow a matching source
+    // reference and receive an unrelated historical receipt.
+    const idempotencyReplay = async (
+      ledger: Pick<FinancialTransactionDeps, 'ledger'>['ledger'],
+      companyLedger: Pick<FinancialTransactionDeps, 'companyLedger'>['companyLedger'],
+    ): Promise<CompanyCommandRecord | null> => {
+      const command = await companyLedger.findCommand(draft.id)
+      if (!command) return null
+      if (!idempotencyMatches(command, draft)) throw new ServiceError(409, 'idempotency_key_conflict')
+      if (options.externalReference !== undefined) {
+        const entry = await findEntryByExternalReference(ledger, draft.branchId, options.externalReference)
+        if (!entry || entry.id !== command.journalEntryId) {
+          throw new ServiceError(409, 'idempotency_key_conflict')
+        }
+      }
+      return command
+    }
+
+    const prior = await idempotencyReplay(deps.ledger, deps.companyLedger)
+    if (prior) return { command: prior, replayed: true }
+    const priorReference = await referenceReplay(deps.ledger, deps.companyLedger)
+    if (priorReference) return { command: priorReference, replayed: true }
     return deps.financialUnitOfWork.run(
       { lockKey: `receivables:${draft.branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
       async (tx) => {
-        const concurrent = await tx.companyLedger.findCommand(draft.id)
-        if (concurrent) {
-          if (!commandMatches(concurrent, draft)) throw new ServiceError(409, 'idempotency_key_conflict')
-          return { command: concurrent, replayed: true }
+        const concurrent = await idempotencyReplay(tx.ledger, tx.companyLedger)
+        if (concurrent) return { command: concurrent, replayed: true }
+        const concurrentReference = await referenceReplay(tx.ledger, tx.companyLedger)
+        if (concurrentReference) return { command: concurrentReference, replayed: true }
+        await options.beforeCreate?.(tx)
+        if (!options.allowNegativePocketBalance) {
+          await assertCompanyPocketBalances(tx, draft.branchId, posting)
         }
-        await assertCompanyPocketBalances(tx, draft.branchId, posting)
-        const [entry] = await tx.ledger.post(draft.branchId, [posting], {
+        const meta: Parameters<typeof tx.ledger.post>[2] & { externalReference?: string | null } = {
           shiftId: null,
           businessDate: draft.businessDate,
           postingDate: draft.businessDate,
@@ -310,8 +495,25 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
           sypMinorPerUsd: draft.sypMinorPerUsd,
           createdBy: draft.createdBy,
           reason,
+          ...(options.externalReference === undefined ? {} : { externalReference: options.externalReference }),
+        }
+        const [entry] = await tx.ledger.post(draft.branchId, [posting], {
+          ...meta,
         })
-        if (!entry) throw new ServiceError(409, 'idempotency_key_conflict')
+        if (!entry) {
+          // A UUID race is checked before a reference race for the same identity separation as
+          // the outer checks.  This also covers a writer that arrived through another endpoint.
+          const raced = await idempotencyReplay(tx.ledger, tx.companyLedger)
+          if (raced) return { command: raced, replayed: true }
+          // 0084's unique index is the final reference race guard (including a writer outside
+          // this route). Re-read it so a matching reference receives its original receipt.
+          const racedReference = await referenceReplay(tx.ledger, tx.companyLedger)
+          if (racedReference) return { command: racedReference, replayed: true }
+          if (options.externalReference !== undefined) {
+            throw new ServiceError(409, 'external_reference_conflict', { externalReference: options.externalReference })
+          }
+          throw new ServiceError(409, 'idempotency_key_conflict')
+        }
         const command = { ...draft, journalEntryId: entry.id }
         await tx.companyLedger.createCommand(command)
         return { command, replayed: false }
@@ -431,6 +633,7 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
       movements: movements.map((movement) => ({
         entry: {
           ...movement.entry,
+          externalReference: entryExternalReference(movement.entry),
           sypMinorPerUsd: wireRate(movement.entry.sypMinorPerUsd),
           lines: movement.entry.lines.map((line) => ({ ...line, amount: serializeMoney(line.amount) })),
         },
@@ -440,6 +643,369 @@ export function registerCompanyRoutes(app: FastifyInstance, deps: Deps): void {
         ])),
       })),
     }
+  })
+
+  const historicalMovementTypeSchema = z.enum(['deposit', 'withdrawal', 'expense', 'income', 'exchange', 'reversal'])
+  const historicalMovementsQuerySchema = z.object({
+    from: historicalOccurredOnSchema.optional(),
+    to: historicalOccurredOnSchema.optional(),
+    type: historicalMovementTypeSchema.optional(),
+    externalReference: z.string().trim().min(1).max(200).optional(),
+  })
+
+  /**
+   * A historical movement is identified by its non-null source reference on the journal entry.
+   * Commands hold the actual-occurrence date and kind, so filter there rather than by the booking
+   * date (which is deliberately today for every historical import).
+   */
+  app.get('/company/historical-movements', permission, async (req) => {
+    assertHistoricalRole(req)
+    const q = historicalMovementsQuerySchema.parse(req.query)
+    const branch = await companyBranch()
+    const today = todayFor(deps)
+    const from = q.from ?? '2000-01-01'
+    const to = q.to ?? today
+    if (from > to || from > today || to > today) throw new ServiceError(422, 'invalid_date_range')
+    const [movements, commands] = await Promise.all([
+      deps.companyLedgerSource.listMovements(branch.id, { from: '2000-01-01', to: today }),
+      deps.companyLedger.listCommands(branch.id),
+    ])
+    const byEntry = new Map(commands.map((command) => [command.journalEntryId, command]))
+    const referenceNeedle = q.externalReference?.toLocaleLowerCase()
+    const historical: Array<{ occurredOn: CalendarDate; entryId: number; value: Record<string, unknown> }> = []
+    for (const movement of movements) {
+      const command = byEntry.get(movement.entry.id)
+      const externalReference = entryExternalReference(movement.entry)
+      if (!command || externalReference === null) continue
+      if (command.occurredOn < from || command.occurredOn > to) continue
+      if (q.type !== undefined && command.kind !== q.type) continue
+      if (referenceNeedle !== undefined && !externalReference.toLocaleLowerCase().includes(referenceNeedle)) continue
+      historical.push({
+        occurredOn: command.occurredOn,
+        entryId: movement.entry.id,
+        value: {
+          entry: {
+            ...movement.entry,
+            externalReference,
+            sypMinorPerUsd: wireRate(movement.entry.sypMinorPerUsd),
+            lines: movement.entry.lines.map((line) => ({ ...line, amount: serializeMoney(line.amount) })),
+          },
+          command: presentCommand(command),
+          pocketAfter: Object.fromEntries(Object.entries(movement.pocketAfter).map(([currency, value]) => [
+            currency, serializeMoney(value!),
+          ])),
+        },
+      })
+    }
+    historical.sort((left, right) => left.occurredOn.localeCompare(right.occurredOn) || left.entryId - right.entryId)
+    return { from, to, movements: historical.map((row) => row.value) }
+  })
+
+  /** A non-mutating guard for the import UI; the POST deliberately does not guess what "first" means. */
+  app.get('/company/historical-movements/preflight', permission, async (req) => {
+    assertHistoricalRole(req)
+    const branch = await companyBranch()
+    const [syp, usd] = await Promise.all([
+      deps.ledger.fundBalance(branch.id, 'company_cash:SYP_NEW'),
+      deps.ledger.fundBalance(branch.id, 'company_cash:USD'),
+    ])
+    return {
+      pockets: { SYP_NEW: serializeMoney(syp), USD: serializeMoney(usd) },
+      canStart: syp === 0n && usd === 0n,
+    }
+  })
+
+  const historicalMovementSchema = z.object({
+    idempotencyKey: idSchema,
+    externalReference: externalReferenceSchema,
+    type: z.enum(['deposit', 'withdrawal', 'expense', 'income', 'exchange', 'reversal']),
+    occurredOn: historicalOccurredOnSchema,
+    description: reasonSchema.optional(),
+    reason: reasonSchema.optional(),
+    targetId: idSchema.optional(),
+    currency: currencySchema.optional(),
+    amount: positiveMoney.optional(),
+    /** Normal SYP money wire for one USD, transformed to frozen SYP-minor-per-USD internally. */
+    historicalRate: historicalRateSchema.optional(),
+    categoryId: idSchema.optional(),
+    account: z.enum(['owner_funding', 'opening']).optional(),
+    fromCurrency: currencySchema.optional(),
+    fromAmount: positiveMoney.optional(),
+    toCurrency: currencySchema.optional(),
+    toAmount: positiveMoney.optional(),
+  }).superRefine((body, context) => {
+    const required = (value: unknown, path: string[]) => {
+      if (value === undefined) context.addIssue({ code: 'custom', message: `${path[0]} is required for this type`, path })
+    }
+    const forbidden = (value: unknown, path: string[], message = `${path[0]} is not valid for this type`) => {
+      if (value !== undefined) context.addIssue({ code: 'custom', message, path })
+    }
+    if (body.type === 'reversal') {
+      required(body.targetId, ['targetId'])
+      required(body.reason, ['reason'])
+      forbidden(body.description, ['description'])
+      forbidden(body.currency, ['currency'])
+      forbidden(body.amount, ['amount'])
+      forbidden(body.historicalRate, ['historicalRate'])
+      forbidden(body.categoryId, ['categoryId'])
+      forbidden(body.account, ['account'])
+      forbidden(body.fromCurrency, ['fromCurrency'])
+      forbidden(body.fromAmount, ['fromAmount'])
+      forbidden(body.toCurrency, ['toCurrency'])
+      forbidden(body.toAmount, ['toAmount'])
+      return
+    }
+    required(body.description, ['description'])
+    forbidden(body.reason, ['reason'])
+    forbidden(body.targetId, ['targetId'])
+    if (body.type === 'exchange') {
+      required(body.fromCurrency, ['fromCurrency'])
+      required(body.fromAmount, ['fromAmount'])
+      required(body.toCurrency, ['toCurrency'])
+      required(body.toAmount, ['toAmount'])
+      if (body.fromCurrency !== undefined && body.fromCurrency === body.toCurrency) {
+        context.addIssue({ code: 'custom', message: 'exchange currencies must differ', path: ['toCurrency'] })
+      }
+      forbidden(body.currency, ['currency'])
+      forbidden(body.amount, ['amount'])
+      forbidden(body.historicalRate, ['historicalRate'], 'exchange rate is derived from its actual amounts')
+      forbidden(body.categoryId, ['categoryId'])
+      forbidden(body.account, ['account'])
+      return
+    }
+
+    required(body.currency, ['currency'])
+    required(body.amount, ['amount'])
+    forbidden(body.fromCurrency, ['fromCurrency'])
+    forbidden(body.fromAmount, ['fromAmount'])
+    forbidden(body.toCurrency, ['toCurrency'])
+    forbidden(body.toAmount, ['toAmount'])
+    if (body.currency === 'USD') required(body.historicalRate, ['historicalRate'])
+    if (body.currency === 'SYP_NEW') forbidden(body.historicalRate, ['historicalRate'])
+    if (body.type === 'expense' || body.type === 'income') required(body.categoryId, ['categoryId'])
+    else forbidden(body.categoryId, ['categoryId'])
+    if (body.type !== 'deposit') forbidden(body.account, ['account'])
+  })
+
+  /**
+   * One append-only intake for cash movements that happened before this system was in use.  It
+   * records the true occurrence date on the command while deliberately booking the journal today,
+   * avoiding a rewrite of a historical/closed business period.
+   */
+  app.post('/company/historical-movements', permission, async (req, reply) => {
+    assertHistoricalRole(req)
+    const body = historicalMovementSchema.parse(req.body)
+    const narrative = body.type === 'reversal' ? body.reason : body.description
+    if (narrative === undefined) throw new ServiceError(422, 'historical_description_required')
+
+    let draft: CompanyCommandRecord
+    let posting: ReturnType<typeof companyDeposit>
+    let fxDayId: number
+    let beforeCreate: ((tx: FinancialTransactionDeps) => Promise<void>) | undefined
+
+    if (body.type === 'reversal') {
+      if (body.targetId === undefined) throw new ServiceError(422, 'company_command_not_found')
+      const target = await deps.companyLedger.findCommand(body.targetId)
+      if (!target) throw new ServiceError(404, 'company_command_not_found')
+      const targetKind = reversalTargetKindOf(target)
+      if (targetKind === null) throw new ServiceError(422, 'company_command_not_reversible')
+      // `reversalTargetKindOf()` is the runtime authority; spell the exclusion out for TypeScript
+      // as well so the remaining command union exposes its currency where appropriate.
+      if (target.kind === 'reversal') throw new ServiceError(422, 'company_command_not_reversible')
+      const event = target.kind === 'deposit' ? 'company_deposit'
+        : target.kind === 'withdrawal' ? 'company_withdrawal'
+          : target.kind === 'expense' ? 'company_expense'
+            : target.kind === 'income' ? 'company_income'
+              : 'company_fx_exchange'
+      const entry = await deps.ledger.findStandaloneEntry(target.branchId, event, target.id)
+      if (!entry || entry.id !== target.journalEntryId) throw new ServiceError(500, 'company_command_integrity_error')
+      if (entryExternalReference(entry) === null) throw new ServiceError(422, 'historical_target_required')
+      const currency: Currency = target.kind === 'exchange' ? 'USD' : target.currency
+      const day = await companyDay(currency)
+      draft = {
+        id: body.idempotencyKey,
+        branchId: day.companyBranchId,
+        kind: 'reversal',
+        targetKind,
+        targetId: target.id,
+        targetEntryId: target.journalEntryId,
+        sypMinorPerUsd: entry.sypMinorPerUsd,
+        reason: narrative,
+        occurredOn: body.occurredOn,
+        businessDate: day.businessDate,
+        journalEntryId: 0,
+        createdBy: req.actor!.userId,
+        createdAtMs: deps.clock.nowMs(),
+      }
+      const alreadyReversed = await deps.companyLedger.findReversalOf(target.journalEntryId)
+      if (alreadyReversed && alreadyReversed.id !== body.idempotencyKey) {
+        const referenced = await deps.ledger.findByExternalReference(day.companyBranchId, body.externalReference)
+        if (
+          !referenced || referenced.id !== alreadyReversed.journalEntryId ||
+          !historicalCommandMatches(alreadyReversed, draft)
+        ) throw new ServiceError(409, 'company_command_already_reversed', { reversalId: alreadyReversed.id })
+      }
+      posting = companyReversal(postingFromEntry(entry), body.idempotencyKey)
+      fxDayId = day.fxDayId
+    } else if (body.type === 'exchange') {
+      // `superRefine` establishes these values; the guards keep this route safe if the schema is
+      // refactored without preserving its conditional requirements.
+      if (
+        body.fromCurrency === undefined || body.fromAmount === undefined ||
+        body.toCurrency === undefined || body.toAmount === undefined ||
+        body.fromCurrency === body.toCurrency
+      ) throw new ServiceError(422, 'invalid_historical_exchange')
+      const day = await companyDay('USD')
+      const from = { currency: body.fromCurrency, amount: body.fromAmount }
+      const to = { currency: body.toCurrency, amount: body.toAmount }
+      const rate = exchangeRate(from, to)
+      draft = {
+        id: body.idempotencyKey,
+        branchId: day.companyBranchId,
+        kind: 'exchange',
+        fromCurrency: body.fromCurrency,
+        fromAmount: body.fromAmount,
+        toCurrency: body.toCurrency,
+        toAmount: body.toAmount,
+        sypMinorPerUsd: rate,
+        reason: narrative,
+        occurredOn: body.occurredOn,
+        businessDate: day.businessDate,
+        journalEntryId: 0,
+        createdBy: req.actor!.userId,
+        createdAtMs: deps.clock.nowMs(),
+      }
+      posting = companyFxExchange(from, to, body.idempotencyKey)
+      fxDayId = day.fxDayId
+    } else {
+      if (body.currency === undefined || body.amount === undefined) throw new ServiceError(422, 'invalid_historical_movement')
+      const historicalRate = body.currency === 'USD' ? body.historicalRate : undefined
+      if (body.currency === 'USD' && (historicalRate === undefined || historicalRate <= 0n)) {
+        throw new ServiceError(422, 'historical_rate_required')
+      }
+      const day = await companyDay(body.currency, historicalRate)
+      fxDayId = day.fxDayId
+      switch (body.type) {
+        case 'deposit': {
+          const account = body.account ?? 'owner_funding'
+          draft = {
+            id: body.idempotencyKey,
+            branchId: day.companyBranchId,
+            kind: 'deposit',
+            equityAccount: account,
+            currency: body.currency,
+            amount: body.amount,
+            sypMinorPerUsd: day.rate,
+            occurredOn: body.occurredOn,
+            businessDate: day.businessDate,
+            reason: narrative,
+            journalEntryId: 0,
+            createdBy: req.actor!.userId,
+            createdAtMs: deps.clock.nowMs(),
+          }
+          posting = companyDeposit(body.currency, body.amount, account, body.idempotencyKey)
+          break
+        }
+        case 'withdrawal':
+          draft = {
+            id: body.idempotencyKey,
+            branchId: day.companyBranchId,
+            kind: 'withdrawal',
+            equityAccount: 'owner_drawings',
+            currency: body.currency,
+            amount: body.amount,
+            sypMinorPerUsd: day.rate,
+            occurredOn: body.occurredOn,
+            businessDate: day.businessDate,
+            reason: narrative,
+            journalEntryId: 0,
+            createdBy: req.actor!.userId,
+            createdAtMs: deps.clock.nowMs(),
+          }
+          posting = companyWithdrawal(body.currency, body.amount, body.idempotencyKey)
+          break
+        case 'expense': {
+          if (body.categoryId === undefined) throw new ServiceError(422, 'unknown_expense_category')
+          const categoryId = body.categoryId
+          beforeCreate = async (tx) => {
+            const category = (await tx.expenses.listCategories()).find((row) => row.id === categoryId && row.active)
+            if (!category) throw new ServiceError(422, 'unknown_expense_category')
+          }
+          draft = {
+            id: body.idempotencyKey,
+            branchId: day.companyBranchId,
+            kind: 'expense',
+            currency: body.currency,
+            amount: body.amount,
+            sypMinorPerUsd: day.rate,
+            categoryId,
+            costCenterKind: 'general',
+            vehicleId: null,
+            assetId: null,
+            paidFrom: 'pocket',
+            receiptMediaId: null,
+            description: narrative,
+            occurredOn: body.occurredOn,
+            businessDate: day.businessDate,
+            journalEntryId: 0,
+            createdBy: req.actor!.userId,
+            createdAtMs: deps.clock.nowMs(),
+          }
+          posting = companyExpense(body.currency, body.amount, 'general', 'pocket', body.idempotencyKey)
+          break
+        }
+        case 'income': {
+          if (body.categoryId === undefined) throw new ServiceError(422, 'unknown_income_category')
+          const categoryId = body.categoryId
+          beforeCreate = async (tx) => {
+            const category = (await tx.incomes.listCategories()).find((row) => row.id === categoryId && row.active)
+            if (!category) throw new ServiceError(422, 'unknown_income_category')
+          }
+          draft = {
+            id: body.idempotencyKey,
+            branchId: day.companyBranchId,
+            kind: 'income',
+            currency: body.currency,
+            amount: body.amount,
+            sypMinorPerUsd: day.rate,
+            categoryId,
+            description: narrative,
+            occurredOn: body.occurredOn,
+            businessDate: day.businessDate,
+            journalEntryId: 0,
+            createdBy: req.actor!.userId,
+            createdAtMs: deps.clock.nowMs(),
+          }
+          posting = companyIncome(body.currency, body.amount, body.idempotencyKey)
+          break
+        }
+      }
+    }
+
+    if (draft!.occurredOn > draft!.businessDate) throw new ServiceError(422, 'future_company_event')
+    const categoryBeforeCreate = beforeCreate
+    beforeCreate = async (tx) => {
+      await assertHistoricalCreateState(tx, draft!)
+      await categoryBeforeCreate?.(tx)
+    }
+    const outcome = await postCommand(req, draft!, posting!, fxDayId!, narrative, {
+      externalReference: body.externalReference,
+      referenceMatches: historicalCommandMatches,
+      beforeCreate,
+      // Historical movements occurred outside the system. Preserve a real negative closing
+      // pocket; the request schema still requires each movement amount to be positive.
+      allowNegativePocketBalance: true,
+    })
+    const [syp, usd] = await Promise.all([
+      deps.ledger.fundBalance(draft!.branchId, 'company_cash:SYP_NEW'),
+      deps.ledger.fundBalance(draft!.branchId, 'company_cash:USD'),
+    ])
+    return reply.code(outcome.replayed ? 200 : 201).send({
+      command: presentCommand(outcome.command),
+      externalReference: body.externalReference,
+      replayed: outcome.replayed,
+      pockets: { SYP_NEW: serializeMoney(syp), USD: serializeMoney(usd) },
+    })
   })
 
   const moveSchema = z.object({

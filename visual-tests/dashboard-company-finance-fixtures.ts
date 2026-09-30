@@ -244,6 +244,10 @@ export async function stubCompanyFund(page: Page): Promise<void> {
         },
       }],
     })
+    if (path === '/api/company/historical-movements/preflight') return fulfill(route, {
+      pockets: { SYP_NEW: '0.00', USD: '0.00' }, canStart: true,
+    })
+    if (path === '/api/company/historical-movements' && request.method() === 'GET') return fulfill(route, { movements: [] })
     if (path === '/api/company/debts') return fulfill(route, {
       debts: [{ id: 'visual-debt-1', direction: 'payable', partyName: 'Visual supplier', currency: 'USD', principal: '420.00', outstanding: '420.00', openedOn: '2026-09-01', dueOn: null }],
     })
@@ -254,7 +258,9 @@ export async function stubCompanyFund(page: Page): Promise<void> {
     if (path === '/api/company/recurring-expenses/due') return fulfill(route, { due: [] })
     if (path === '/api/company/recurring-expenses') return fulfill(route, { templates: [] })
     if (path === '/api/expense-categories') return fulfill(route, { categories: [] })
+    if (path === '/api/income-categories') return fulfill(route, { categories: [] })
     if (request.method() === 'POST' && path === '/api/company/exchanges') return fulfill(route, { ok: true })
+    if (request.method() === 'POST' && path === '/api/company/historical-movements') return fulfill(route, { ok: true })
     if (request.method() === 'POST' && /\/installment-plans\/.+\/(pay|skip)$/.test(path)) return fulfill(route, { ok: true })
     return fulfill(route, { error: 'visual_fixture_unavailable' }, 503)
   })

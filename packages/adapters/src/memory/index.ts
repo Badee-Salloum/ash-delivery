@@ -1288,8 +1288,13 @@ export class MemoryLedgerRepo implements LedgerRepo {
   readonly entries: JournalEntryRecord[] = []
   private nextId = 1
   private readonly nowMs: () => number
-  constructor(nowMs: () => number = () => Date.now()) {
+  private readonly isCompanyBranch: (branchId: string) => boolean
+  constructor(
+    nowMs: () => number = () => Date.now(),
+    isCompanyBranch: (branchId: string) => boolean = () => false,
+  ) {
     this.nowMs = nowMs
+    this.isCompanyBranch = isCompanyBranch
   }
   /**
    * Mirrors `journal_entries_idem_uq` as migration 0017 REDEFINED it:
@@ -1362,6 +1367,19 @@ export class MemoryLedgerRepo implements LedgerRepo {
     meta: Parameters<LedgerRepo['post']>[2],
   ): Promise<JournalEntryRecord[]> {
     const written: JournalEntryRecord[] = []
+    const externalReference = meta.externalReference ?? null
+    if (externalReference !== null) {
+      if (!hasVisibleText(externalReference)) {
+        throw Object.assign(new Error('external reference must contain visible text'), {
+          code: 'EXTERNAL_REFERENCE_BLANK',
+        })
+      }
+      if (!this.isCompanyBranch(branchId)) {
+        throw Object.assign(new Error('an external reference belongs only to the company ledger'), {
+          code: 'EXTERNAL_REFERENCE_REQUIRES_COMPANY_LEDGER',
+        })
+      }
+    }
     for (const posting of postings) {
       // Balance, exactly as the deferred constraint trigger does at COMMIT: per currency, two
       // currencies only for an exchange, and a USD line exactly when a rate is frozen (0066).
@@ -1369,6 +1387,12 @@ export class MemoryLedgerRepo implements LedgerRepo {
 
       const key = `${branchId}|${posting.eventType}|${meta.shiftId ?? ''}|${posting.occurrenceKey}`
       if (this.seen.has(key)) continue // idempotent replay: write nothing
+      // The partial unique index in PostgreSQL is an entry-level constraint, so a duplicate audit
+      // reference has the same no-write result as `INSERT ... ON CONFLICT DO NOTHING` there.
+      if (
+        externalReference !== null &&
+        this.entries.some((entry) => entry.branchId === branchId && entry.externalReference === externalReference)
+      ) continue
       this.assertFundCurrencies(branchId, posting)
       this.seen.add(key)
       for (const line of posting.lines) {
@@ -1381,6 +1405,7 @@ export class MemoryLedgerRepo implements LedgerRepo {
         eventType: posting.eventType,
         shiftId: meta.shiftId,
         occurrenceKey: posting.occurrenceKey,
+        externalReference,
         businessDate: meta.businessDate,
         postingDate: meta.postingDate,
         weekStartDate: meta.weekStartDate,
@@ -1466,6 +1491,11 @@ export class MemoryLedgerRepo implements LedgerRepo {
           e.occurrenceKey === occurrenceKey,
       ) ?? null
     )
+  }
+  async findByExternalReference(branchId: string, externalReference: string): Promise<JournalEntryRecord | null> {
+    return this.entries.find(
+      (entry) => entry.branchId === branchId && entry.externalReference === externalReference,
+    ) ?? null
   }
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
     let total = 0n
@@ -2776,7 +2806,11 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
 
 export function createMemoryDeps(nowMs: number): MemoryDeps {
   const clock = new FixedClock(nowMs)
-  const ledger = new MemoryLedgerRepo(() => clock.nowMs())
+  const directory = new MemoryDirectoryRepo()
+  const ledger = new MemoryLedgerRepo(
+    () => clock.nowMs(),
+    (branchId) => directory.branches.get(branchId)?.kind === 'company',
+  )
   const media = new MemoryMediaRepo()
   const shifts = new MemoryShiftRepo(media)
   const breaks = new MemoryShiftBreakRepo()
@@ -2788,7 +2822,6 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
   const tiers = new MemoryTierRepo()
   const fx = new MemoryFxRepo()
   const weekLocks = new MemoryWeekLockRepo(ledger)
-  const directory = new MemoryDirectoryRepo()
   const users = new MemoryUserRepo()
   const sessions = new MemorySessionRepo()
   const audit = new MemoryAuditRepo()

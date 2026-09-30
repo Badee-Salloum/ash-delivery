@@ -392,6 +392,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         eventType: 'manual',
         shiftId: null,
         occurrenceKey,
+        externalReference: null,
         businessDate: '2026-07-22',
         postingDate: '2026-07-22',
         weekStartDate: weekStartFor('2026-07-22'),
@@ -409,7 +410,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     // Revenue to measure the cost against.
     h.deps.ledger.entries.push({
       id: 21_000, branchId: BRANCH, eventType: 'manual', shiftId: null,
-      occurrenceKey: 'cost-centre-revenue', businessDate: '2026-07-22', postingDate: '2026-07-22',
+      occurrenceKey: 'cost-centre-revenue', externalReference: null, businessDate: '2026-07-22', postingDate: '2026-07-22',
       weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'cost centre fixture', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
@@ -495,7 +496,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     // short — by 5,692.37 on production when this was measured.
     h.deps.ledger.entries.push({
       id: 22_000, branchId: BRANCH, eventType: 'income', shiftId: null,
-      occurrenceKey: 'other-income-fixture', businessDate: '2026-07-22', postingDate: '2026-07-22',
+      occurrenceKey: 'other-income-fixture', externalReference: null, businessDate: '2026-07-22', postingDate: '2026-07-22',
       weekStartDate: weekStartFor('2026-07-22'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'office share of an outside job', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
@@ -579,6 +580,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
         eventType: 'manual',
         shiftId: null,
         occurrenceKey,
+        externalReference: null,
         businessDate,
         postingDate: businessDate,
         weekStartDate: weekStartFor(businessDate),
@@ -641,6 +643,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       eventType: 'share_split',
       shiftId: legacyShiftId,
       occurrenceKey: 'legacy-profit-batch',
+      externalReference: null,
       businessDate: today,
       postingDate: today,
       weekStartDate: weekStartFor(today),
@@ -674,6 +677,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
       postingDate: today,
       weekStartDate: weekStartFor(today),
       fxDayId: 1, sypMinorPerUsd: null,
+      externalReference: null,
       weekLockId: null,
       createdBy: 'u-bm', createdAtMs: NOW_MS,
       reason: 'legacy profit fixture',
@@ -1138,6 +1142,7 @@ describe('the go-live date clamps the reports, never the positions', () => {
       eventType: 'manual',
       shiftId: null,
       occurrenceKey: 'pre-go-live-share',
+      externalReference: null,
       businessDate: '2026-07-20',
       postingDate: '2026-07-20',
       weekStartDate: weekStartFor('2026-07-20'),
@@ -1375,7 +1380,7 @@ describe('GET /dashboard/meta — the dates every time filter is built from (P2)
   it('starts «الكل منذ البدء» at the first ledger activity, and at go-live once it is declared', async () => {
     h.deps.ledger.entries.push({
       id: 30_001, branchId: BRANCH, eventType: 'manual', shiftId: null,
-      occurrenceKey: 'meta-first-activity', businessDate: '2026-07-02', postingDate: '2026-07-02',
+      occurrenceKey: 'meta-first-activity', externalReference: null, businessDate: '2026-07-02', postingDate: '2026-07-02',
       weekStartDate: weekStartFor('2026-07-02'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'meta fixture', createdBy: 'u-bm', createdAtMs: NOW_MS,
       lines: [
@@ -1386,7 +1391,7 @@ describe('GET /dashboard/meta — the dates every time filter is built from (P2)
     // Another branch's older activity is not this branch's epoch.
     h.deps.ledger.entries.push({
       id: 30_002, branchId: OTHER_BRANCH, eventType: 'manual', shiftId: null,
-      occurrenceKey: 'meta-other-branch', businessDate: '2026-06-01', postingDate: '2026-06-01',
+      occurrenceKey: 'meta-other-branch', externalReference: null, businessDate: '2026-06-01', postingDate: '2026-06-01',
       weekStartDate: weekStartFor('2026-06-01'), fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
       reason: 'meta fixture', createdBy: 'u-bm2', createdAtMs: NOW_MS,
       lines: [
@@ -1459,7 +1464,7 @@ describe('the range read behind /dashboard/profit and /dashboard/treasury (P2)',
 
   it('reports a legacy restoration and its reversal chain in the original column', async () => {
     const common = {
-      branchId: BRANCH, shiftId: null, postingDate: '2026-07-20', fxDayId: 1, sypMinorPerUsd: null, weekLockId: null,
+      branchId: BRANCH, shiftId: null, postingDate: '2026-07-20', fxDayId: 1, sypMinorPerUsd: null, externalReference: null, weekLockId: null,
       createdBy: 'u-bm', createdAtMs: NOW_MS, reason: 'legacy restoration fixture',
     }
     h.deps.ledger.entries.push(
@@ -1535,6 +1540,7 @@ describe('GET /dashboard/last-seven-days', () => {
       eventType: 'manual',
       shiftId: null,
       occurrenceKey: 'seven-day-expense',
+      externalReference: null,
       businessDate: '2026-07-20',
       postingDate: '2026-07-20',
       weekStartDate: weekStartFor('2026-07-20'),

@@ -32,7 +32,7 @@ describe('vehicle creation from company assets', () => {
   })
 
   it('clears branch-specific vehicle state and reloads the picker when the branch changes', () => {
-    expect(screen).toContain('}, [api, branchId, month, today])')
+    expect(screen).toContain('}, [api, branchId, canEnterHistorical, month, today])')
     expect(screen).toContain("setVehicleId('')")
     expect(screen).toContain('setCreatedVehicles([])')
     expect(screen).toContain('}, [branchId])')

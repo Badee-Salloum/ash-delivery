@@ -21,6 +21,12 @@ export interface MoneyMovePayload {
   branchId: string | null
   amount: string
   reason: string
+  /**
+   * Conditional fields that also identify the economic fact. Historical company movements use
+   * this for occurrence date, source reference, currencies, frozen rate, category and both FX
+   * sides; ordinary treasury callers leave it absent.
+   */
+  details?: unknown
 }
 
 /** Reuse one key only while the complete money-move payload remains unchanged. */
@@ -29,7 +35,7 @@ export const pendingMoneyMove = (
   payload: MoneyMovePayload,
   generateKey: () => string = () => crypto.randomUUID(),
 ): PendingMoneyMove => {
-  const fingerprint = JSON.stringify([payload.command, payload.branchId, payload.amount, payload.reason])
+  const fingerprint = JSON.stringify([payload.command, payload.branchId, payload.amount, payload.reason, payload.details ?? null])
   return current?.fingerprint === fingerprint
     ? current
     : { fingerprint, idempotencyKey: generateKey() }
@@ -37,7 +43,8 @@ export const pendingMoneyMove = (
 
 /**
  * What to hold after an attempt: nothing once it succeeded (the next press is a new move), nothing
- * after `idempotency_key_conflict` (that key is spent on something else), and the same key after any
+ * after `idempotency_key_conflict` (that key is spent on something else), or an audit-reference
+ * conflict (the proposed fact was not posted), and the same key after any
  * other failure — a lost response may have posted, and because the key is bound to this exact
  * payload, re-sending it can only ever return that entry or post it once.
  */
@@ -45,4 +52,6 @@ export const pendingAfterAttempt = (
   operation: PendingMoneyMove,
   outcome: { ok: true } | { ok: false; error: string | undefined },
 ): PendingMoneyMove | null =>
-  outcome.ok || outcome.error === 'idempotency_key_conflict' ? null : operation
+  outcome.ok || outcome.error === 'idempotency_key_conflict' || outcome.error === 'external_reference_conflict'
+    ? null
+    : operation

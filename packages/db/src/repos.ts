@@ -222,6 +222,7 @@ export function journalEntryFromRow(r: Record<string, unknown>): JournalEntryRec
     eventType: r.event_type as JournalEntryRecord['eventType'],
     shiftId: (r.shift_id as string | null) ?? null,
     occurrenceKey: String(r.occurrence_key),
+    externalReference: (r.external_reference as string | null) ?? null,
     businessDate: isoDate(r.business_date),
     postingDate: isoDate(r.posting_date),
     weekStartDate: isoDate(r.week_start_date),
@@ -301,8 +302,8 @@ export class PgLedgerRepo implements LedgerRepo {
         const res = await client.query<{ id: string; created_at: Date }>(
           `INSERT INTO journal_entries
              (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
-              week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd)
-           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+              week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd, external_reference)
+           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            ON CONFLICT DO NOTHING
            RETURNING id, created_at`,
           [
@@ -317,6 +318,7 @@ export class PgLedgerRepo implements LedgerRepo {
             meta.reason ?? null,
             meta.createdBy,
             meta.sypMinorPerUsd === null ? null : meta.sypMinorPerUsd.toString(),
+            meta.externalReference ?? null,
           ],
         )
         // Already posted. Writing nothing and carrying on is the whole point — a retried
@@ -338,6 +340,7 @@ export class PgLedgerRepo implements LedgerRepo {
           eventType: posting.eventType,
           shiftId: meta.shiftId,
           occurrenceKey: posting.occurrenceKey,
+          externalReference: meta.externalReference ?? null,
           businessDate: meta.businessDate,
           postingDate: meta.postingDate,
           weekStartDate: meta.weekStartDate,
@@ -468,6 +471,16 @@ export class PgLedgerRepo implements LedgerRepo {
     const rows = await this.load(
       'je.branch_id = $1 AND je.event_type = $2::ledger_event AND je.shift_id IS NULL AND je.occurrence_key = $3',
       [branchId, eventType, occurrenceKey],
+    )
+    return rows[0] ?? null
+  }
+
+  async findByExternalReference(branchId: string, externalReference: string): Promise<JournalEntryRecord | null> {
+    // Migration 0084's partial unique index guarantees that this filtered lookup can have at most
+    // one row. Keep the branch predicate explicit: a reference is scoped to the one HQ ledger.
+    const rows = await this.load(
+      'je.branch_id = $1 AND je.external_reference = $2',
+      [branchId, externalReference],
     )
     return rows[0] ?? null
   }

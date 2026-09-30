@@ -1,13 +1,23 @@
-import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
-import { exchangeRate, formatMinor, money, minor, parseMinor, sypToUsdMinor, type Currency, usdToSypMinor } from '@ash/domain'
+import { type FormEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { exchangeRate, formatMinor, isCalendarDate, money, minor, parseMinor, sypToUsdMinor, type Currency, usdToSypMinor } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { useConfirm, useTextPrompt } from '../feedback.tsx'
+import { pendingAfterAttempt, pendingMoneyMove, type PendingMoneyMove } from '../money-move-idempotency.ts'
 import type { RouteParams } from '../route.ts'
 import { Button, Card, DateField, Field, Money, MoneyInput, Pending, Select, Stat, Table, TextInput } from '../ui.tsx'
 import { AssetInstallmentPanel, InstallmentPlanFields, installmentPlanPayload, newInstallmentPlanDraft, type InstallmentPlanDraft } from './AssetInstallments.tsx'
 
-type Tab = 'overview' | 'movements' | 'debts' | 'assets' | 'depreciation' | 'recurring'
+type Tab = 'overview' | 'movements' | 'historical' | 'debts' | 'assets' | 'depreciation' | 'recurring'
+type HistoricalMovementKind = 'deposit' | 'withdrawal' | 'expense' | 'income' | 'exchange'
+type HistoricalMovementFilterKind = HistoricalMovementKind | 'reversal'
+
+interface CategoryOption {
+  id: string
+  nameAr: string
+  code: string
+  active: boolean
+}
 
 interface Overview {
   pockets: Record<Currency, string>
@@ -17,10 +27,22 @@ interface Overview {
 }
 
 interface Movement {
-  entry: { id: number; businessDate: string; eventType: string; reason: string | null; sypMinorPerUsd: string | null }
+  entry: {
+    id: number
+    businessDate: string
+    eventType: string
+    reason: string | null
+    sypMinorPerUsd: string | null
+    /** Non-null only for an audited historical company-fund movement. */
+    externalReference?: string | null
+  }
+  /** The company-pocket balance after this entry, supplied by the historical register. */
+  pocketAfter?: Partial<Record<Currency, string>>
   command: null | {
     id: string
     kind: string
+    occurredOn?: string
+    businessDate?: string
     currency?: Currency
     amount?: string
     fromCurrency?: Currency
@@ -29,7 +51,17 @@ interface Movement {
     toAmount?: string
     sypMinorPerUsd?: string | null
     reason?: string
+    description?: string
+    categoryId?: string
+    targetId?: string
+    targetKind?: string
   }
+}
+
+interface HistoricalPreflight {
+  pockets: Record<Currency, string>
+  /** The server's zero-balance guard for the first historical entry. */
+  canStart: boolean
 }
 
 interface Debt {
@@ -139,6 +171,8 @@ interface VehicleTypeOption {
 interface CompanyData {
   overview: Overview
   movements: Movement[]
+  historicalMovements: Movement[]
+  historicalPreflight: HistoricalPreflight
   debts: Debt[]
   assets: Asset[]
   depreciation: DepreciationPlan
@@ -146,10 +180,11 @@ interface CompanyData {
   recurring: RecurringTemplate[]
   recurringDue: RecurringDue[]
   installmentDue: AssetInstallmentDueFeed
-  categories: Array<{ id: string; nameAr: string; code: string }>
+  categories: CategoryOption[]
+  incomeCategories: CategoryOption[]
 }
 
-const tabs: readonly Tab[] = ['overview', 'movements', 'debts', 'assets', 'depreciation', 'recurring']
+const tabs: readonly Tab[] = ['overview', 'movements', 'historical', 'debts', 'assets', 'depreciation', 'recurring']
 
 type ExchangeField = 'fromAmount' | 'toAmount' | 'rate'
 
@@ -252,7 +287,14 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
   const { api, session, t, branchId } = useApp()
   const today = session?.businessDate ?? ''
   const month = today === '' ? '' : `${today.slice(0, 7)}-01`
-  const [tab, setTab] = useState<Tab>(() => tabs.includes(initial.tab as Tab) ? initial.tab as Tab : 'overview')
+  // The route already protects this whole screen with `company_fund.manage`; keep the historical
+  // import tab explicit too, so a stale shell can never surface it to an unauthorised actor.
+  const canEnterHistorical = session?.roleKey === 'system_admin' || session?.roleKey === 'general_manager'
+  const visibleTabs = useMemo(
+    () => canEnterHistorical ? tabs : tabs.filter((item) => item !== 'historical'),
+    [canEnterHistorical],
+  )
+  const [tab, setTab] = useState<Tab>(() => visibleTabs.includes(initial.tab as Tab) ? initial.tab as Tab : 'overview')
   const [data, setData] = useState<CompanyData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -262,6 +304,17 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
     if (branchId === null) return
     setError(null)
     const range = `from=2000-01-01&to=${encodeURIComponent(today)}`
+    // The rest of Company Finance can still be granted independently. Do not let the restricted
+    // historical endpoints turn that whole screen into a 403 for a non-GM/non-system-admin.
+    const historicalLoad: Promise<[{ movements: Movement[] }, HistoricalPreflight]> = canEnterHistorical
+      ? Promise.all([
+        api.get<{ movements: Movement[] }>(`/company/historical-movements?${range}`),
+        api.get<HistoricalPreflight>('/company/historical-movements/preflight'),
+      ])
+      : Promise.resolve([
+        { movements: [] },
+        { pockets: { SYP_NEW: '0.00', USD: '0.00' }, canStart: false },
+      ])
     void Promise.all([
       api.get<Overview>(`/company/overview?${range}`),
       api.get<{ movements: Movement[] }>(`/company/movements?${range}`),
@@ -272,18 +325,26 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       api.get<{ templates: RecurringTemplate[] }>('/company/recurring-expenses?includeInactive=true'),
       api.get<{ due: RecurringDue[] }>('/company/recurring-expenses/due'),
       api.get<AssetInstallmentDueFeed>('/company/assets/installment-plans/due'),
-      api.get<{ categories: Array<{ id: string; nameAr: string; code: string }> }>('/expense-categories'),
-    ]).then(([overview, movements, debts, assets, depreciation, vehicles, recurring, recurringDue, installmentDue, categories]) => {
+      api.expenseCategories(),
+      api.incomeCategories(),
+      historicalLoad,
+    ]).then(([
+      overview, movements, debts, assets, depreciation, vehicles, recurring, recurringDue, installmentDue,
+      categories, incomeCategories, [historicalMovements, historicalPreflight],
+    ]) => {
       setData({
         overview, movements: movements.movements, debts: debts.debts, assets: assets.assets,
         depreciation, vehicles: vehicles.vehicles, recurring: recurring.templates,
         recurringDue: recurringDue.due, installmentDue, categories: categories.categories,
+        incomeCategories: incomeCategories.categories,
+        historicalMovements: historicalMovements.movements,
+        historicalPreflight,
       })
     }).catch((cause: { error?: string }) => {
       setData(null)
       setError(cause.error ?? 'error')
     })
-  }, [api, branchId, month, today])
+  }, [api, branchId, canEnterHistorical, month, today])
 
   useEffect(() => {
     // Company finance is global, but its vehicle picker is branch-scoped. Blank the prior branch
@@ -293,17 +354,28 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
     load()
   }, [load])
 
-  const mutate = async (operation: () => Promise<unknown>, success: string): Promise<boolean> => {
+  useEffect(() => {
+    if (!visibleTabs.includes(tab)) setTab('overview')
+  }, [tab, visibleTabs])
+
+  const mutate = async (
+    operation: () => Promise<unknown>,
+    success: string,
+    onAttempt?: (outcome: MutationOutcome) => void,
+  ): Promise<boolean> => {
     setBusy(true)
     setError(null)
     setNotice(null)
     try {
       await operation()
+      onAttempt?.({ ok: true })
       setNotice(success)
       load()
       return true
     } catch (cause) {
-      setError((cause as { error?: string }).error ?? 'error')
+      const code = (cause as { error?: string }).error
+      onAttempt?.({ ok: false, error: code })
+      setError(code ?? 'error')
       return false
     } finally {
       setBusy(false)
@@ -318,7 +390,7 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
     <div className="flex flex-col gap-4">
       <p className="text-body text-ink-muted">{t.companyFinance.subtitle}</p>
       <div className="flex flex-wrap gap-2" role="tablist" aria-label={t.companyFinance.title}>
-        {tabs.map((item) => (
+        {visibleTabs.map((item) => (
           <button
             key={item}
             type="button"
@@ -337,6 +409,18 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
       {notice ? <p role="status" className="text-body font-medium text-success-ink">{notice}</p> : null}
       {tab === 'overview' ? <OverviewTab data={data.overview} busy={busy} mutate={mutate} /> : null}
       {tab === 'movements' ? <MovementsTab rows={data.movements} /> : null}
+      {tab === 'historical' && canEnterHistorical ? (
+        <HistoricalMovementsTab
+          rows={data.historicalMovements}
+          preflight={data.historicalPreflight}
+          expenseCategories={data.categories}
+          incomeCategories={data.incomeCategories}
+          today={today}
+          branchId={branchId}
+          busy={busy}
+          mutate={mutate}
+        />
+      ) : null}
       {tab === 'debts' ? <DebtsTab rows={data.debts} today={today} busy={busy} mutate={mutate} /> : null}
       {tab === 'assets' ? <AssetsTab rows={data.assets} due={data.installmentDue} vehicles={data.vehicles} today={today} busy={busy} mutate={mutate} /> : null}
       {tab === 'depreciation' ? <DepreciationTab plan={data.depreciation} busy={busy} mutate={mutate} /> : null}
@@ -345,7 +429,12 @@ export function CompanyFund({ initial = {} }: { initial?: RouteParams }): ReactN
   )
 }
 
-export type Mutate = (operation: () => Promise<unknown>, success: string) => Promise<boolean>
+export type MutationOutcome = { ok: true } | { ok: false; error: string | undefined }
+export type Mutate = (
+  operation: () => Promise<unknown>,
+  success: string,
+  onAttempt?: (outcome: MutationOutcome) => void,
+) => Promise<boolean>
 
 function OverviewTab({ data, busy, mutate }: { data: Overview; busy: boolean; mutate: Mutate }): ReactNode {
   const { api, t } = useApp()
@@ -563,6 +652,529 @@ function MovementsTab({ rows }: { rows: Movement[] }): ReactNode {
         })}
       </Table>
     </Card>
+  )
+}
+
+export function isValidHistoricalDate(value: string, today: string): boolean {
+  return isCalendarDate(value) && value >= '2000-01-01' && value <= today
+}
+
+function historicalKindLabel(kind: string, labels: {
+  deposit: string
+  withdrawal: string
+  expense: string
+  income: string
+  exchange: string
+  reversal: string
+}): string {
+  switch (kind) {
+    case 'deposit': return labels.deposit
+    case 'withdrawal': return labels.withdrawal
+    case 'expense': return labels.expense
+    case 'income': return labels.income
+    case 'exchange': return labels.exchange
+    case 'reversal': return labels.reversal
+    default: return kind
+  }
+}
+
+function HistoricalCategoryCreator({
+  kind,
+  onCreated,
+}: {
+  kind: 'expense' | 'income'
+  onCreated: (category: CategoryOption) => void
+}): ReactNode {
+  const { api, session, t } = useApp()
+  const [open, setOpen] = useState(false)
+  const [code, setCode] = useState('')
+  const [nameAr, setNameAr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  if (session?.roleKey !== 'system_admin') return null
+
+  const create = async (): Promise<void> => {
+    if (code.trim() === '' || nameAr.trim() === '') return
+    setBusy(true)
+    setError(null)
+    try {
+      const category = kind === 'expense'
+        ? await api.createExpenseCategory({ code: code.trim(), nameAr: nameAr.trim() })
+        : await api.createIncomeCategory({ code: code.trim(), nameAr: nameAr.trim() })
+      onCreated(category)
+      setCode('')
+      setNameAr('')
+      setOpen(false)
+    } catch (cause) {
+      setError((cause as { error?: string }).error ?? 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-line-strong bg-surface-muted p-3">
+      <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setOpen((current) => !current); setError(null) }}>
+        {open ? t.common.cancel : t.expenses.addCategory}
+      </Button>
+      {open ? (
+        <div className="mt-3 grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(7rem,1fr)_minmax(12rem,2fr)_auto]">
+          <Field label={t.expenses.categoryCode}>
+            <TextInput value={code} disabled={busy} onChange={(event) => setCode(event.target.value)} aria-label={t.expenses.categoryCode} />
+          </Field>
+          <Field label={t.expenses.categoryName}>
+            <TextInput value={nameAr} disabled={busy} onChange={(event) => setNameAr(event.target.value)} aria-label={t.expenses.categoryName} />
+          </Field>
+          <Button type="button" disabled={busy || code.trim() === '' || nameAr.trim() === ''} onClick={() => void create()}>{t.expenses.addCategory}</Button>
+        </div>
+      ) : null}
+      {error ? <p role="alert" className="mt-2 text-label font-medium text-danger-ink">{explainError(error, t)}</p> : null}
+    </div>
+  )
+}
+
+function HistoricalMovementsTab({
+  rows,
+  preflight,
+  expenseCategories,
+  incomeCategories,
+  today,
+  branchId,
+  busy,
+  mutate,
+}: {
+  rows: Movement[]
+  preflight: HistoricalPreflight
+  expenseCategories: CategoryOption[]
+  incomeCategories: CategoryOption[]
+  today: string
+  branchId: string | null
+  busy: boolean
+  mutate: Mutate
+}): ReactNode {
+  const { api, t } = useApp()
+  const [kind, setKind] = useState<HistoricalMovementKind>('deposit')
+  const [occurredOn, setOccurredOn] = useState(today)
+  const [currency, setCurrency] = useState<Currency>('SYP_NEW')
+  const [amount, setAmount] = useState('')
+  const [historicalRate, setHistoricalRate] = useState('')
+  const [externalReference, setExternalReference] = useState('')
+  const [reason, setReason] = useState('')
+  const [expenseCategoryId, setExpenseCategoryId] = useState('')
+  const [incomeCategoryId, setIncomeCategoryId] = useState('')
+  const [fromCurrency, setFromCurrency] = useState<Currency>('USD')
+  const [toCurrency, setToCurrency] = useState<Currency>('SYP_NEW')
+  const [fromAmount, setFromAmount] = useState('')
+  const [toAmount, setToAmount] = useState('')
+  const [formError, setFormError] = useState<string | null>(null)
+  const [createdExpenseCategories, setCreatedExpenseCategories] = useState<CategoryOption[]>([])
+  const [createdIncomeCategories, setCreatedIncomeCategories] = useState<CategoryOption[]>([])
+  const [from, setFrom] = useState('2000-01-01')
+  const [to, setTo] = useState(today)
+  const [kindFilter, setKindFilter] = useState<HistoricalMovementFilterKind | 'all'>('all')
+  const [referenceFilter, setReferenceFilter] = useState('')
+  const [reversing, setReversing] = useState<Movement | null>(null)
+  const [reversalReference, setReversalReference] = useState('')
+  const [reversalReason, setReversalReason] = useState('')
+  const [reversalError, setReversalError] = useState<string | null>(null)
+  const [hasPostedHistorical, setHasPostedHistorical] = useState(false)
+  const pendingKey = useRef<PendingMoneyMove | null>(null)
+  const pendingReversalKey = useRef<PendingMoneyMove | null>(null)
+
+  const activeExpenseCategories = useMemo(() => {
+    const byId = new Map(expenseCategories.filter((category) => category.active).map((category) => [category.id, category]))
+    for (const category of createdExpenseCategories) byId.set(category.id, category)
+    return [...byId.values()]
+  }, [createdExpenseCategories, expenseCategories])
+  const activeIncomeCategories = useMemo(() => {
+    const byId = new Map(incomeCategories.filter((category) => category.active).map((category) => [category.id, category]))
+    for (const category of createdIncomeCategories) byId.set(category.id, category)
+    return [...byId.values()]
+  }, [createdIncomeCategories, incomeCategories])
+
+  useEffect(() => {
+    if (rows.length > 0) setHasPostedHistorical(true)
+  }, [rows.length])
+
+  useEffect(() => {
+    if (kind === 'expense' && !activeExpenseCategories.some((category) => category.id === expenseCategoryId)) {
+      setExpenseCategoryId(activeExpenseCategories[0]?.id ?? '')
+    }
+    if (kind === 'income' && !activeIncomeCategories.some((category) => category.id === incomeCategoryId)) {
+      setIncomeCategoryId(activeIncomeCategories[0]?.id ?? '')
+    }
+  }, [activeExpenseCategories, activeIncomeCategories, expenseCategoryId, incomeCategoryId, kind])
+
+  const exchangeRatePreview = deriveExchangeField({
+    fromCurrency, toCurrency, fromAmount, toAmount, rate: '',
+  }, 'rate')
+  // The input is intentionally append-only in real-world order. Reversals are corrective entries
+  // dated today, so they do not prevent the operator from finishing an older import afterwards.
+  const latestHistoricalOccurrence = useMemo(() => rows.reduce<string | null>((latest, row) => {
+    const occurred = row.command?.occurredOn
+    if (row.command?.kind === 'reversal' || occurred === undefined) return latest
+    return latest === null || occurred > latest ? occurred : latest
+  }, null), [rows])
+  const earliestAllowedOccurrence = latestHistoricalOccurrence ?? '2000-01-01'
+  const openingBlocked = rows.length === 0 && !hasPostedHistorical && !preflight.canStart
+  const disabled = busy || openingBlocked
+  const reversedTargetIds = useMemo(
+    () => new Set(rows.flatMap((row) => row.command?.kind === 'reversal' && row.command.targetId ? [row.command.targetId] : [])),
+    [rows],
+  )
+  const filteredRows = useMemo(() => {
+    const referenceNeedle = referenceFilter.trim().toLowerCase()
+    return rows.filter((row) => {
+      const occurred = row.command?.occurredOn ?? row.entry.businessDate
+      const rowKind = row.command?.kind ?? row.entry.eventType
+      const reference = row.entry.externalReference ?? ''
+      return (from === '' || occurred >= from) &&
+        (to === '' || occurred <= to) &&
+        (kindFilter === 'all' || rowKind === kindFilter) &&
+        (referenceNeedle === '' || reference.toLowerCase().includes(referenceNeedle))
+    })
+  }, [from, kindFilter, referenceFilter, rows, to])
+
+  const resetForm = (): void => {
+    setAmount('')
+    setHistoricalRate('')
+    setExternalReference('')
+    setReason('')
+    setFromAmount('')
+    setToAmount('')
+    setFormError(null)
+  }
+
+  const changeExchangeCurrency = (side: 'from' | 'to', next: Currency): void => {
+    const nextFrom = side === 'from' ? next : fromCurrency
+    const nextTo = side === 'to' ? next : toCurrency
+    if (nextFrom === nextTo) {
+      if (side === 'from') setToCurrency(next === 'USD' ? 'SYP_NEW' : 'USD')
+      else setFromCurrency(next === 'USD' ? 'SYP_NEW' : 'USD')
+    }
+    if (side === 'from') setFromCurrency(next)
+    else setToCurrency(next)
+  }
+
+  const submit = (event: FormEvent): void => {
+    event.preventDefault()
+    const normalizedAmount = positiveExchangeMoney(amount)
+    const normalizedRate = positiveExchangeMoney(historicalRate)
+    const normalizedFrom = positiveExchangeMoney(fromAmount)
+    const normalizedTo = positiveExchangeMoney(toAmount)
+    const selectedCategoryId = kind === 'expense' ? expenseCategoryId : incomeCategoryId
+    if (
+      !isValidHistoricalDate(occurredOn, today) || occurredOn < earliestAllowedOccurrence ||
+      externalReference.trim() === '' || reason.trim() === '' ||
+      (kind === 'exchange'
+        ? fromCurrency === toCurrency || normalizedFrom === null || normalizedTo === null || exchangeRatePreview === null
+        : normalizedAmount === null || (currency === 'USD' && normalizedRate === null) ||
+          ((kind === 'expense' || kind === 'income') && selectedCategoryId === ''))
+    ) {
+      setFormError(t.companyFinance.historicalInvalid)
+      return
+    }
+    const payload = kind === 'exchange'
+      ? {
+        type: kind,
+        occurredOn,
+        externalReference: externalReference.trim(),
+        description: reason.trim(),
+        fromCurrency,
+        fromAmount: formatMinor(normalizedFrom!),
+        toCurrency,
+        toAmount: formatMinor(normalizedTo!),
+      }
+      : {
+        type: kind,
+        occurredOn,
+        externalReference: externalReference.trim(),
+        description: reason.trim(),
+        currency,
+        amount: formatMinor(normalizedAmount!),
+        ...(currency === 'USD' ? { historicalRate: formatMinor(normalizedRate!) } : {}),
+        ...((kind === 'expense' || kind === 'income') ? {
+          categoryId: selectedCategoryId,
+        } : {}),
+      }
+    // Keep the UUID only for the exact economic fact. This includes every conditional historical
+    // field, so a lost response retries safely while an edited row always gets a fresh UUID.
+    const operation = pendingMoneyMove(pendingKey.current, {
+      command: `company_historical:${kind}`,
+      branchId,
+      amount: kind === 'exchange'
+        ? `${formatMinor(normalizedFrom!)}:${formatMinor(normalizedTo!)}`
+        : formatMinor(normalizedAmount!),
+      reason: reason.trim(),
+      details: payload,
+    })
+    pendingKey.current = operation
+    void mutate(
+      () => api.post('/company/historical-movements', { idempotencyKey: operation.idempotencyKey, ...payload }),
+      t.companyFinance.historicalSaved,
+      (outcome) => {
+        if (pendingKey.current === operation) pendingKey.current = pendingAfterAttempt(operation, outcome)
+      },
+    ).then((saved) => {
+      if (!saved) return
+      setHasPostedHistorical(true)
+      resetForm()
+    })
+  }
+
+  const reverse = (event: FormEvent): void => {
+    event.preventDefault()
+    const targetId = reversing?.command?.id
+    if (!targetId || reversalReference.trim() === '' || reversalReason.trim() === '') {
+      setReversalError(t.companyFinance.historicalReversalInvalid)
+      return
+    }
+    const payload = {
+      type: 'reversal' as const,
+      targetId,
+      occurredOn: today,
+      externalReference: reversalReference.trim(),
+      reason: reversalReason.trim(),
+    }
+    const operation = pendingMoneyMove(pendingReversalKey.current, {
+      command: 'company_historical:reversal',
+      branchId,
+      amount: targetId,
+      reason: reversalReason.trim(),
+      details: payload,
+    })
+    pendingReversalKey.current = operation
+    void mutate(
+      () => api.post('/company/historical-movements', { idempotencyKey: operation.idempotencyKey, ...payload }),
+      t.companyFinance.historicalReversed,
+      (outcome) => {
+        if (pendingReversalKey.current === operation) pendingReversalKey.current = pendingAfterAttempt(operation, outcome)
+      },
+    ).then((saved) => {
+      if (!saved) return
+      setReversing(null)
+      setReversalReference('')
+      setReversalReason('')
+      setReversalError(null)
+    })
+  }
+
+  const renderAmount = (row: Movement): ReactNode => {
+    const command = row.command
+    if (
+      command?.kind === 'exchange' && command.fromCurrency !== undefined && command.fromAmount !== undefined &&
+      command.toCurrency !== undefined && command.toAmount !== undefined
+    ) {
+      return (
+        <span className="inline-flex flex-wrap items-center justify-end gap-1">
+          <Money value={command.fromAmount} currency={command.fromCurrency} />
+          <span aria-hidden="true" className="text-ink-muted">→</span>
+          <Money value={command.toAmount} currency={command.toCurrency} />
+        </span>
+      )
+    }
+    const rowAmount = command?.amount
+    return rowAmount === undefined ? '—' : <Money value={rowAmount} currency={command?.currency ?? 'SYP_NEW'} />
+  }
+
+  const renderBalanceAfter = (row: Movement): ReactNode => {
+    const after = row.pocketAfter
+    if (!after) return '—'
+    const command = row.command
+    const currencies: Currency[] = command?.kind === 'exchange'
+      ? [command.fromCurrency, command.toCurrency].filter((item): item is Currency => item !== undefined)
+      : command?.currency === undefined ? ['SYP_NEW', 'USD'] : [command.currency]
+    const figures = [...new Set(currencies)].flatMap((currency) => {
+      const value = after[currency]
+      return value === undefined ? [] : [{ currency, value }]
+    })
+    if (figures.length === 0) return '—'
+    return (
+      <span className="inline-flex flex-wrap items-center justify-end gap-1.5">
+        {figures.map((figure) => <Money key={figure.currency} value={figure.value} currency={figure.currency} />)}
+      </span>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <Card title={t.companyFinance.historicalEntry} subtitle={t.companyFinance.historicalHint}>
+        {openingBlocked ? (
+          <p role="alert" className="mb-3 rounded-lg border border-warning-line bg-warning-surface p-3 text-body font-medium text-warning-ink">
+            {t.companyFinance.historicalOpeningBlocked}
+            <span className="mt-2 flex flex-wrap items-center gap-2 text-label">
+              <span>{t.companyFinance.historicalOpeningBalances}</span>
+              <Money value={preflight.pockets.SYP_NEW} currency="SYP_NEW" />
+              <Money value={preflight.pockets.USD} currency="USD" />
+            </span>
+          </p>
+        ) : null}
+        <form className="grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={submit} aria-disabled={openingBlocked}>
+          <Field label={t.companyFinance.kind}>
+            <Select value={kind} disabled={disabled} onChange={(event) => { setKind(event.target.value as HistoricalMovementKind); setFormError(null) }} aria-label={t.companyFinance.kind}>
+              <option value="deposit">{t.companyFinance.historicalKinds.deposit}</option>
+              <option value="withdrawal">{t.companyFinance.historicalKinds.withdrawal}</option>
+              <option value="expense">{t.companyFinance.historicalKinds.expense}</option>
+              <option value="income">{t.companyFinance.historicalKinds.income}</option>
+              <option value="exchange">{t.companyFinance.historicalKinds.exchange}</option>
+            </Select>
+          </Field>
+          <Field label={t.companyFinance.occurredOn}>
+            <TextInput required type="date" min={earliestAllowedOccurrence} max={today} dir="ltr" className="num" value={occurredOn} disabled={disabled} onChange={(event) => { setOccurredOn(event.target.value); setFormError(null) }} aria-label={t.companyFinance.occurredOn} />
+          </Field>
+          {kind === 'exchange' ? (
+            <>
+              <Field label={t.companyFinance.fromCurrency}>
+                <Select value={fromCurrency} disabled={disabled} onChange={(event) => { changeExchangeCurrency('from', event.target.value as Currency); setFormError(null) }} aria-label={t.companyFinance.fromCurrency}>
+                  <option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option>
+                </Select>
+              </Field>
+              <Field label={t.companyFinance.toCurrency}>
+                <Select value={toCurrency} disabled={disabled} onChange={(event) => { changeExchangeCurrency('to', event.target.value as Currency); setFormError(null) }} aria-label={t.companyFinance.toCurrency}>
+                  <option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option>
+                </Select>
+              </Field>
+              <Field label={t.companyFinance.fromAmount}>
+                <MoneyInput required value={fromAmount} disabled={disabled} onChange={(event) => { setFromAmount(event.target.value); setFormError(null) }} aria-label={t.companyFinance.fromAmount} />
+              </Field>
+              <Field label={t.companyFinance.toAmount}>
+                <MoneyInput required value={toAmount} disabled={disabled} onChange={(event) => { setToAmount(event.target.value); setFormError(null) }} aria-label={t.companyFinance.toAmount} />
+              </Field>
+              <Field label={t.companyFinance.rate} hint={t.companyFinance.historicalExchangeRateHint}>
+                <MoneyInput readOnly value={exchangeRatePreview ?? ''} aria-label={t.companyFinance.rate} />
+              </Field>
+            </>
+          ) : (
+            <>
+              <Field label={t.companyFinance.currency}>
+                <Select value={currency} disabled={disabled} onChange={(event) => { setCurrency(event.target.value as Currency); setFormError(null) }} aria-label={t.companyFinance.currency}>
+                  <option value="SYP_NEW">{t.currency.SYP_NEW}</option><option value="USD">{t.currency.USD}</option>
+                </Select>
+              </Field>
+              <Field label={t.companyFinance.amount}>
+                <MoneyInput required value={amount} disabled={disabled} onChange={(event) => { setAmount(event.target.value); setFormError(null) }} aria-label={t.companyFinance.amount} />
+              </Field>
+              {currency === 'USD' ? (
+                <Field label={t.companyFinance.historicalRate} hint={t.companyFinance.ratePerUsd}>
+                  <MoneyInput required value={historicalRate} disabled={disabled} onChange={(event) => { setHistoricalRate(event.target.value); setFormError(null) }} aria-label={t.companyFinance.historicalRate} />
+                </Field>
+              ) : null}
+              {kind === 'expense' ? (
+                <div className="sm:col-span-2 flex flex-col gap-3">
+                  <Field label={t.expenses.category}>
+                    <Select required value={expenseCategoryId} disabled={disabled || activeExpenseCategories.length === 0} onChange={(event) => { setExpenseCategoryId(event.target.value); setFormError(null) }} aria-label={t.expenses.category}>
+                      <option value="">—</option>
+                      {activeExpenseCategories.map((category) => <option key={category.id} value={category.id}>{category.nameAr} · {category.code}</option>)}
+                    </Select>
+                  </Field>
+                  <HistoricalCategoryCreator kind="expense" onCreated={(category) => { setCreatedExpenseCategories((current) => [...current.filter((row) => row.id !== category.id), category]); setExpenseCategoryId(category.id) }} />
+                </div>
+              ) : null}
+              {kind === 'income' ? (
+                <div className="sm:col-span-2 flex flex-col gap-3">
+                  <Field label={t.expenses.category}>
+                    <Select required value={incomeCategoryId} disabled={disabled || activeIncomeCategories.length === 0} onChange={(event) => { setIncomeCategoryId(event.target.value); setFormError(null) }} aria-label={t.expenses.category}>
+                      <option value="">—</option>
+                      {activeIncomeCategories.map((category) => <option key={category.id} value={category.id}>{category.nameAr} · {category.code}</option>)}
+                    </Select>
+                  </Field>
+                  <HistoricalCategoryCreator kind="income" onCreated={(category) => { setCreatedIncomeCategories((current) => [...current.filter((row) => row.id !== category.id), category]); setIncomeCategoryId(category.id) }} />
+                </div>
+              ) : null}
+            </>
+          )}
+          <Field label={t.companyFinance.auditReference} className="sm:col-span-2">
+            <TextInput required value={externalReference} disabled={disabled} onChange={(event) => { setExternalReference(event.target.value); setFormError(null) }} aria-label={t.companyFinance.auditReference} />
+          </Field>
+          <Field label={t.companyFinance.description} className="sm:col-span-2">
+            <TextInput required value={reason} disabled={disabled} onChange={(event) => { setReason(event.target.value); setFormError(null) }} aria-label={t.companyFinance.description} />
+          </Field>
+          {formError ? <p role="alert" className="sm:col-span-2 text-label font-medium text-danger-ink">{formError}</p> : null}
+          <Button type="submit" disabled={disabled} className="sm:col-span-2">{t.companyFinance.historicalSubmit}</Button>
+        </form>
+      </Card>
+
+      {reversing ? (
+        <Card title={t.companyFinance.historicalReverseTitle}>
+          <form className="grid grid-cols-1 gap-3 sm:grid-cols-2" onSubmit={reverse}>
+            <Field label={t.companyFinance.historicalReversalReference}>
+              <TextInput required value={reversalReference} disabled={busy} onChange={(event) => { setReversalReference(event.target.value); setReversalError(null) }} aria-label={t.companyFinance.historicalReversalReference} />
+            </Field>
+            <Field label={t.companyFinance.historicalReversalReason}>
+              <TextInput required value={reversalReason} disabled={busy} onChange={(event) => { setReversalReason(event.target.value); setReversalError(null) }} aria-label={t.companyFinance.historicalReversalReason} />
+            </Field>
+            {reversalError ? <p role="alert" className="sm:col-span-2 text-label font-medium text-danger-ink">{reversalError}</p> : null}
+            <div className="sm:col-span-2 flex flex-wrap gap-2">
+              <Button type="submit" variant="danger" disabled={busy}>{t.companyFinance.historicalReverse}</Button>
+              <Button type="button" variant="ghost" disabled={busy} onClick={() => { setReversing(null); setReversalError(null) }}>{t.common.cancel}</Button>
+            </div>
+          </form>
+        </Card>
+      ) : null}
+
+      <Card title={t.companyFinance.historicalList}>
+        <div className="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Field label={t.companyFinance.from}>
+            <TextInput type="date" min="2000-01-01" max={today} dir="ltr" className="num" value={from} onChange={(event) => setFrom(event.target.value)} aria-label={t.companyFinance.from} />
+          </Field>
+          <Field label={t.companyFinance.to}>
+            <TextInput type="date" min="2000-01-01" max={today} dir="ltr" className="num" value={to} onChange={(event) => setTo(event.target.value)} aria-label={t.companyFinance.to} />
+          </Field>
+          <Field label={t.companyFinance.kind}>
+            <Select value={kindFilter} onChange={(event) => setKindFilter(event.target.value as HistoricalMovementFilterKind | 'all')} aria-label={t.companyFinance.kind}>
+              <option value="all">{t.companyFinance.allHistoricalKinds}</option>
+              <option value="deposit">{t.companyFinance.historicalKinds.deposit}</option>
+              <option value="withdrawal">{t.companyFinance.historicalKinds.withdrawal}</option>
+              <option value="expense">{t.companyFinance.historicalKinds.expense}</option>
+              <option value="income">{t.companyFinance.historicalKinds.income}</option>
+              <option value="exchange">{t.companyFinance.historicalKinds.exchange}</option>
+              <option value="reversal">{t.companyFinance.historicalKinds.reversal}</option>
+            </Select>
+          </Field>
+          <Field label={t.companyFinance.auditReference}>
+            <TextInput value={referenceFilter} onChange={(event) => setReferenceFilter(event.target.value)} aria-label={t.companyFinance.auditReference} />
+          </Field>
+        </div>
+        <Table
+          head={[
+            t.companyFinance.occurredOn, t.companyFinance.postedOn, t.companyFinance.kind,
+            t.companyFinance.amount, t.companyFinance.rate, t.companyFinance.auditReference,
+            t.companyFinance.description, t.companyFinance.balanceAfter, t.companyFinance.action,
+          ]}
+          isEmpty={filteredRows.length === 0}
+          empty={t.companyFinance.emptyHistoricalMovements}
+        >
+          {filteredRows.map((row) => {
+            const command = row.command
+            const rowKind = command?.kind ?? row.entry.eventType
+            const isReversible = command !== null && (
+              command.kind === 'deposit' || command.kind === 'withdrawal' || command.kind === 'expense' ||
+              command.kind === 'income' || command.kind === 'exchange'
+            )
+            const wasReversed = command !== null && reversedTargetIds.has(command.id)
+            const frozenRate = normalizedFrozenRate(command?.sypMinorPerUsd ?? row.entry.sypMinorPerUsd)
+            return (
+              <tr key={`${row.entry.id}:${command?.id ?? 'entry'}`}>
+                <td className="num px-3 py-2">{command?.occurredOn ?? row.entry.businessDate}</td>
+                <td className="num px-3 py-2">{command?.businessDate ?? row.entry.businessDate}</td>
+                <td className="px-3 py-2">{historicalKindLabel(rowKind, t.companyFinance.historicalKinds)}</td>
+                <td className="px-3 py-2 text-end">{renderAmount(row)}</td>
+                <td className="px-3 py-2 text-end">
+                  {frozenRate === null ? '—' : <span className="inline-flex items-center gap-1"><Money value={frozenRate} currency="SYP_NEW" /><span className="text-ink-muted">/ {t.currency.USD}</span></span>}
+                </td>
+                <td className="px-3 py-2 num">{row.entry.externalReference ?? '—'}</td>
+                <td className="px-3 py-2">{command?.description ?? command?.reason ?? row.entry.reason ?? '—'}</td>
+                <td className="px-3 py-2 text-end">{renderBalanceAfter(row)}</td>
+                <td className="px-3 py-2">
+                  {isReversible && !wasReversed ? <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => { setReversing(row); setReversalReference(''); setReversalReason(''); setReversalError(null) }}>{t.companyFinance.historicalReverse}</Button> : wasReversed ? t.companyFinance.historicalReversedLabel : '—'}
+                </td>
+              </tr>
+            )
+          })}
+        </Table>
+      </Card>
+    </div>
   )
 }
 

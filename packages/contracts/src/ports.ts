@@ -788,6 +788,11 @@ export interface JournalEntryRecord {
   eventType: Posting['eventType']
   shiftId: string | null
   occurrenceKey: string
+  /**
+   * A human audit reference imported with a historical company-fund movement. Null for ordinary
+   * entries and every pre-0084 row. The database permits a non-null value only in the HQ ledger.
+   */
+  externalReference: string | null
   businessDate: CalendarDate
   postingDate: CalendarDate
   weekStartDate: CalendarDate
@@ -1274,6 +1279,11 @@ export interface LedgerRepo {
       sypMinorPerUsd: bigint | null
       createdBy: string
       reason?: string
+      /**
+       * Optional human audit reference for one historical HQ movement. It is deliberately
+       * independent from the client UUID/occurrence key used for retry idempotency.
+       */
+      externalReference?: string | null
     },
   ): Promise<JournalEntryRecord[]>
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
@@ -1294,6 +1304,11 @@ export interface LedgerRepo {
     eventType: JournalEntryRecord['eventType'],
     occurrenceKey: string,
   ): Promise<JournalEntryRecord | null>
+  /**
+   * The historical HQ entry bearing this human audit reference, scoped to its ledger. A non-null
+   * reference is unique per branch in PostgreSQL, so this returns at most one row.
+   */
+  findByExternalReference(branchId: string, externalReference: string): Promise<JournalEntryRecord | null>
   fundBalance(branchId: string, fundCode: string): Promise<Minor>
   /**
    * Every fund whose code starts with `prefix`, and its balance.

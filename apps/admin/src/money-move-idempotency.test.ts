@@ -33,10 +33,32 @@ describe('treasury money-move idempotency', () => {
     }
   })
 
+  it('binds a historical movement key to every conditional field too', () => {
+    const historical = {
+      ...payload,
+      command: 'company_historical:expense',
+      details: {
+        type: 'expense', occurredOn: '2025-01-10', externalReference: 'PAPER-10',
+        currency: 'USD', historicalRate: '170.00', categoryId: 'category-1',
+      },
+    }
+    for (const details of [
+      { ...historical.details, occurredOn: '2025-01-11' },
+      { ...historical.details, externalReference: 'PAPER-11' },
+      { ...historical.details, historicalRate: '171.00' },
+      { ...historical.details, categoryId: 'category-2' },
+    ]) {
+      const generate = vi.fn().mockReturnValueOnce('key-1').mockReturnValueOnce('key-2')
+      const first = pendingMoneyMove(null, historical, generate)
+      expect(pendingMoneyMove(first, { ...historical, details }, generate).idempotencyKey).toBe('key-2')
+    }
+  })
+
   it('drops the key after success or a conflict, and keeps it after any other failure', () => {
     const operation = pendingMoneyMove(null, payload, () => 'key-1')
     expect(pendingAfterAttempt(operation, { ok: true })).toBeNull()
     expect(pendingAfterAttempt(operation, { ok: false, error: 'idempotency_key_conflict' })).toBeNull()
+    expect(pendingAfterAttempt(operation, { ok: false, error: 'external_reference_conflict' })).toBeNull()
     // A lost response may have posted: the next press must ask for the SAME operation.
     expect(pendingAfterAttempt(operation, { ok: false, error: undefined })).toBe(operation)
     expect(pendingAfterAttempt(operation, { ok: false, error: 'http_504' })).toBe(operation)
