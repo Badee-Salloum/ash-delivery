@@ -10,9 +10,6 @@ import {
 } from './pending-evidence-storage.ts'
 import { clearAllEndDrafts, sweepExpiredEndDrafts } from './end-draft-storage.ts'
 import { UpdateBar } from './UpdateBar.tsx'
-import { nativeTrackerAvailable } from './native-tracker.ts'
-
-const ANDROID_APK_URL = 'https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v4.0.0/ash-driver-v4-signed.apk'
 
 interface Assignment {
   driverId: string
@@ -168,53 +165,6 @@ export function DriverApp(): ReactNode {
       <UpdateBar safeBoundary={safeUpdateBoundary} />
       {content}
     </>
-  )
-
-  // The public URL remains an installation page. A browser has no durable Android foreground
-  // tracker, so it must not offer the shift workflow even if a cached PWA still loads.
-  if (!nativeTrackerAvailable()) return withUpdateBar(
-    <Screen title={t.app.title}>
-      <Card>
-        <div className="flex flex-col gap-4 text-center">
-          <h2 className="text-xl font-bold text-ink">
-            {lang === 'ar' ? 'تطبيق السائق مطلوب لبدء النوبة' : 'Install the driver app to start a shift'}
-          </h2>
-          <p className="text-ink-secondary">
-            {lang === 'ar'
-              ? 'نزّل نسخة Android الجديدة وثبّتها، ثم افتح التطبيق من هاتفك مع تفعيل الموقع الدقيق.'
-              : 'Download and install the new Android app, then open it on your phone with precise location enabled.'}
-          </p>
-          <a
-            href={ANDROID_APK_URL}
-            className="inline-flex min-h-14 items-center justify-center rounded-2xl bg-brand px-5 text-center text-lg font-semibold text-on-brand outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-surface-card"
-          >
-            {lang === 'ar' ? 'تنزيل تطبيق السائق' : 'Download driver app'}
-          </a>
-          <div className="rounded-2xl bg-surface-muted p-4 text-start text-sm text-ink-secondary">
-            <p className="font-semibold text-ink">
-              {lang === 'ar' ? 'إذا ظهر «لم يتم تثبيت التطبيق»:' : 'If Android says “App not installed”:'}
-            </p>
-            <ol className="mt-2 list-decimal space-y-1 ps-5">
-              <li>
-                {lang === 'ar'
-                  ? 'افتح ملف APK الذي نزلته من مدير الملفات، وتأكد من توفر مساحة تخزين كافية.'
-                  : 'Open the downloaded APK from File Manager and check that the phone has enough free storage.'}
-              </li>
-              <li>
-                {lang === 'ar'
-                  ? 'على هواتف شاومي، اسمح لمصدر التثبيت المستخدم (Chrome أو مدير الملفات) بتثبيت التطبيقات غير المعروفة من إعدادات الهاتف.'
-                  : 'On Xiaomi phones, allow the installer source (Chrome or File Manager) to install unknown apps in phone settings.'}
-              </li>
-            </ol>
-            <p className="mt-2">
-              {lang === 'ar'
-                ? 'إذا كانت نسخة سابقة من ASH مثبتة، لا تحذفها قبل التأكد من رفع نقاط GPS المعلقة؛ حذف التطبيق يمحو بياناته المحلية.'
-                : 'If an older ASH app is installed, check that pending GPS points have uploaded before uninstalling it. Uninstalling erases its local data.'}
-            </p>
-          </div>
-        </div>
-      </Card>
-    </Screen>,
   )
 
   if (!session) return withUpdateBar(<Login />)

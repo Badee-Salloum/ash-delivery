@@ -64,4 +64,12 @@ describe('driver experience consistency', () => {
     expect(shell).toContain('/theme-boot.js')
     expect(shell).toContain("content: 'ASH Delivery'")
   })
+
+  it('keeps browser visitors on the login flow instead of an Android installation gate', () => {
+    const app = readFileSync(new URL('../src/DriverApp.tsx', import.meta.url), 'utf8')
+
+    expect(app).toContain('if (!session) return withUpdateBar(<Login />)')
+    expect(app).not.toContain('if (!nativeTrackerAvailable()) return')
+    expect(app).not.toContain('ANDROID_APK_URL')
+  })
 })
