@@ -586,6 +586,7 @@ export const en: Catalog = {
       staleEvidence: 'Confirm that the old or reused photos belong to this shift: {items}',
       operationWindow: '{n} operation(s) have an unresolved time — check them or ask the manager to decide',
       odometerAnomaly: 'The closing reading ({end}) is below the opening reading ({start}) — confirm it, then submit again',
+      odometerChargeRequiresDriverReading: 'This vehicle requires the driver to enter its charge reading from the odometer photo. Refresh the page, check the reading, then submit again.',
       operationsChanged: 'The operations changed during submission — review the list and try again',
       draftChanged: 'This shift changed on another device, or a manager corrected a figure — reload the page and send again. Nothing is lost.',
       shiftChanged: 'This shift is no longer in a state that can be submitted — refresh or contact the branch manager',

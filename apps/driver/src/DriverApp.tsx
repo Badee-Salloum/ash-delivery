@@ -262,6 +262,7 @@ export function DriverApp(): ReactNode {
         {bar}
         <ShiftFlow
           assignment={{ driverId: session.driverId, vehicleId: bike?.id ?? '' }}
+          chargeReadingSource={bike?.chargeReadingSource ?? 'bms'}
           batteries={bike?.batteries ?? []}
           spares={assignment.spareBatteries ?? []}
           resume={{ id: assignment.liveShiftId, state: assignment.liveShiftState ?? 'draft' }}

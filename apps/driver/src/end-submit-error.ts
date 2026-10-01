@@ -22,6 +22,7 @@ export interface EndSubmitFailureCopy {
   staleEvidence: string
   operationWindow: string
   odometerAnomaly: string
+  odometerChargeRequiresDriverReading: string
   operationsChanged: string
   draftChanged: string
   shiftChanged: string
@@ -163,6 +164,8 @@ export function describeEndSubmitFailure(
         end: numberOf(anomaly?.end) ?? '—',
       }),
     ]
+  } else if (code === 'odometer_charge_requires_driver_reading') {
+    lines = [copy.odometerChargeRequiresDriverReading]
   } else if (code === 'operations_changed_concurrently') {
     lines = [copy.operationsChanged]
   } else if (code === 'close_draft_changed') {

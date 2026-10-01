@@ -1,6 +1,6 @@
 import type { LightMyRequestResponse } from 'fastify'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
+import { DRIVER2_ID, DRIVER_ID, type Harness, VEHICLE_ID, VEHICLE_TYPE, makeHarness, sypStr } from './harness.ts'
 
 /**
  * The driver's read of his own shift, and his way out of one that never opened.
@@ -187,5 +187,20 @@ describe('the picker tells the driver whose shift is holding a bike', () => {
     expect(me.json().liveShiftId).toBe(shiftId)
     expect(me.json().liveShiftState).toBe('draft')
     expect(DRIVER2_ID).toBeDefined()
+  })
+
+  it('keeps the live bike and its charge-reading source available after an assignment changes', async () => {
+    const { driver, shiftId } = await startShift()
+    const vehicleType = h.deps.directory.vehicleTypes.get(VEHICLE_TYPE)!
+    h.deps.directory.vehicleTypes.set(VEHICLE_TYPE, { ...vehicleType, chargeReadingSource: 'odometer' })
+    const vehicle = h.deps.directory.vehicles.get(VEHICLE_ID)!
+    h.deps.directory.vehicles.set(VEHICLE_ID, { ...vehicle, active: false })
+    const manager = await h.loginAs('manager')
+    expect((await post(manager, '/assignments', { driverId: DRIVER_ID, vehicleId: 'vehicle-2' })).statusCode).toBe(201)
+
+    const me = (await get(driver, '/me/assignment')).json()
+    expect(me.liveShiftId).toBe(shiftId)
+    const liveBike = me.vehicles.find((candidate: { id: string }) => candidate.id === VEHICLE_ID)
+    expect(liveBike).toMatchObject({ busyByMe: true, chargeReadingSource: 'odometer' })
   })
 })

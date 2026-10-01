@@ -458,7 +458,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     // and nothing else — the driver confirms, he does not choose. With no assignment on file the
     // full ready list is returned, so a branch that has not started assigning still works.
     const assignedIds = new Set(assignments.map((a) => a.vehicleId))
-    const vehicles = assignedIds.size > 0 ? allVehicles.filter((v) => assignedIds.has(v.id)) : allVehicles
+    // An assignment can change while a shift is open. Always return the bike that belongs to the
+    // driver's live shift so resume uses its actual charge-reading source and fitted packs.
+    const liveVehicleIds = new Set(live.map((shift) => shift.vehicleId))
+    const vehicles = assignedIds.size > 0
+      ? allVehicles.filter((v) => assignedIds.has(v.id) || liveVehicleIds.has(v.id))
+      : allVehicles
     return {
       driverId: driver.id,
       branchId: driver.branchId,
@@ -471,7 +476,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // and staring at a screen that never advances.
       vehicles: await Promise.all(
         vehicles
-          .filter((v) => v.active && v.state === 'ready')
+          .filter((v) => (v.active && v.state === 'ready') || liveVehicleIds.has(v.id))
           .map(async (v) => ({
             id: v.id,
             code: v.code,

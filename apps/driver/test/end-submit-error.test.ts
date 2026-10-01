@@ -84,6 +84,13 @@ describe('driver end-shift failure copy', () => {
     expect(inEnglish(new TypeError('offline')).lines[0]).toContain('check the connection')
   })
 
+  it('explains an odometer charge handoff refusal without blaming the connection', () => {
+    expect(inArabic({ error: 'odometer_charge_requires_driver_reading' }).lines)
+      .toEqual([ar.shift.closeFailure.odometerChargeRequiresDriverReading])
+    expect(inEnglish({ error: 'odometer_charge_requires_driver_reading' }).lines)
+      .toEqual([en.shift.closeFailure.odometerChargeRequiresDriverReading])
+  })
+
   it('names unread and wrong-screen evidence separately instead of exposing the API code', () => {
     const notice = inEnglish({
       error: 'end_evidence_read_required',
