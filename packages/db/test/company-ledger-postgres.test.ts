@@ -827,11 +827,11 @@ if (!DATABASE_URL) {
             ).toBeNull()
 
             // ── Branch postings through the real repository are exactly as before ────────
-            // Bring the historical fixture up to the current repository schema before
-            // exercising a real posting (0084 adds journal_entries.external_reference).
-            for (const file of migrationFiles.filter((name) => name > '0066_company_ledger_foundation.sql')) {
-              await applyInTransaction(client, sqlOf(file))
-            }
+            // This historical fixture intentionally stops at 0066. The current repository
+            // also writes the nullable external reference introduced by 0084. Apply only
+            // that additive change here: later migrations reject the deliberate guard
+            // probes above because they have no company-command rows.
+            await applyInTransaction(client, sqlOf('0084_company_historical_external_reference.sql'))
             const repoOutcome = await outcome(async () => {
               const bound = bindPoolToTransaction(pool!, client, { actorId: fixture.managerId })
               await setActor(client, fixture.managerId)
