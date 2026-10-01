@@ -3,6 +3,7 @@ import {
   isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
+  batteryPercentFromCloudFields,
   parseNonNegativeInteger,
 } from '../src/numerals.ts'
 
@@ -29,6 +30,16 @@ describe('cloud odometer fields', () => {
     expect(odometerFromCloudFields({ voltage: '83.4' })).toBeNull()
     expect(odometerFromCloudFields({ odometer: null })).toBeNull()
     expect(odometerFromCloudFields({ odometer: 'not visible' })).toBeNull()
+  })
+})
+
+describe('dashboard charge from the same cloud read', () => {
+  it('keeps the two values independent and bounds the charge', () => {
+    const fields = { odometer: 'ODO 00005 km', percent: '84%' }
+    expect(odometerFromCloudFields(fields)).toBe(5)
+    expect(batteryPercentFromCloudFields(fields)).toBe(84)
+    expect(batteryPercentFromCloudFields({ odometer: '00005' })).toBeNull()
+    expect(batteryPercentFromCloudFields({ percent: '104%' })).toBeNull()
   })
 })
 

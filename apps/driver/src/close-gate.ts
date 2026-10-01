@@ -21,7 +21,7 @@
  */
 export type CloseGateBlocker =
   | { readonly kind: 'missing_photo'; readonly slot: string }
-  | { readonly kind: 'missing_value'; readonly field: 'cash' | 'wallet' | 'odometer' }
+  | { readonly kind: 'missing_value'; readonly field: 'cash' | 'wallet' | 'odometer' | 'charge' }
   /** Non-empty but unsendable — «٧٠٠٠٠» off an Arabic keyboard, a stray comma, three decimals. */
   | { readonly kind: 'unreadable_money'; readonly field: 'cash' | 'wallet' }
   | { readonly kind: 'no_orders' }
@@ -42,6 +42,8 @@ export interface CloseGateInput {
   readonly hasBadOrderRows: boolean
   readonly hasBadDeductionRows: boolean
   readonly readingInFlight: boolean
+  /** Present only when one dashboard photo supplies both odometer and battery charge. */
+  readonly dashboardCharge?: { readonly valid: boolean; readonly saved: boolean }
   readonly odometerNeedsConfirmation: boolean
   readonly draftSaved: boolean
 }
@@ -62,12 +64,15 @@ export function closeGateBlockers(input: CloseGateInput): CloseGateBlocker[] {
   else if (!input.moneyIsUsable(input.walletText)) out.push({ kind: 'unreadable_money', field: 'wallet' })
 
   if (input.odometerKm === null) out.push({ kind: 'missing_value', field: 'odometer' })
+  if (input.dashboardCharge && !input.dashboardCharge.valid) out.push({ kind: 'missing_value', field: 'charge' })
   if (input.namedOrderCount === 0) out.push({ kind: 'no_orders' })
   if (input.hasBadOrderRows || input.hasBadDeductionRows) out.push({ kind: 'bad_rows' })
 
   // A read in flight is a reason to WAIT, not a thing to go and fix — but submitting through it
   // silently drops every order it was about to add, which is the shift closing short.
-  if (input.readingInFlight) out.push({ kind: 'reading_in_flight' })
+  if (input.readingInFlight || (input.dashboardCharge?.valid && !input.dashboardCharge.saved)) {
+    out.push({ kind: 'reading_in_flight' })
+  }
 
   // The two that used to be invisible.
   if (input.odometerNeedsConfirmation) out.push({ kind: 'confirm_odometer' })

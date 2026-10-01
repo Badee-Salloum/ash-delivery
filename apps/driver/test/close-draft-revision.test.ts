@@ -6,6 +6,7 @@ import {
   preservePendingCloseDraftReads,
 } from '../src/close-draft-revision.ts'
 import {
+  applyLinkedScalarRead,
   closeDraftSaveNotice,
   ownsCloseDraftRefresh,
   rebaseCloseDraft,
@@ -112,6 +113,49 @@ const savedDraft = (operations: unknown, base?: { revision: number; draftHash: s
 })
 
 describe('close-draft response ordering', () => {
+  it('reads 5 km and 84% independently, preserving a correction to either field', () => {
+    const photo = { ...attachment('charge-1', null), slot: 'odometer' }
+    const canonical = view(2, photo)
+    canonical.figures.odometerKmOcr = 5
+    const current = {
+      ...draftWith(1, photo),
+      closeDraftAttachments: { odometer: photo },
+      charge: '', chargeOcr: null, chargeHumanEdited: false, chargeMediaId: photo.mediaId,
+      odoOcr: null, odoHumanEdited: false,
+    }
+    const response = { draft: canonical, rows: [], fields: { odometer: '00005', percent: '84' } }
+    const read = applyLinkedScalarRead(current as never, response as never, 'odometer', photo.attachmentToken, true)
+    expect(read).toMatchObject({ odo: '5', odoOcr: 5, charge: '84', chargeOcr: 84 })
+
+    const chargeCorrected = applyLinkedScalarRead(
+      { ...read, charge: '83', chargeHumanEdited: true }, response as never, 'odometer', photo.attachmentToken, true,
+    )
+    expect(chargeCorrected).toMatchObject({ odo: '5', charge: '83', chargeOcr: 84 })
+
+    const distanceCorrected = applyLinkedScalarRead(
+      { ...read, odo: '6', odoHumanEdited: true }, response as never, 'odometer', photo.attachmentToken, true,
+    )
+    expect(distanceCorrected).toMatchObject({ odo: '6', odoOcr: 5, charge: '84' })
+  })
+
+  it('clears both dashboard figures after another odometer photo replaces the old one', () => {
+    const oldPhoto = { ...attachment('charge-1', null), slot: 'odometer' }
+    const newPhoto = { ...attachment('charge-2', null), slot: 'odometer' }
+    const canonical = view(3, newPhoto)
+    canonical.figures.odometerKm = 5
+    const current = {
+      ...draftWith(2, oldPhoto),
+      closeDraftAttachments: { odometer: oldPhoto },
+      persistedOdometerKm: 5,
+      odo: '6', odoOcr: 5, odoHumanEdited: true,
+      charge: '83', chargeOcr: 84, chargeHumanEdited: true, chargeMediaId: oldPhoto.mediaId,
+    }
+    expect(rebaseCloseDraft(current as never, canonical)).toMatchObject({
+      odo: '', odoOcr: null, odoHumanEdited: false,
+      charge: '', chargeOcr: null, chargeHumanEdited: false, chargeMediaId: null,
+    })
+  })
+
   it('shows conflict choices even when no transport save failed', () => {
     expect(closeDraftSaveNotice(false, false, true)).toBe('conflict')
     expect(closeDraftSaveNotice(false, false, false)).toBe('saving')

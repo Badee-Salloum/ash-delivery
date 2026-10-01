@@ -656,8 +656,12 @@ async function batteryContext(
   deps: Deps,
   shift: ShiftRecord,
   pkg: 'start' | 'end',
-): Promise<{ batterySlots: number; batteryReadings: BatteryReading[] }> {
+): Promise<{ batterySlots: number; chargeReadingSource: 'bms' | 'odometer'; batteryReadings: BatteryReading[] }> {
   const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+  const chargeReadingSource = await chargeSourceForShift(deps, shift)
+  if (chargeReadingSource === 'odometer' && fitted.length !== 1) {
+    throw new ServiceError(422, 'odometer_charge_requires_one_fitted_battery')
+  }
   const [rows, attached] = await Promise.all([
     deps.batteryReadings.listByShift(shift.id),
     deps.media.listSlots(shift.id),
@@ -665,10 +669,11 @@ async function batteryContext(
   const forPackage = rows.filter((r) => r.package === pkg)
   return {
     batterySlots: fitted.length,
+    chargeReadingSource,
     batteryReadings: fitted.map((battery, i) => {
       const row = forPackage.find((r) => r.batteryId === battery.id)
       const currentMediaId = attached.find(
-        (slot) => slot.package === pkg && slot.slot === bmsSlot(battery.slotNo ?? i + 1),
+        (slot) => slot.package === pkg && slot.slot === (chargeReadingSource === 'odometer' ? 'odometer' : bmsSlot(battery.slotNo ?? i + 1)),
       )?.mediaId ?? null
       // A replacement photo invalidates the old machine reading until the new file has been read.
       // An explicit manager-reading handoff is the exception: it intentionally may have no driver
@@ -695,6 +700,12 @@ async function batteryContext(
   }
 }
 
+async function chargeSourceForShift(deps: Deps, shift: ShiftRecord): Promise<'bms' | 'odometer'> {
+  const vehicle = await deps.directory.vehicle(shift.vehicleId)
+  const type = vehicle && (await deps.directory.listVehicleTypes()).find((candidate) => candidate.id === vehicle.vehicleTypeId)
+  return type?.chargeReadingSource ?? 'bms'
+}
+
 // ── Battery evidence handoff ───────────────────────────────────────────────────────────────
 
 /**
@@ -707,6 +718,7 @@ async function batteryContext(
  */
 async function deferIncompleteEndBatteryEvidence(deps: Deps, shift: ShiftRecord): Promise<void> {
   const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+  const chargeReadingSource = await chargeSourceForShift(deps, shift)
   if (fitted.length === 0) return
 
   const [rows, attached] = await Promise.all([
@@ -719,7 +731,7 @@ async function deferIncompleteEndBatteryEvidence(deps: Deps, shift: ShiftRecord)
     const battery = fitted[index]!
     const slotNo = battery.slotNo ?? index + 1
     const currentMediaId = attached.find(
-      (slot) => slot.package === 'end' && slot.slot === bmsSlot(slotNo),
+      (slot) => slot.package === 'end' && slot.slot === (chargeReadingSource === 'odometer' ? 'odometer' : bmsSlot(slotNo)),
     )?.mediaId ?? null
     const existing = endRows.find((row) => row.batteryId === battery.id)
     const complete =
@@ -1820,6 +1832,9 @@ async function swapBatteryLocked(
   if (shift.state !== 'open' && shift.state !== 'suspended') {
     throw new ServiceError(409, 'shift_not_open_for_swap')
   }
+  if (await chargeSourceForShift(deps, shift) === 'odometer') {
+    throw new ServiceError(422, 'battery_swap_not_supported_for_vehicle_type')
+  }
 
   // The pack fitted to this bike at that slot right now is the one coming off.
   const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
@@ -2697,6 +2712,9 @@ async function submitEndPackageLocked(
   const submittedAt = new Date(deps.clock.nowMs()).toISOString()
 
   if (effectiveInput.deferMissingBatteryEvidenceToManager === true) {
+    if (await chargeSourceForShift(deps, shift) === 'odometer') {
+      throw new ServiceError(422, 'odometer_charge_requires_driver_reading')
+    }
     await deferIncompleteEndBatteryEvidence(deps, shift)
   }
 

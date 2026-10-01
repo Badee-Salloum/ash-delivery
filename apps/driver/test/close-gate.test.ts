@@ -94,6 +94,14 @@ describe('the close gate names every reason it refuses', () => {
       { kind: 'missing_photo', slot: 'bms_2' },
     ])
   })
+
+  it('names an absent or unsaved dashboard charge without affecting BMS bikes', () => {
+    expect(closeGateBlockers(complete({ dashboardCharge: { valid: false, saved: false } })))
+      .toEqual([{ kind: 'missing_value', field: 'charge' }])
+    expect(closeGateBlockers(complete({ dashboardCharge: { valid: true, saved: false } })))
+      .toEqual([{ kind: 'reading_in_flight' }])
+    expect(closeGateBlockers(complete({ dashboardCharge: { valid: true, saved: true } }))).toEqual([])
+  })
 })
 
 describe('the screen cannot re-open the silent-refusal hole', () => {

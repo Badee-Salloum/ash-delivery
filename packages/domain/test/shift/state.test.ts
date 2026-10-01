@@ -518,6 +518,16 @@ describe('battery evidence scales with the bike', () => {
     expect(complete).toEqual([])
   })
 
+  it('a dashboard-charge bike uses its odometer photo for both opening figures', () => {
+    const base = { batterySlots: 1, chargeReadingSource: 'odometer' as const }
+    const missing = startPackageGaps(startWith(base))
+    expect(missing).not.toContainEqual({ kind: 'missing_photo', slot: 'bms_1' })
+    expect(missing).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+    expect(startPackageGaps(startWith({ ...base, batteryReadings: [{ slotNo: 1, percent: 84 }] }))).toEqual([])
+    expect(startPackageGaps(startWith({ ...base, mediaSlots: [], batteryReadings: [{ slotNo: 1, percent: 84 }] })))
+      .toContainEqual({ kind: 'missing_photo', slot: 'odometer' })
+  })
+
   it('a two-pack bike is not satisfied by the first pack alone', () => {
     const gaps = startPackageGaps(
       startWith({ batterySlots: 2, mediaSlots: ['odometer', 'bms_1'], batteryReadings: [{ slotNo: 1, percent: 100 }] }),
@@ -558,6 +568,12 @@ describe('battery evidence scales with the bike', () => {
     const gaps = endPackageGaps(end)
     expect(gaps).toContainEqual({ kind: 'missing_photo', slot: 'bms_2' })
     expect(gaps).toContainEqual({ kind: 'missing_battery_reading', slotNo: 2 })
+  })
+
+  it('a dashboard-charge bike closes without a BMS photo once its one reading is present', () => {
+    const base = completeEnd({ batterySlots: 1, chargeReadingSource: 'odometer' })
+    expect(endPackageGaps(base)).toContainEqual({ kind: 'missing_battery_reading', slotNo: 1 })
+    expect(endPackageGaps({ ...base, batteryReadings: [{ slotNo: 1, percent: 72 }] })).toEqual([])
   })
 
   it('accepts the extra pages of a scrollable screen without ever requiring one', () => {

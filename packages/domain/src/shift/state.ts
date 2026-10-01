@@ -92,12 +92,16 @@ export const bmsSlot = (slotNo: number): string => `bms_${slotNo}`
  * carrying two packs must produce two BMS screenshots or half its charge state is unevidenced —
  * and the count is not a number anyone typed, it is how many packs the fleet says are fitted.
  */
-export function requiredStartSlots(batterySlots: number): readonly string[] {
-  return [...REQUIRED_START_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
+export function requiredStartSlots(batterySlots: number, chargeReadingSource: 'bms' | 'odometer' = 'bms'): readonly string[] {
+  return chargeReadingSource === 'odometer'
+    ? REQUIRED_START_SLOTS
+    : [...REQUIRED_START_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
 }
 
-export function requiredEndSlots(batterySlots: number): readonly string[] {
-  return [...REQUIRED_END_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
+export function requiredEndSlots(batterySlots: number, chargeReadingSource: 'bms' | 'odometer' = 'bms'): readonly string[] {
+  return chargeReadingSource === 'odometer'
+    ? REQUIRED_END_SLOTS
+    : [...REQUIRED_END_SLOTS, ...batterySlotNumbers(batterySlots).map(bmsSlot)]
 }
 
 /**
@@ -187,6 +191,7 @@ export interface StartPackage {
   readonly driverConfirmedAt: string | null
   /** How many packs are fitted to this bike. 0 keeps pre-battery shifts gating exactly as before. */
   readonly batterySlots?: number
+  readonly chargeReadingSource?: 'bms' | 'odometer'
   readonly batteryReadings?: readonly BatteryReading[]
 }
 
@@ -199,6 +204,7 @@ export interface EndPackage {
   readonly orderCount: number
   readonly allOrdersConfirmed: boolean
   readonly batterySlots?: number
+  readonly chargeReadingSource?: 'bms' | 'odometer'
   readonly batteryReadings?: readonly BatteryReading[]
 }
 
@@ -277,7 +283,7 @@ function requiredPhotoSlots(
  */
 export function startPackageGaps(pkg: StartPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of requiredPhotoSlots(requiredStartSlots(pkg.batterySlots ?? 0), pkg.batteryReadings ?? [])) {
+  for (const slot of requiredPhotoSlots(requiredStartSlots(pkg.batterySlots ?? 0, pkg.chargeReadingSource), pkg.batteryReadings ?? [])) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
   gaps.push(...batteryGaps(pkg))
@@ -293,7 +299,7 @@ export function startPackageGaps(pkg: StartPackage): PackageGap[] {
 
 export function endPackageGaps(pkg: EndPackage): PackageGap[] {
   const gaps: PackageGap[] = []
-  for (const slot of requiredPhotoSlots(requiredEndSlots(pkg.batterySlots ?? 0), pkg.batteryReadings ?? [])) {
+  for (const slot of requiredPhotoSlots(requiredEndSlots(pkg.batterySlots ?? 0, pkg.chargeReadingSource), pkg.batteryReadings ?? [])) {
     if (!pkg.mediaSlots.includes(slot)) gaps.push({ kind: 'missing_photo', slot })
   }
   gaps.push(...batteryGaps(pkg))

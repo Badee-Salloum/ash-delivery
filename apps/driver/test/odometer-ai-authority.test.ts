@@ -31,7 +31,7 @@ describe('odometer cloud-AI authority', () => {
     expect(shift).toContain(
       "setOdoCloud({ status: 'failed', reason: 'no_fields', retryable: e.response.retryable })",
     )
-    expect(shift).toContain("if (value === null) return { ...restored, odoCloud: null }")
+    expect(shift).toContain("if (value === null && percent === null) return { ...restored, odoCloud: null }")
     expect(shift).toContain("readLinkedAttachment('odometer', 'odometer', false, result)")
   })
 

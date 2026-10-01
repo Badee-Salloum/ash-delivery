@@ -41,6 +41,7 @@ import {
   isUsableMoneyText,
   normalizeDecimalDigits,
   odometerFromCloudFields,
+  batteryPercentFromCloudFields,
   parseNonNegativeInteger,
   mergeCanonicalManualOperations,
   slotLabel,
@@ -67,6 +68,7 @@ import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui
 import { OperationsList } from './OrderEntry.tsx'
 import { BatteryPanel, type FittedBattery, type PackState, restorePacks } from './BatteryPanel.tsx'
 import { BatterySwap, type SpareBattery } from './BatterySwap.tsx'
+import { DashboardChargeField, dashboardPercent } from './DashboardChargeField.tsx'
 import { PageGrid } from './PageGrid.tsx'
 import { CloudReadStatus } from './CloudReadStatus.tsx'
 import { ReadingLock } from './ReadingLock.tsx'
@@ -117,6 +119,7 @@ type ShiftState = OpenedShiftState
 interface StartPackageRestore {
   odometerKm: number | null
   mediaSlots: string[]
+  odometerMediaId?: string | null
   batteries: Array<{ batteryId: string; slotNo: number; percent: number | null; mediaId: string | null }>
 }
 
@@ -195,6 +198,12 @@ interface EndDraft {
   /** Phone-reader result, independent of the cloud reader and retained with its true failure. */
   odoLocal: LocalOdometerReadEvent | null
   odo: string
+  /** Charge on the same odometer photo for the fixed-battery vehicle type. */
+  charge: string
+  chargeOcr: number | null
+  chargeHumanEdited: boolean
+  /** Photo generation this charge was read or typed against. */
+  chargeMediaId: string | null
   /** Evidence slots already uploaded, so the tiles come back showing their taken state. */
   slots: ReadonlySet<string>
   log: LogState
@@ -252,6 +261,10 @@ const EMPTY_END_DRAFT: EndDraft = {
   odoConfirmed: false,
   odoLocal: null,
   odo: '',
+  charge: '',
+  chargeOcr: null,
+  chargeHumanEdited: false,
+  chargeMediaId: null,
   slots: new Set(),
   log: { kind: 'idle' },
   packs: {},
@@ -313,6 +326,8 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
     current.closeDraftAttachments,
     canonicalAttachments,
   )
+  const odometerMediaId = canonicalAttachments.odometer?.mediaId ?? null
+  const chargeGenerationChanged = current.chargeMediaId !== null && current.chargeMediaId !== odometerMediaId
   const restoredAttachments = Object.values(attachments)
   const orderRefusals = operations.orders.filter(
     (row) => row.feeText.trim() === '' || row.timeReviewRequired === true,
@@ -363,6 +378,10 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
     odoHumanEdited:
       view.figures.odometerKm !== null && view.figures.odometerKm !== view.figures.odometerKmOcr,
     odoConfirmed: view.figures.odometerAnomalyConfirmed,
+    charge: chargeGenerationChanged ? '' : current.charge,
+    chargeOcr: chargeGenerationChanged ? null : current.chargeOcr,
+    chargeHumanEdited: chargeGenerationChanged ? false : current.chargeHumanEdited,
+    chargeMediaId: chargeGenerationChanged ? null : current.chargeMediaId,
     orders: operations.orders,
     cashDeductions: operations.cashDeductions,
     movements: operations.movements,
@@ -382,6 +401,7 @@ export function applyLinkedScalarRead(
   response: CloseDraftReadResponse,
   field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
   generation: string,
+  dashboardCharge = false,
 ): EndDraft {
   const restored = rebaseCloseDraft(current, response.draft)
   if (field === 'wallet') {
@@ -407,7 +427,17 @@ export function applyLinkedScalarRead(
   }
   if (field === 'odometer') {
     const value = response.draft.figures.odometerKmOcr ?? odometerFromCloudFields(response.fields)
-    if (value === null) return { ...restored, odoCloud: null }
+    const percent = dashboardCharge ? batteryPercentFromCloudFields(response.fields) : null
+    if (value === null && percent === null) return { ...restored, odoCloud: null }
+    if (value === null) return {
+      ...restored,
+      ...(dashboardCharge ? {
+        charge: percent !== null && !restored.chargeHumanEdited ? String(percent) : restored.charge,
+        chargeOcr: percent,
+        chargeMediaId: response.draft.attachments.find((attachment) => attachment.slot === 'odometer')?.mediaId ?? null,
+      } : {}),
+      odoCloud: null,
+    }
     const authority = reduceAiOcrAuthority<number, string>(
       {
         generation,
@@ -425,6 +455,11 @@ export function applyLinkedScalarRead(
       odoAiAuthoritative: authority.aiValue !== null,
       odoConfirmed: false,
       odoCloud: null,
+      ...(dashboardCharge ? {
+        charge: percent !== null && !restored.chargeHumanEdited ? String(percent) : restored.charge,
+        chargeOcr: percent,
+        chargeMediaId: response.draft.attachments.find((attachment) => attachment.slot === 'odometer')?.mediaId ?? null,
+      } : {}),
     }
   }
   return restored
@@ -440,6 +475,8 @@ export function rebaseCloseDraft(
   // not a new base: applying it would rewind attachment generations, canonical rows and the CAS
   // revision, after which the next legitimate save conflicts or publishes withdrawn OCR rows.
   if (isStaleCloseDraftView(current.closeDraftRevision, view.revision)) return current
+  const nextOdometerMediaId = view.attachments.find((attachment) => attachment.slot === 'odometer')?.mediaId ?? null
+  const dashboardPhotoChanged = current.chargeMediaId !== null && current.chargeMediaId !== nextOdometerMediaId
   const moneyEqual = (left: string | null, right: string | null): boolean => {
     if (left === right) return true
     if (left === null || right === null) return false
@@ -513,9 +550,11 @@ export function rebaseCloseDraft(
     cash: cashDirty ? current.cash : restored.cash,
     wallet: walletDirty ? current.wallet : restored.wallet,
     walletHumanEdited: walletDirty ? current.walletHumanEdited : restored.walletHumanEdited,
-    odo: odometerDirty ? current.odo : restored.odo,
-    odoHumanEdited: odometerDirty ? current.odoHumanEdited : restored.odoHumanEdited,
-    odoConfirmed: odometerConfirmationDirty ? current.odoConfirmed : restored.odoConfirmed,
+    odo: dashboardPhotoChanged ? '' : odometerDirty ? current.odo : restored.odo,
+    odoOcr: dashboardPhotoChanged ? null : restored.odoOcr,
+    odoAiAuthoritative: dashboardPhotoChanged ? false : restored.odoAiAuthoritative,
+    odoHumanEdited: dashboardPhotoChanged ? false : odometerDirty ? current.odoHumanEdited : restored.odoHumanEdited,
+    odoConfirmed: dashboardPhotoChanged ? false : odometerConfirmationDirty ? current.odoConfirmed : restored.odoConfirmed,
     closeDraftMergeConflict: mergeConflict,
     closeDraftConflictCanonical: acceptsSuccessfulWrite
       ? null
@@ -695,6 +734,7 @@ const localDraftStorage = (): Storage | null => {
 export function ShiftFlow({
   assignment,
   batteries,
+  chargeReadingSource = 'bms',
   spares = [],
   resume,
   onDiscarded,
@@ -703,6 +743,7 @@ export function ShiftFlow({
   assignment: { driverId: string; vehicleId: string }
   /** The packs fitted to this bike, from `/me/assignment` — the same list the BR5 gate counts. */
   batteries: readonly FittedBattery[]
+  chargeReadingSource?: 'bms' | 'odometer'
   /** Ready spares on the branch shelf, for a mid-shift swap (SRS §L seam). */
   spares?: readonly SpareBattery[]
   /** A shift already in flight. Present ⇒ resume it; absent ⇒ this is a fresh start. */
@@ -1190,6 +1231,7 @@ export function ShiftFlow({
         setStartRestore({
           odometerKm: st.startPackage.odometerKm,
           mediaSlots: st.startPackage.mediaSlots,
+          odometerMediaId: st.startPackage.odometerMediaId ?? null,
           batteries: st.startPackage.batteries,
         })
         setShift({
@@ -1239,6 +1281,9 @@ export function ShiftFlow({
           odoOcr: d.odoOcr ?? st.endPackage.odometerKmOcr ?? null,
           odoAiAuthoritative: d.odoAiAuthoritative || st.endPackage.odometerKmOcr !== null,
           odoHumanEdited: d.odoHumanEdited || st.endPackage.odometerKm !== null,
+          charge: d.charge || (chargeReadingSource === 'odometer' && st.endPackage.batteries[0]?.mediaId === st.endPackage.odometerMediaId &&
+            st.endPackage.batteries[0]?.percent != null ? String(st.endPackage.batteries[0].percent) : ''),
+          chargeMediaId: chargeReadingSource === 'odometer' ? st.endPackage.odometerMediaId ?? null : null,
           // Owned by `BatteryPanel`, which is the only thing that knows the shape. Building it here
           // by hand — behind an `as` cast — is what crashed every resumed close screen.
           packs: restorePacks(st.endPackage.batteries, d.packs),
@@ -1317,7 +1362,7 @@ export function ShiftFlow({
         setResumeFailed(true)
         setLoaded(true)
       })
-  }, [api, resume, reloadKey, applyServerState, showManagerReturnReason, receiveBreakSummary])
+  }, [api, resume, reloadKey, applyServerState, showManagerReturnReason, receiveBreakSummary, chargeReadingSource])
 
   /**
    * The end screen never accepts evidence until its revisioned server draft is loaded.
@@ -1371,6 +1416,7 @@ export function ShiftFlow({
       <StartPackage
         assignment={assignment}
         batteries={fitted}
+        chargeReadingSource={chargeReadingSource}
         existingShiftId={resume?.id ?? null}
         restore={startRestore}
         onDiscarded={onDiscarded}
@@ -1470,7 +1516,7 @@ export function ShiftFlow({
         </Card>
         {/* «تبديل بطارية» (SRS §L seam): at a charging stop the driver swaps a depleted pack for a
             charged spare; both packs' readings are captured and the bike is re-fitted. */}
-        <BatterySwap shiftId={shift.id} fitted={fitted} spares={spares} onSwapped={setFitted} />
+        {chargeReadingSource === 'bms' ? <BatterySwap shiftId={shift.id} fitted={fitted} spares={spares} onSwapped={setFitted} /> : null}
         {/* «بلاغ حادثة» (C-1): the driver can't suspend himself — he flags the incident to the
             branch, which rings the bell so a manager can put the shift on hold. */}
         <ReportIncident shiftId={shift.id} />
@@ -1499,6 +1545,7 @@ export function ShiftFlow({
       <EndPackage
         shift={shift}
         batteries={fitted}
+        chargeReadingSource={chargeReadingSource}
         draft={endDraft}
         onDraft={setEndDraft}
         saveFailed={closeDraftSaveFailed}
@@ -1618,6 +1665,7 @@ async function submitOrders(
 function StartPackage({
   assignment,
   batteries,
+  chargeReadingSource,
   existingShiftId,
   restore,
   onDiscarded,
@@ -1628,6 +1676,7 @@ function StartPackage({
   /** No `shiftNo`: the SERVER numbers the shift. A client cannot know which numbers are taken. */
   assignment: { driverId: string; vehicleId: string }
   batteries: readonly FittedBattery[]
+  chargeReadingSource: 'bms' | 'odometer'
   /** A draft that already exists. Present ⇒ attach to it; absent ⇒ create one. */
   existingShiftId?: string | null
   /** Opening package already persisted by this draft, restored from the driver's state endpoint. */
@@ -1700,10 +1749,18 @@ function StartPackage({
   const [odoFile, setOdoFile] = useState<File | null>(null)
   const odoFileRef = useRef<File | null>(null)
   const [odoShot, setOdoShot] = useState(restore?.mediaSlots.includes('odometer') ?? false)
+  const [odoMediaId, setOdoMediaId] = useState<string | null>(restore?.odometerMediaId ?? null)
+  const [charge, setCharge] = useState(
+    restore?.batteries[0]?.percent == null || restore.batteries[0].mediaId !== restore.odometerMediaId
+      ? '' : String(restore.batteries[0].percent),
+  )
+  const [chargeOcr, setChargeOcr] = useState<number | null>(null)
+  const [chargeHumanEdited, setChargeHumanEdited] = useState(false)
+  const chargeHumanEditedRef = useRef(false)
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
   const [startSlots, setStartSlots] = useState<Set<string>>(() => new Set(restore?.mediaSlots ?? []))
-  const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
+  const [batteriesReady, setBatteriesReady] = useState(chargeReadingSource === 'bms' && batteries.length === 0)
 
   // The phone still reads the original dashboard pixels so its sample can be trained, but its
   // numeric guess is never published. Cloud AI is the sole automatic odometer authority.
@@ -1751,6 +1808,11 @@ function StartPackage({
     // The reader is told to label it «odometer»; accept the obvious variants rather than failing
     // on a synonym, since a wrong label costs the whole read.
     const km = odometerFromCloudFields(e.response.fields)
+    if (chargeReadingSource === 'odometer') {
+      const percent = batteryPercentFromCloudFields(e.response.fields)
+      setChargeOcr(percent)
+      if (percent !== null && !chargeHumanEditedRef.current) setCharge(String(percent))
+    }
     if (km === null) {
       // A structured response without an odometer is a terminal, visible failure — never a hidden
       // success and never permission to promote the phone's guess.
@@ -1762,7 +1824,7 @@ function StartPackage({
     // fractional odometer is not a thing this dashboard prints.
     setOdoOcr(km)
     if (!odoHumanEdited.current) setOdo(String(km))
-  }, [])
+  }, [chargeReadingSource])
 
   /**
    * Read the odometer photo again after a timeout, from the file already in hand.
@@ -2197,16 +2259,25 @@ function StartPackage({
             setOdoShot(true)
             setStartSlots((cur) => new Set(cur).add(slot))
           }}
-          onImage={(file) => {
+          onImage={(file, result) => {
             odoFileRef.current = file
             setOdoCloud(null)
             setOdoOcr(null)
             setOdoStrip(null)
             setOdoLocal({ status: 'reading' })
-            // A new photograph must not inherit a machine-prefill from the old one. A value the
-            // driver actually typed is different: human input remains authoritative across a retake.
-            setOdo(odometerValueForRetake(odo, odoHumanEdited.current))
+            // The dashboard-charge type starts both figures fresh for each new photograph.
+            // Legacy bikes keep an explicitly typed odometer value through a retake.
+            setOdo(chargeReadingSource === 'odometer' ? '' : odometerValueForRetake(odo, odoHumanEdited.current))
+            if (chargeReadingSource === 'odometer') odoHumanEdited.current = false
             setOdoFile(file)
+            if (chargeReadingSource === 'odometer') {
+              setOdoMediaId(result?.mediaId ?? null)
+              setCharge('')
+              setChargeOcr(null)
+              setChargeHumanEdited(false)
+              chargeHumanEditedRef.current = false
+              setBatteriesReady(false)
+            }
             void runOcr(file)
           }}
           ocrField="odometer"
@@ -2258,7 +2329,28 @@ function StartPackage({
       </Card>
       </ReadingLock>
       {/* One screenshot and one set of numbers per pack fitted — the same count the gate reads. */}
-      {shiftId ? (
+      {shiftId && chargeReadingSource === 'odometer' ? (
+        <Card>
+          <DashboardChargeField
+            shiftId={shiftId}
+            pkg="start"
+            batteryId={batteries[0]?.id ?? null}
+            mediaId={odoMediaId}
+            persisted={restore?.batteries[0]?.mediaId === odoMediaId && restore.batteries[0]?.percent != null
+              ? { mediaId: odoMediaId!, percent: restore.batteries[0].percent } : null}
+            value={charge}
+            ocrValue={chargeOcr}
+            humanEdited={chargeHumanEdited}
+            onChange={(value) => {
+              setCharge(normalizeDecimalDigits(value))
+              setChargeHumanEdited(true)
+              chargeHumanEditedRef.current = true
+            }}
+            onReady={setBatteriesReady}
+          />
+        </Card>
+      ) : null}
+      {shiftId && chargeReadingSource === 'bms' ? (
         <BatteryPanel
           shiftId={shiftId}
           pkg="start"
@@ -2315,6 +2407,7 @@ function LocalOdometerReadStatus({
 function EndPackage({
   shift,
   batteries,
+  chargeReadingSource,
   draft,
   onDraft,
   saveFailed,
@@ -2325,6 +2418,7 @@ function EndPackage({
 }: {
   shift: ShiftState
   batteries: readonly FittedBattery[]
+  chargeReadingSource: 'bms' | 'odometer'
   /** Held by the caller so the package survives a step back to the order list. See `EndDraft`. */
   draft: EndDraft
   onDraft: Dispatch<SetStateAction<EndDraft>>
@@ -2471,7 +2565,7 @@ function EndPackage({
             attachment.attachmentToken,
             pendingReadId,
           )) return state
-          return applyLinkedScalarRead(state, response, field, attachment.attachmentToken)
+          return applyLinkedScalarRead(state, response, field, attachment.attachmentToken, chargeReadingSource === 'odometer')
         })
         return response
       } catch (error) {
@@ -2490,7 +2584,7 @@ function EndPackage({
         effectiveSignal?.removeEventListener('abort', onAbort)
       }
     },
-    [api, shift.id, applyCanonicalDraft, onDraft],
+    [api, shift.id, applyCanonicalDraft, onDraft, chargeReadingSource],
   )
 
   // Heal a phone-only overlap even when it entered the draft before this component rendered (for
@@ -2507,7 +2601,7 @@ function EndPackage({
     })
   }, [draft.cashDeductions, onDraft])
 
-  const [batteriesReady, setBatteriesReady] = useState(batteries.length === 0)
+  const [batteriesReady, setBatteriesReady] = useState(chargeReadingSource === 'bms' && batteries.length === 0)
   // The zeroed-wallet photo was dropped (product owner) — the wallet screenshot is the evidence.
   // «سجل المدفوعات» is optional archive/training evidence only. It neither classifies order pay
   // modes nor changes BR1, so an unread or absent log must never keep a driver at the branch.
@@ -2601,6 +2695,9 @@ function EndPackage({
     hasBadOrderRows: allProblems(withoutSupersededRemnants(draft.orders)).size > 0,
     hasBadDeductionRows: !cashDeductionsAreValid(withoutSupersededRemnants(draft.cashDeductions)),
     readingInFlight: readingAttachment,
+    ...(chargeReadingSource === 'odometer' ? {
+      dashboardCharge: { valid: dashboardPercent(draft.charge) !== null, saved: batteriesReady },
+    } : {}),
     odometerNeedsConfirmation,
     draftSaved,
   })
@@ -2615,7 +2712,9 @@ function EndPackage({
           ? t.shift.cashHandover
           : blocker.field === 'wallet'
             ? t.shift.walletBalance
-            : t.shift.odometer
+            : blocker.field === 'charge'
+              ? t.battery.percent
+              : t.shift.odometer
       case 'unreadable_money':
         return `${blocker.field === 'cash' ? t.shift.cashHandover : t.shift.walletBalance} — ${t.shift.badMoneyFigure}`
       case 'no_orders':
@@ -2688,9 +2787,9 @@ function EndPackage({
         odometerStrip: draft.odoStrip,
         draftRevision: draft.closeDraftRevision,
         draftHash: draft.closeDraftHash,
-        // Missing end BMS evidence must not keep a driver clocked in. The API converts only those
-        // incomplete packs into an explicit manager-reading obligation inside the close transaction.
-        deferMissingBatteryEvidenceToManager: true,
+        // Only BMS packs can defer an unreadable app to manager review. This dashboard type
+        // always has a photographed display and the driver enters its charge if AI cannot read it.
+        deferMissingBatteryEvidenceToManager: chargeReadingSource === 'bms',
       })
       setBr1(res.br1)
       // A non-zero difference is now a manager settlement decision, not a driver submission gate.
@@ -2781,6 +2880,7 @@ function EndPackage({
    */
   const odoImage = useCallback(
     async (file: File, newEvidence = true): Promise<void> => {
+      if (newEvidence && chargeReadingSource === 'odometer') setBatteriesReady(false)
       onDraft((d) => {
         if (!newEvidence) {
           return d.odoFile === file ? { ...d, odoLocal: { status: 'reading' } } : d
@@ -2795,7 +2895,11 @@ function EndPackage({
           odoLocal: { status: 'reading' },
           odoConfirmed: false,
           // Do not let an earlier photo's machine value survive a retake whose readers may fail.
-          odo: odometerValueForRetake(d.odo, d.odoHumanEdited),
+          odo: chargeReadingSource === 'odometer' ? '' : odometerValueForRetake(d.odo, d.odoHumanEdited),
+          odoHumanEdited: chargeReadingSource === 'odometer' ? false : d.odoHumanEdited,
+          ...(newEvidence && chargeReadingSource === 'odometer'
+            ? { charge: '', chargeOcr: null, chargeHumanEdited: false, chargeMediaId: null }
+            : {}),
         }
       })
       try {
@@ -2822,7 +2926,7 @@ function EndPackage({
         )
       }
     },
-    [onDraft],
+    [onDraft, chargeReadingSource],
   )
 
   const dashImage = useCallback(
@@ -3168,6 +3272,9 @@ function EndPackage({
               onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
               onImage={async (file, result) => {
                 await odoImage(file)
+                if (chargeReadingSource === 'odometer') {
+                  onDraft((d) => d.odoFile === file ? { ...d, chargeMediaId: result?.mediaId ?? null } : d)
+                }
                 await readLinkedAttachment('odometer', 'odometer', false, result)
               }}
               onRetryRead={async () => {
@@ -3232,7 +3339,30 @@ function EndPackage({
         </Field>
       </Card>
       {/* The close gate asks for the same per-pack evidence the open gate did. */}
-      <BatteryPanel
+      {chargeReadingSource === 'odometer' ? (
+        <Card>
+          <DashboardChargeField
+            shiftId={shift.id}
+            pkg="end"
+            batteryId={batteries[0]?.id ?? null}
+            mediaId={draft.chargeMediaId === draft.closeDraftAttachments.odometer?.mediaId
+              ? draft.chargeMediaId : null}
+            persisted={batteries[0] && draft.batteryMediaIds[batteries[0].id] === draft.chargeMediaId &&
+              dashboardPercent(draft.packs[batteries[0].id]?.values.percent ?? '') !== null
+              ? { mediaId: draft.chargeMediaId!, percent: dashboardPercent(draft.packs[batteries[0].id]?.values.percent ?? '')! }
+              : null}
+            value={draft.charge}
+            ocrValue={draft.chargeOcr}
+            humanEdited={draft.chargeHumanEdited}
+            onChange={(value) => patch({
+              charge: normalizeDecimalDigits(value),
+              chargeHumanEdited: true,
+              chargeMediaId: draft.closeDraftAttachments.odometer?.mediaId ?? null,
+            })}
+            onReady={setBatteriesReady}
+          />
+        </Card>
+      ) : <BatteryPanel
         shiftId={shift.id}
         pkg="end"
         batteries={batteries}
@@ -3254,7 +3384,7 @@ function EndPackage({
             batteryMediaIds: { ...d.batteryMediaIds, [batteryId]: mediaId },
           }))
         }
-      />
+      />}
     </Screen>
   )
 }

@@ -24,6 +24,7 @@ interface Assignment {
     /** «الرقم التمييزي على الأرض» — what is marked on the machine, null when it carries no number. */
     groundNo?: string | null
     state: string
+    chargeReadingSource?: 'bms' | 'odometer'
     busy?: boolean
     /** True when the shift holding this bike is the driver's OWN. */
     busyByMe?: boolean
@@ -342,6 +343,7 @@ export function DriverApp(): ReactNode {
       {bar}
       <ShiftFlow
         assignment={{ driverId: session.driverId, vehicleId }}
+        chargeReadingSource={assignment?.vehicles.find((v) => v.id === vehicleId)?.chargeReadingSource ?? 'bms'}
         batteries={assignment?.vehicles.find((v) => v.id === vehicleId)?.batteries ?? []}
         spares={assignment?.spareBatteries ?? []}
         onDiscarded={() => setVehicleId(null)}

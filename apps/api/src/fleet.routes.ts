@@ -425,6 +425,9 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
     const body = updateVehicleTypeRequest.parse(req.body)
     const before = (await deps.directory.listVehicleTypes()).find((t) => t.id === id)
     if (!before) throw new ServiceError(404, 'vehicle_type_not_found')
+    if (before.chargeReadingSource === 'odometer' && body.batterySlots !== undefined && body.batterySlots !== 1) {
+      throw new ServiceError(422, 'odometer_charge_requires_one_battery')
+    }
 
     const after: VehicleTypeRecord = {
       ...before,

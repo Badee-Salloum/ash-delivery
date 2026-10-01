@@ -28,6 +28,21 @@ const patch = async (token: string, url: string, payload: Payload = {}): Promise
   await h.app.inject({ method: 'PATCH', url, headers: { cookie: h.cookie(token) }, payload })
 
 describe('vehicle types are data with a number (SRS B-2)', () => {
+  it('lets the admin configure an odometer-charge type with exactly one battery slot', async () => {
+    const admin = await h.loginAs('sysadmin')
+    const created = await post(admin, '/vehicle-types', {
+      code: 'dash_bike', nameAr: 'موتور بعداد شحن', nameEn: 'Dashboard charge motorbike',
+      typeNo: 2, batterySlots: 1, chargeReadingSource: 'odometer',
+    })
+    expect(created.statusCode, created.body).toBe(201)
+    expect(created.json().chargeReadingSource).toBe('odometer')
+    const invalid = await post(admin, '/vehicle-types', {
+      code: 'bad_dash_bike', nameAr: 'موتور', nameEn: 'Motorbike',
+      typeNo: 3, batterySlots: 2, chargeReadingSource: 'odometer',
+    })
+    expect(invalid.statusCode).toBe(400)
+    expect((await get(admin, '/vehicle-types')).json().vehicleTypes[0].chargeReadingSource).toBe('bms')
+  })
   it('the system admin adds a type and it appears in the list', async () => {
     const admin = await h.loginAs('sysadmin')
     const res = await post(admin, '/vehicle-types', {

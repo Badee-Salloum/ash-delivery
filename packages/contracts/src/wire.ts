@@ -1070,6 +1070,9 @@ export const createVehicleTypeRequest = z.object({
   typeNo: z.number().int().min(1).max(99),
   /** Max packs a machine of this type may carry; the ceiling, not the count. Default 2. */
   batterySlots: z.number().int().min(1).max(MAX_BATTERY_SLOTS).default(2),
+  chargeReadingSource: z.enum(['bms', 'odometer']).default('bms'),
+}).refine((value) => value.chargeReadingSource !== 'odometer' || value.batterySlots === 1, {
+  path: ['batterySlots'], message: 'odometer charge requires exactly one battery slot',
 })
 
 /** Changing `typeNo` restates the printed code of every vehicle of this type. */

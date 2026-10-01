@@ -447,10 +447,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const driver = await deps.directory.driver(req.actor.driverId)
     if (!driver) return reply.code(404).send({ error: 'driver_not_found' })
     const today = todayFor(deps)
-    const [allVehicles, live, assignments] = await Promise.all([
+    const [allVehicles, live, assignments, vehicleTypes] = await Promise.all([
       deps.directory.listVehicles(driver.branchId),
       deps.shifts.listLiveForDriver(driver.id),
       deps.assignments.findForDriver(driver.id, today),
+      deps.directory.listVehicleTypes(),
     ])
 
     // SRS B-3: once the manager has bound a bike to this driver for today, the app shows that bike
@@ -480,6 +481,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
             // belong to a bike nobody rode.
             groundNo: v.groundNo,
             state: v.state,
+            chargeReadingSource: vehicleTypes.find((type) => type.id === v.vehicleTypeId)?.chargeReadingSource ?? 'bms',
             busy: (await deps.shifts.listLiveForVehicle(v.id)).length > 0,
             // Whose shift it is matters: a driver told his own bike is «على نوبة الآن» has no way
             // to tell that the shift blocking him is the one he is supposed to be finishing.
@@ -777,6 +779,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       // Only packs actually fitted to THIS bike. Without this a driver could attach a reading
       // from a healthy pack on another machine and satisfy his own bike's gate with it.
       const fitted = await deps.directory.listBatteriesForVehicle(shift.vehicleId)
+      const vehicle = await deps.directory.vehicle(shift.vehicleId)
+      const vehicleType = vehicle && (await deps.directory.listVehicleTypes()).find((type) => type.id === vehicle.vehicleTypeId)
+      const chargeReadingSource = vehicleType?.chargeReadingSource ?? 'bms'
+      if (chargeReadingSource === 'odometer' && fitted.length !== 1) {
+        throw new ServiceError(422, 'odometer_charge_requires_one_fitted_battery')
+      }
       // The screenshot each reading came from. `media_id` has been on this table since 0007 and was
       // written NULL every time, so no manager could ever see WHICH picture produced «39%» and the
       // training pair had no pixels behind it. The slot name is the link: pack n's evidence is
@@ -799,6 +807,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         if (reading.unavailable && reading.percent !== null) {
           throw new ServiceError(422, 'battery_reading_unavailable_with_percent', { batteryId: battery.id })
         }
+        if (chargeReadingSource === 'odometer' && reading.unavailable) {
+          throw new ServiceError(422, 'odometer_charge_requires_driver_reading', { batteryId: battery.id })
+        }
         /*
          * `source` is a fact about WHO read the pack, and this is the route only the driver may
          * call. Stamping `manager` here would let him claim the one source that legitimately waives
@@ -807,8 +818,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         if (reading.source === 'manager') {
           throw new ServiceError(422, 'battery_reading_source_not_permitted', { batteryId: battery.id })
         }
+        const evidenceSlot = chargeReadingSource === 'odometer' ? 'odometer' : bmsSlot(battery.slotNo ?? 1)
         const currentMediaId =
-          attached.find((a) => a.package === body.package && a.slot === bmsSlot(battery.slotNo ?? 1))?.mediaId ?? null
+          attached.find((a) => a.package === body.package && a.slot === evidenceSlot)?.mediaId ?? null
+        if (chargeReadingSource === 'odometer' && !reading.unavailable &&
+            (reading.expectedMediaId === undefined || currentMediaId === null)) {
+          throw new ServiceError(422, 'odometer_charge_evidence_required', { batteryId: battery.id })
+        }
         // A current PWA names the attachment returned by its own upload. Refuse rather than bind a
         // late OCR/manual write to whichever file another tab (or a later retake) put in the slot.
         // Cached PWAs omit the lock: before the FIRST upload they still stage a NULL-media row,
@@ -1645,6 +1661,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           floatTotal: serializeMoney(add(sum(shift.floatTranches), sum(shift.carriedTranches))),
           topupTotal: serializeMoney(add(sum(shift.topupTranches), sum(shift.carriedWalletTranches ?? []))),
           mediaSlots: shift.mediaSlotsStart,
+          odometerMediaId: slots.find((slot) => slot.package === 'start' && slot.slot === 'odometer')?.mediaId ?? null,
           batteries: withPack('start'),
         },
         endPackage: {
@@ -1653,6 +1670,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           odometerAnomalyConfirmedAt: shift.odoEndAnomalyConfirmedAt,
           odometerAnomalyConfirmedBy: shift.odoEndAnomalyConfirmedBy,
           batteryPercent: shift.batteryEnd,
+          odometerMediaId: slots.find((slot) => slot.package === 'end' && slot.slot === 'odometer')?.mediaId ?? null,
           cashDeclared: shift.endCashDeclared === null ? null : serializeMoney(shift.endCashDeclared),
           walletDeclared: shift.endWalletDeclared === null ? null : serializeMoney(shift.endWalletDeclared),
           // SRS D-3 baseline (readWallet), money as a decimal string.

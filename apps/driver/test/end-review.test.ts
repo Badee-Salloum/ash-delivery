@@ -16,7 +16,7 @@ describe('driver end-shift review warnings', () => {
   it('asks the API to transfer incomplete end-battery evidence to manager review', () => {
     const source = readFileSync(new URL('../src/screens/Shift.tsx', import.meta.url), 'utf8')
     const endPackageSource = source.slice(source.indexOf('function EndPackage('))
-    expect(source).toContain('deferMissingBatteryEvidenceToManager: true')
+    expect(source).toContain("deferMissingBatteryEvidenceToManager: chargeReadingSource === 'bms'")
     // The opening gate remains strict; only EndPackage stops treating this as a blocker.
     expect(endPackageSource).not.toContain('...(batteriesReady ? [] : [t.battery.percent])')
     // Other in-flight evidence is still a real submission blocker.

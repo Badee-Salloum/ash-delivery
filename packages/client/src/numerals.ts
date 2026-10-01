@@ -31,6 +31,19 @@ export function odometerFromCloudFields(fields: Readonly<Record<string, string |
   return null
 }
 
+/** A dashboard's labelled remaining charge, independently of its odometer reading. */
+export function batteryPercentFromCloudFields(fields: Readonly<Record<string, string | null>>): number | null {
+  for (const [label, value] of Object.entries(fields)) {
+    if (value === null || !['percent', 'batterypercent', 'battery_percent', 'charge'].includes(label.trim().toLowerCase())) continue
+    const normalized = normalizeDecimalDigits(value).trim()
+    const match = /^(?:\s*(?:battery|charge|soc)\s*[:=]?\s*)?(\d{1,3})\s*%?\s*$/i.exec(normalized)
+    if (!match) continue
+    const percent = Number(match[1])
+    if (percent >= 0 && percent <= 100) return percent
+  }
+  return null
+}
+
 /**
  * Can this text actually be sent as money, or will it 400 the request?
  *

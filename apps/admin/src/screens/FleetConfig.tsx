@@ -26,6 +26,7 @@ interface VehicleType {
   typeNo: number
   /** Max packs a machine of this type may carry — the configurable ceiling. */
   batterySlots: number
+  chargeReadingSource: 'bms' | 'odometer'
   active: boolean
 }
 
@@ -274,7 +275,7 @@ function VehicleTypeCard({
   run: Runner
 }): ReactNode {
   const { api, t } = useApp()
-  const [draft, setDraft] = useState({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2' })
+  const [draft, setDraft] = useState({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2', chargeReadingSource: 'bms' as 'bms' | 'odometer' })
 
   return (
     <Card title={t.fleet.vehicleType}>
@@ -295,9 +296,22 @@ function VehicleTypeCard({
             placeholder={t.fleet.batterySlots}
             aria-label={t.fleet.batterySlots}
             value={draft.batterySlots}
+            disabled={draft.chargeReadingSource === 'odometer'}
             onChange={(e) => setDraft({ ...draft, batterySlots: e.target.value })}
             className="num w-24"
           />
+          <select
+            aria-label={t.fleet.chargeReadingSource}
+            value={draft.chargeReadingSource}
+            onChange={(e) => {
+              const source = e.target.value as 'bms' | 'odometer'
+              setDraft({ ...draft, chargeReadingSource: source, batterySlots: source === 'odometer' ? '1' : '2' })
+            }}
+            className="rounded-lg border border-line px-3 py-2"
+          >
+            <option value="bms">{t.fleet.chargeFromBms}</option>
+            <option value="odometer">{t.fleet.chargeFromOdometer}</option>
+          </select>
           <Button
             disabled={!draft.code || !draft.nameAr || !draft.nameEn || !draft.typeNo}
             onClick={async () => {
@@ -309,10 +323,11 @@ function VehicleTypeCard({
                     nameEn: draft.nameEn,
                     typeNo: Number(draft.typeNo),
                     batterySlots: draft.batterySlots.trim() === '' ? 2 : Number(draft.batterySlots),
+                    chargeReadingSource: draft.chargeReadingSource,
                   }),
                 t.accounts.created,
               )
-              setDraft({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2' })
+              setDraft({ code: '', nameAr: '', nameEn: '', typeNo: '', batterySlots: '2', chargeReadingSource: 'bms' })
             }}
           >
             {t.fleet.addType}
@@ -322,7 +337,7 @@ function VehicleTypeCard({
       {/* Said before the control is used, not after: this edit rewrites printed numbers. */}
       <p className="mb-2 text-xs text-amber-700">{t.fleet.typeNoHint}</p>
 
-      <Table head={[t.fleet.typeNo, t.fleet.vehicleType, t.fleet.code, t.fleet.batterySlots, '']}>
+      <Table head={[t.fleet.typeNo, t.fleet.vehicleType, t.fleet.code, t.fleet.batterySlots, t.fleet.chargeReadingSource, '']}>
         {types.map((ty) => (
           <tr key={ty.id}>
             <td className="px-3 py-1 num font-semibold">{ty.typeNo}</td>
@@ -336,7 +351,7 @@ function VehicleTypeCard({
             </td>
             <td className="px-3 py-1 text-slate-600">{ty.code}</td>
             <td className="px-3 py-1">
-              {canEdit ? (
+              {canEdit && ty.chargeReadingSource !== 'odometer' ? (
                 <NumberEdit
                   value={ty.batterySlots}
                   onSave={(batterySlots) => run(() => api.updateVehicleType(ty.id, { batterySlots }), t.accounts.updated)}
@@ -346,6 +361,7 @@ function VehicleTypeCard({
                 <span className="num">{ty.batterySlots}</span>
               )}
             </td>
+            <td className="px-3 py-1">{ty.chargeReadingSource === 'odometer' ? t.fleet.chargeFromOdometer : t.fleet.chargeFromBms}</td>
             <td className="px-3 py-1">
               {canEdit ? (
                 <NumberEdit

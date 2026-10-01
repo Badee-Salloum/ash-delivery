@@ -279,6 +279,8 @@ export interface VehicleTypeRecord {
    * per-bike `slot_no` is validated against this app-side (a cross-table CHECK cannot).
    */
   batterySlots: number
+  /** Which photo proves the fitted pack's charge at shift start and end. */
+  chargeReadingSource: 'bms' | 'odometer'
   active: boolean
 }
 

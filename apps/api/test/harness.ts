@@ -116,7 +116,7 @@ export async function makeHarness(
   deps.directory.governorates.set(GOV_ALEPPO, { id: GOV_ALEPPO, no: 11, nameAr: 'حلب', nameEn: 'Aleppo', active: true })
   deps.directory.vehicleTypes.set(VEHICLE_TYPE, {
     id: VEHICLE_TYPE, code: 'e_motorbike', nameAr: 'دراجة كهربائية', nameEn: 'Electric Motorbike',
-    typeNo: 1, batterySlots: 3, active: true,
+    typeNo: 1, batterySlots: 3, chargeReadingSource: 'bms', active: true,
   })
   deps.directory.branches.set(BRANCH, { id: BRANCH, code: 'DAM', nameAr: 'دمشق', nameEn: 'Damascus', governorateId: GOV_DAMASCUS, branchNo: 1, timezone: 'Asia/Damascus', lat: 33.5138, lng: 36.2765, checkinRadiusM: 150, kind: 'branch' })
   deps.directory.branches.set(OTHER_BRANCH, { id: OTHER_BRANCH, code: 'ALP', nameAr: 'حلب', nameEn: 'Aleppo', governorateId: GOV_ALEPPO, branchNo: 1, timezone: 'Asia/Damascus', lat: null, lng: null, checkinRadiusM: 150, kind: 'branch' })

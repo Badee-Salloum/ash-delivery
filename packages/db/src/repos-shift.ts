@@ -798,8 +798,8 @@ export class PgDirectoryRepo implements DirectoryRepo {
     await this.uniqueOr(
       () =>
         this.pool.query(
-          'INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no, battery_slots, active) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.batterySlots, t.active],
+          'INSERT INTO vehicle_types (id, code, name_ar, name_en, type_no, battery_slots, charge_reading_source, active) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+          [t.id, t.code, t.nameAr, t.nameEn, t.typeNo, t.batterySlots, t.chargeReadingSource, t.active],
         ),
       `vehicle type ${t.code} or number ${t.typeNo} is taken`,
     )
@@ -1022,6 +1022,7 @@ const toVehicleType = (r: Record<string, unknown>): VehicleTypeRecord => ({
   nameEn: String(r.name_en),
   typeNo: Number(r.type_no),
   batterySlots: Number(r.battery_slots),
+  chargeReadingSource: r.charge_reading_source === 'odometer' ? 'odometer' : 'bms',
   active: Boolean(r.active),
 })
 

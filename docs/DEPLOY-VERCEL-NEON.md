@@ -12,13 +12,25 @@ Team `hadis-projects-3c86ccdb`, three projects, all public (no deployment protec
 
 | Surface | URL | Live deployment / notes |
 | --- | --- | --- |
-| Admin console | https://ash-admin-eta.vercel.app | `dpl_E1NaPtgkDbs95RnuTdERNzURziwR`; 2026-09-20 coordinated 0079 release; React SPA, `/api/*` proxied to API |
-| Driver PWA | https://ash-driver.vercel.app | `dpl_F8MXHozAXEGjC24gEvvM7hePTC99`; 2026-09-20 coordinated 0079 release; installable PWA, `/api/*` proxied to API |
-| API | https://ash-api-xi.vercel.app | `dpl_FpBPpBeGugWNs977f3fmM4qN81Nx`; 2026-09-20 coordinated 0079 release; Fastify serverless function |
-| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0079` (75 migrations) + bootstrapped |
+| Admin console | https://ash-admin-eta.vercel.app | `dpl_7Rb4mE6qY66Vzy5EMLN5qe1qs2ZB`; 2026-10-01 coordinated 0085 release; React SPA, `/api/*` proxied to API |
+| Driver PWA | https://ash-driver.vercel.app | `dpl_3Lp3gzxzdFLF4ZPHVXGuBmG1abvY`; 2026-10-01 coordinated 0085 release; installable PWA, `/api/*` proxied to API |
+| API | https://ash-api-xi.vercel.app | `dpl_GPCdZENBPJVmACt8iLzsL3uYYERo`; 2026-10-01 coordinated 0085 release; Fastify serverless function |
+| Database | Neon `ep-billowing-butterfly-…` (eu-central-1, **Postgres 18**) | live at `0085` (81 migrations) + bootstrapped |
 | Evidence | Vercel Blob store `ash-evidence` (private) | linked to `ash-api` |
 
-**Current coordinated release boundary (2026-09-20):** all three public surfaces now run commit
+**Current coordinated release boundary (2026-10-01):** migration `0085_dashboard_charge_vehicle_types.sql`
+adds the odometer-charge vehicle type option. The API was paused and drained; the validated
+pre-migration backup is `Desktop/ash-backups/release-0085-20261001/pre/2026-10-01T00-37-43-089Z`
+(91 tables, 207,198 rows, 80 migrations). The post-migration backup is
+`Desktop/ash-backups/release-0085-20261001/post/2026-10-01T00-42-39-309Z`
+(91 tables, 207,199 rows, 81 migrations); only `schema_migrations` gained a row. The migration
+runner applied `0085` once and found zero pending on rerun. Postflight confirmed the new column,
+one-pack constraint, enabled battery-reading guard, and the existing type's `bms` setting. All
+three staged deployments were promoted before the API resumed. Stable API health, both SPA/API
+proxies, the driver manifest and service worker, protected-route 401s, and current asset hashes
+passed. No vehicle type record was created; its name and number are set by the administrator.
+
+**Previous coordinated release boundary (2026-09-20):** all three public surfaces ran commit
 `3916fdd7d4c78bbfadec2482b0c09db9020bbfbb`; migration `0079_asset_installment_plans.sql` is applied
 once and the ledger is at 75 migrations. The API was paused and drained for the migration, then resumed
 only after postflight and post-backup validation. Stable API/Admin/Driver smoke, both SPA proxies,

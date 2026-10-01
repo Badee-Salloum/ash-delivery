@@ -52,7 +52,7 @@ const FIELD_HINT: Record<OcrField, string> = {
    */
   odometer:
     'a photograph of a physical bike dashboard behind glass, often with glare.\n\n' +
-    'There is NO money on it. Report ONE value, in `fields` under the key "odometer".\n\n' +
+    'There is NO money on it. Report the distance in `fields.odometer` and, when a percentage is visible, the remaining charge in `fields.percent`. These are TWO independent readings from the SAME photo.\n\n' +
     'THE ODOMETER IS ALWAYS THE LAST NUMBER ON THE DISPLAY — the final one in reading order, ' +
     'lowest and last. This is a fact about this particular dashboard, not a guess to be revised: ' +
     'do NOT choose the largest number, the most central, or the one that looks most like a ' +
@@ -60,7 +60,7 @@ const FIELD_HINT: Record<OcrField, string> = {
     'temperature and then a number, it is that LAST number and none of the others.\n\n' +
     'Give the digits only, dropping any «km» or «ODO» printed beside it, and keeping leading ' +
     'zeros out («02161 km» is 2161). If the last number is genuinely unreadable through glare, ' +
-    'omit `odometer` entirely rather than offering the second-to-last.',
+    'omit `odometer` entirely rather than offering the second-to-last. The charge is the number immediately paired with a % sign or battery icon; never infer it from the battery bars. Give digits only without the % sign. If unreadable, omit `percent` independently of `odometer`. For example, a display showing «84%», a large «CH», and «ODO 00005 km» has `odometer` 5 and `percent` 84.',
   /*
    * THE KEYS ARE PINNED, and this is not stylistic.
    *

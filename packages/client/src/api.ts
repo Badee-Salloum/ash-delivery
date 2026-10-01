@@ -331,6 +331,7 @@ export interface ShiftStateView {
     floatTotal: string
     topupTotal: string
     mediaSlots: string[]
+    odometerMediaId?: string | null
     batteries: Array<{
       batteryId: string
       slotNo: number
@@ -350,6 +351,7 @@ export interface ShiftStateView {
     /** Cloud-AI wallet baseline; optional only for compatibility with an older state endpoint. */
     walletDeclaredOcr?: string | null
     mediaSlots: string[]
+    odometerMediaId?: string | null
     batteries: Array<{
       batteryId: string
       slotNo: number
@@ -1457,11 +1459,12 @@ export class ApiClient {
         typeNo: number
         /** Max packs a machine of this type may carry — the ceiling, not the count. */
         batterySlots: number
+        chargeReadingSource: 'bms' | 'odometer'
         active: boolean
       }>
     }>('/vehicle-types')
   }
-  createVehicleType(body: { code: string; nameAr: string; nameEn: string; typeNo: number; batterySlots?: number }) {
+  createVehicleType(body: { code: string; nameAr: string; nameEn: string; typeNo: number; batterySlots?: number; chargeReadingSource?: 'bms' | 'odometer' }) {
     return this.post<{ id: string }>('/vehicle-types', body)
   }
   /** Changing `typeNo` restates the printed number of every vehicle of this type. */

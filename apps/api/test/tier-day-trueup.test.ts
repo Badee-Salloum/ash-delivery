@@ -30,6 +30,7 @@ beforeEach(async () => {
     nameEn: 'Electric Car',
     typeNo: 2,
     batterySlots: 1,
+    chargeReadingSource: 'bms',
     active: true,
   })
   h.deps.directory.vehicles.set(CAR_VEHICLE, {

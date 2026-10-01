@@ -11,7 +11,7 @@ describe('durable operations OCR authority guards', () => {
     expect(shift).toContain('mediaId: attachment.mediaId')
     expect(shift).toContain('attachmentToken: attachment.attachmentToken')
     expect(shift).toContain('expectedRevision: revision')
-    expect(shift).toContain('applyLinkedScalarRead(state, response, field, attachment.attachmentToken)')
+    expect(shift).toContain("applyLinkedScalarRead(state, response, field, attachment.attachmentToken, chargeReadingSource === 'odometer')")
     expect(shift).toContain('const rawOperations = closeDraftOperations(view)')
   })
 
