@@ -15,6 +15,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.provider.Settings;
 
 import androidx.core.content.ContextCompat;
@@ -96,6 +97,8 @@ public class AshTrackerPlugin extends Plugin {
     private FusedLocationProviderClient probeFusedClient;
     private LocationManager probeLocationManager;
     private Runnable probeTimeout;
+    private boolean probeForceFresh;
+    private long probeStartedElapsedNanos;
     private boolean probeSawPoorAccuracy;
 
     /** Probe the provider before a shift confirmation. Probe coordinates never leave this method. */
@@ -143,6 +146,8 @@ public class AshTrackerPlugin extends Plugin {
             return;
         }
         probeCall = call;
+        probeForceFresh = Boolean.TRUE.equals(call.getBoolean("forceFresh", false));
+        probeStartedElapsedNanos = SystemClock.elapsedRealtimeNanos();
         probeSawPoorAccuracy = false;
         probeTimeout = () -> finishProbe(null, probeSawPoorAccuracy ? "poor_accuracy" : "no_recent_fix");
         probeHandler.postDelayed(probeTimeout, 60_000L);
@@ -156,7 +161,8 @@ public class AshTrackerPlugin extends Plugin {
                     }
                 };
                 LocationRequest request = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1_000L)
-                        .setMinUpdateIntervalMillis(1_000L).build();
+                        .setMinUpdateIntervalMillis(1_000L)
+                        .setMaxUpdateAgeMillis(probeForceFresh ? 0L : 30_000L).build();
                 probeFusedClient.requestLocationUpdates(request, probeFusedCallback, Looper.getMainLooper())
                         .addOnFailureListener(error -> {
                             stopProbeUpdates();
@@ -196,6 +202,9 @@ public class AshTrackerPlugin extends Plugin {
 
     private void checkProbeLocation(Location location) {
         if (probeCall == null || location == null) return;
+        // A retry must observe a new capture, including on the platform-provider fallback.
+        // Use monotonic time; changing the handset clock cannot make a cached fix new.
+        if (probeForceFresh && location.getElapsedRealtimeNanos() < probeStartedElapsedNanos) return;
         long age = System.currentTimeMillis() - location.getTime();
         if (age < -5_000L || age > 30_000L) return;
         if (!location.hasAccuracy() || location.getAccuracy() > 100f) {
