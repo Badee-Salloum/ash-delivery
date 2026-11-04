@@ -145,8 +145,8 @@ gradle = gradle.replace(/applicationId\s+"com\.ashdelivery\.driver(?:\.diagnosti
   `applicationId "${installedAppId}"`)
 
 // A monotonically increasing Android build code lets the server identify the native capability.
-gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 5')
-gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "4.0.1"')
+gradle = gradle.replace(/versionCode\s+\d+/, 'versionCode 6')
+gradle = gradle.replace(/versionName\s+"[^"]+"/, 'versionName "4.1.0"')
 writeFileSync(gradlePath, gradle)
 
 const stringsPath = join(main, 'res', 'values', 'strings.xml')

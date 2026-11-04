@@ -458,7 +458,7 @@ public class AshTrackerPlugin extends Plugin {
                     .put("permission", hasLocationPermission())
                     .put("permissionState", permissionLabel(getContext()))
                     .put("backgroundPermission", hasBackgroundPermission())
-                    .put("notificationPermission", Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasNotificationPermission())
+                    .put("notificationPermission", hasNotificationPermission())
                     .put("batteryOptimizationExempt", batteryOptimizationExempt())
                     .put("autostartGuidanceRequired", autostartGuidanceRequired())
                     .put("autostartAcknowledged", autostartAcknowledged())
@@ -526,9 +526,14 @@ public class AshTrackerPlugin extends Plugin {
     }
 
     static boolean notificationPermission(Context context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true;
-        return ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                == PackageManager.PERMISSION_GRANTED;
+        if (!androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            android.app.NotificationManager manager = (android.app.NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            android.app.NotificationChannel channel = manager == null ? null : manager.getNotificationChannel("ash_tracking");
+            if (channel != null && channel.getImportance() == android.app.NotificationManager.IMPORTANCE_NONE) return false;
+        }
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                || ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
     }
 
     private boolean hasBackgroundPermission() {
