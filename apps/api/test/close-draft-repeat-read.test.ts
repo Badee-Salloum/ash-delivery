@@ -1,7 +1,12 @@
 import type { LightMyRequestResponse } from 'fastify'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { CloseDraftView, OcrField, OcrReader, OcrReading, OcrResult } from '@ash/contracts'
 import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, today } from './harness.ts'
+import {readFileSync} from 'node:fs'
+const dailySummaryFixtures = JSON.parse(readFileSync(new URL('../../../test-fixtures/daily-summary.json',import.meta.url),'utf8')) as Array<{
+  name:string;photoSha256:string;fields:Record<string,string>
+}>
 
 // Thaer's shift 4f40640e read one dashboard photo twice, three seconds apart. The OCR layer served
 // the second call from its content-hash cache and charged nothing — but the close draft appended a
@@ -11,7 +16,7 @@ import { DRIVER_ID, type Harness, TINY_JPEG, VEHICLE_ID, makeHarness, today } fr
 
 type OcrRequest = Parameters<OcrReader['read']>[0]
 
-const ok = (...rows: Extract<OcrResult, { ok: true }>['rows']): OcrResult => ({
+const ok = (...rows: Extract<OcrResult, { ok: true }>['rows']): Extract<OcrResult, { ok: true }> => ({
   ok: true,
   rows,
   fields: {},
@@ -181,6 +186,146 @@ function readSlot(
 
 const image = (name: string): Buffer => Buffer.concat([TINY_JPEG, Buffer.from(`:${name}`, 'utf8')])
 
+describe('untrusted image amounts cannot crash draft materialisation', () => {
+  it('validates an old cached successful answer without charging another OCR call', async () => {
+    reader.push(ok(orderRow('125.50', 0, '08:00')))
+    const { driver, shiftId } = await openShift()
+    const bytes = image('old-cache')
+    await uploadEnd(driver, shiftId, 'payments_log', bytes, await getDraft(driver, shiftId))
+    const response = await inject('POST', driver, `/shifts/${shiftId}/ocr/payments_log`, bytes,
+      { 'content-type': 'image/jpeg' })
+    expect(response.statusCode).toBe(200)
+    const shift = (await h.deps.shifts.findById(shiftId))!
+    const cached = (await h.deps.ocrReads.findBySha(shift.branchId,
+      createHash('sha256').update(bytes).digest('hex'), 'payments_log', reader.cacheSignature('payments_log')))!
+    cached.result = ok(orderRow('not a number', 0, '08:00'))
+    const cachedResponse = await inject('POST', driver, `/shifts/${shiftId}/ocr/payments_log`, bytes,
+      { 'content-type': 'image/jpeg' })
+    expect(cachedResponse.json()).toMatchObject({ ok: false, cached: true, retryable: false })
+    const linked = await readSlot(driver, shiftId, 'payments_log', 'payments_log', await getDraft(driver, shiftId))
+    expect(linked.statusCode, linked.body).toBe(200)
+    expect(linked.json().draft.attachments.find((a: {slot: string}) => a.slot === 'payments_log').read)
+      .toMatchObject({ status: 'failed', failure: 'no_fields' })
+    expect(reader.calls).toBe(1)
+    expect((await getDraft(driver, shiftId)).operations.movements).toHaveLength(0)
+  })
+
+  it('cannot read into or mutate an approved shift', async () => {
+    const { driver, shiftId } = await openShift()
+    const draft = await uploadDashboard(driver, shiftId)
+    const shift = (await h.deps.shifts.findById(shiftId))!
+    await h.deps.shifts.update({ ...shift, state: 'approved' }, null)
+    const posted = vi.spyOn(h.deps.ledger, 'post'), changed = vi.spyOn(h.deps.shifts, 'update')
+    const response = await readSlot(driver, shiftId, 'dashboard', 'orders', draft)
+    expect(response.statusCode, response.body).toBe(409)
+    expect((await h.deps.shifts.findById(shiftId))?.state).toBe('approved')
+    expect(reader.calls).toBe(0)
+    expect(posted).not.toHaveBeenCalled()
+    expect(changed).not.toHaveBeenCalled()
+  })
+
+  it('does not accept a JSON number masquerading as exact monetary text', async () => {
+    reader.push(ok({ ...orderRow('5', 0, '08:00'), value: 5 as unknown as string }))
+    const { driver, shiftId } = await openShift()
+    const draft = await uploadDashboard(driver, shiftId)
+    const response = await readSlot(driver, shiftId, 'dashboard', 'orders', draft)
+    expect(response.statusCode, response.body).toBe(200)
+    expect((await getDraft(driver, shiftId)).operations.orders[0]).toMatchObject({
+      fee: null, included: false, reviewRequired: true,
+    })
+  })
+  it.each(['not readable', '1,234.50', '12.3.4', '1e3', '12.345', '92233720368547758.08']) (
+    'returns a failed archival read, not HTTP500 or guessed money: %s', async value => {
+      reader.push(ok(orderRow(value, 0, '08:00')))
+      const { driver, shiftId } = await openShift()
+      const before = await getDraft(driver, shiftId)
+      const posted = vi.spyOn(h.deps.ledger, 'post')
+      const shifted = vi.spyOn(h.deps.shifts, 'update')
+      const uploaded = await uploadEnd(driver, shiftId, 'payments_log', image(value), before)
+      expect(uploaded.statusCode, uploaded.body).toBe(201)
+      const response = await readSlot(driver, shiftId, 'payments_log', 'payments_log', await getDraft(driver, shiftId))
+      expect(response.statusCode, response.body).toBe(200)
+      const draft = await getDraft(driver, shiftId)
+      expect(draft.attachments.find(a => a.slot === 'payments_log')?.read)
+        .toMatchObject({ status: 'failed', failure: 'no_fields' })
+      expect(draft.operations).toEqual(before.operations)
+      expect(posted).not.toHaveBeenCalled()
+      expect(shifted).not.toHaveBeenCalled()
+      // Retrying an old answer cannot bypass the publication guard or charge automatically.
+      const again = await readSlot(driver, shiftId, 'payments_log', 'payments_log', draft)
+      expect(again.statusCode, again.body).toBe(200)
+      expect(reader.calls).toBe(1)
+    },
+  )
+
+  it('accepts an explicit positive sign exactly and keeps archival movements idempotent', async () => {
+    reader.push(ok(orderRow('+125.50', 0, '08:00'), orderRow('-5.00', 1, '08:01')))
+    const { driver, shiftId } = await openShift()
+    const before = await getDraft(driver, shiftId)
+    await uploadEnd(driver, shiftId, 'payments_log', image('signed-amounts'), before)
+    const posted = vi.spyOn(h.deps.ledger, 'post')
+    const first = await readSlot(driver, shiftId, 'payments_log', 'payments_log', await getDraft(driver, shiftId))
+    expect(first.statusCode, first.body).toBe(200)
+    const draft = await getDraft(driver, shiftId)
+    expect(draft.operations.movements.map(row => row.amount)).toEqual(['125.50', '-5.00'])
+    const again = await readSlot(driver, shiftId, 'payments_log', 'payments_log', draft)
+    expect(again.statusCode, again.body).toBe(200)
+    expect((await getDraft(driver, shiftId)).operations.movements).toHaveLength(2)
+    expect(reader.calls).toBe(1)
+    expect(posted).not.toHaveBeenCalled()
+  })
+
+  it('keeps clear archival rows and unknown observations while marking the page incomplete', async () => {
+    reader.push(ok(orderRow('+125.50', 0, '08:00'), orderRow('not readable', 1, '08:01')))
+    const { driver, shiftId } = await openShift()
+    const before = await getDraft(driver, shiftId)
+    const posted = vi.spyOn(h.deps.ledger, 'post')
+    const uploaded = await uploadEnd(driver, shiftId, 'payments_log', image('partial-archive'), before)
+    expect(uploaded.statusCode, uploaded.body).toBe(201)
+    const first = await readSlot(driver, shiftId, 'payments_log', 'payments_log', await getDraft(driver, shiftId))
+    expect(first.statusCode, first.body).toBe(200)
+    const draft = first.json().draft as CloseDraftView
+    expect(draft.operations.movements).toHaveLength(1)
+    expect(draft.operations.movements[0]).toMatchObject({ amount: '125.50', role: 'unmatched' })
+    expect(draft.attachments.find(a => a.slot === 'payments_log')?.read)
+      .toMatchObject({ status: 'failed', failure: 'no_fields', rowCount: 2 })
+    expect(first.json().rows[1]).toMatchObject({ value: null, reviewRequired: true })
+    expect(observationsFor(shiftId)).toHaveLength(2)
+    const again = await readSlot(driver, shiftId, 'payments_log', 'payments_log', await getDraft(driver, shiftId))
+    expect(again.statusCode, again.body).toBe(200)
+    expect(again.json().draft.operations.movements).toHaveLength(1)
+    expect(reader.calls).toBe(1)
+    expect(again.json().draft.revision).toBe(draft.revision)
+    expect(observationsFor(shiftId)).toHaveLength(2)
+    expect(posted).not.toHaveBeenCalled()
+  })
+
+  it.each(['unknown', '92233720368547758.08', '-92233720368547758.08']) (
+    'keeps an invalid order amount visible for review, never zero: %s', async value => {
+      reader.push(ok(orderRow(value, 0, '08:00')))
+      const { driver, shiftId } = await openShift()
+      const draft = await uploadDashboard(driver, shiftId)
+      const response = await readSlot(driver, shiftId, 'dashboard', 'orders', draft)
+      expect(response.statusCode, response.body).toBe(200)
+      expect((await getDraft(driver, shiftId)).operations.orders[0]).toMatchObject({
+        fee: null, feeOcr: null, included: false, reviewRequired: true,
+        reviewReasons: expect.arrayContaining(['missing_money']),
+      })
+      expect(observationsFor(shiftId)).toHaveLength(1)
+    },
+  )
+
+  it('never interprets a non-money odometer row as a monetary amount', async () => {
+    reader.push({ ...ok(orderRow('1,234 km', 0, '08:00')), fields: { odometer: '1234' } })
+    const { driver, shiftId } = await openShift()
+    const before = await getDraft(driver, shiftId)
+    await uploadEnd(driver, shiftId, 'odometer', image('distance-with-unit'), before)
+    const response = await readSlot(driver, shiftId, 'odometer', 'odometer', await getDraft(driver, shiftId))
+    expect(response.statusCode, response.body).toBe(200)
+    expect((await getDraft(driver, shiftId)).figures.odometerKmOcr).toBe(1234)
+  })
+})
+
 /** Every stored observation for one shift, regardless of which read wrote it. */
 const observationsFor = (shiftId: string): unknown[] =>
   [...h.deps.closeDrafts.observations.values()].filter(
@@ -297,5 +442,89 @@ describe('a close-draft attachment is read at most once', () => {
     expect(observationsFor(shiftId).length).toBeGreaterThan(5)
     expect(afterAgain.operations.orders).toHaveLength(5)
     expect(new Set(afterAgain.operations.orders.map((order) => order.clientKey)).size).toBe(5)
+  })
+})
+
+
+describe('optional daily summary evidence', () => {
+  it.each(dailySummaryFixtures)('persists the five verified fields and restores them in both views: $name', async fixture => {
+    const {driver,shiftId}=await openShift()
+    reader.push({ok:true,rows:[],fields:{...fixture.fields},raw:null})
+    const upload=await uploadEnd(driver,shiftId,'daily_summary',image(fixture.photoSha256),await getDraft(driver,shiftId))
+    expect(upload.statusCode,upload.body).toBe(201)
+    const before=structuredClone(await h.deps.shifts.findById(shiftId))
+    const journals=structuredClone(h.deps.ledger.entries)
+    const read=await readSlot(driver,shiftId,'daily_summary','daily_summary',await getDraft(driver,shiftId))
+    expect(read.statusCode,read.body).toBe(200)
+    let saved=await getDraft(driver,shiftId)
+    expect(saved.attachments.find(a=>a.slot==='daily_summary')?.read).toMatchObject({status:'complete',fields:fixture.fields})
+    const date=await inject('PATCH',driver,`/shifts/${shiftId}/close-draft`,{expectedRevision:saved.revision,figures:{dailySummaryDate:'2026-11-04'}})
+    expect(date.statusCode,date.body).toBe(200)
+    saved=await getDraft(driver,shiftId)
+    const retry=await readSlot(driver,shiftId,'daily_summary','daily_summary',saved,true)
+    expect(retry.statusCode,retry.body).toBe(200)
+    expect((await getDraft(driver,shiftId)).revision).toBe(saved.revision)
+    for(const [token,suffix] of [[driver,'/driver'],[await h.loginAs('manager'),'']] as const){
+      const ref=await inject('GET',token,`/shifts/${shiftId}/close-reference${suffix}`)
+      expect(ref.statusCode,ref.body).toBe(200)
+      expect(ref.json().summary).toMatchObject({date:'2026-11-04',read:{status:'complete',fields:fixture.fields}})
+    }
+    expect(reader.calls).toBe(1)
+    expect(saved.operations.orders).toHaveLength(0)
+    expect(await h.deps.shifts.findById(shiftId)).toEqual(before)
+    expect(h.deps.ledger.entries).toEqual(journals)
+  })
+
+  it('recovers the paid receipt after a failed save without a second provider call', async()=>{
+    const {driver,shiftId}=await openShift()
+    const fields=dailySummaryFixtures[0]!.fields
+    reader.push({ok:true,rows:[],fields:{...fields},raw:null})
+    await uploadEnd(driver,shiftId,'daily_summary',image('save-failed-summary'),await getDraft(driver,shiftId))
+    const before=await getDraft(driver,shiftId)
+    const save=vi.spyOn(h.deps.closeDrafts,'saveRead').mockRejectedValueOnce(Object.assign(new Error('fixture constraint'),{code:'23514'}))
+    const failed=await readSlot(driver,shiftId,'daily_summary','daily_summary',before)
+    expect(failed.statusCode,failed.body).toBe(503)
+    expect(failed.json().error).toBe('daily_summary_save_failed')
+    expect((await getDraft(driver,shiftId)).revision).toBe(before.revision)
+    expect(save).toHaveBeenCalledTimes(1)
+    const retry=await readSlot(driver,shiftId,'daily_summary','daily_summary',await getDraft(driver,shiftId),true)
+    expect(retry.statusCode,retry.body).toBe(200)
+    expect((await getDraft(driver,shiftId)).attachments.find(a=>a.slot==='daily_summary')?.read)
+      .toMatchObject({status:'complete',fields})
+    expect(reader.calls).toBe(1)
+  })
+
+  it('does not restore a summary into an approved shift',async()=>{
+    const {driver,shiftId}=await openShift()
+    await uploadEnd(driver,shiftId,'daily_summary',image('approved-summary'),await getDraft(driver,shiftId))
+    const draft=await getDraft(driver,shiftId),shift=(await h.deps.shifts.findById(shiftId))!
+    await h.deps.shifts.update({...shift,state:'approved'},null)
+    const posted=vi.spyOn(h.deps.ledger,'post'),changed=vi.spyOn(h.deps.shifts,'update')
+    const result=await readSlot(driver,shiftId,'daily_summary','daily_summary',draft)
+    expect(result.statusCode).toBe(409)
+    expect(reader.calls).toBe(0)
+    expect(posted).not.toHaveBeenCalled()
+    expect(changed).not.toHaveBeenCalled()
+    expect((await getDraft(driver,shiftId)).revision).toBe(draft.revision)
+  })
+  it('persists scalar readings without creating orders or changing financial figures', async () => {
+    const {driver, shiftId} = await openShift()
+    let before = structuredClone(await h.deps.shifts.findById(shiftId))
+    const journals = structuredClone(h.deps.ledger.entries)
+    reader.push({ok:true, rows:[], fields:{grossTotal:'4645.00', blueTotal:'3736.00', trips:'14', distanceKm:'103', onlineMinutes:'772'}, raw:null})
+    const upload = await uploadEnd(driver, shiftId, 'daily_summary', image('home-summary'), await getDraft(driver, shiftId))
+    expect(upload.statusCode, upload.body).toBe(201)
+    before = structuredClone(await h.deps.shifts.findById(shiftId))
+    const response = await readSlot(driver, shiftId, 'daily_summary', 'daily_summary', await getDraft(driver, shiftId))
+    expect(response.statusCode, response.body).toBe(200)
+    const saved = await getDraft(driver, shiftId)
+    expect(saved.attachments.find(x => x.slot === 'daily_summary')?.read?.fields?.grossTotal).toBe('4645.00')
+    expect(saved.operations.orders).toHaveLength(0)
+    expect(await h.deps.shifts.findById(shiftId)).toEqual(before)
+    expect(h.deps.ledger.entries).toEqual(journals)
+    const manager = await h.loginAs('manager')
+    const reference = await inject('GET', manager, `/shifts/${shiftId}/close-reference`)
+    expect(reference.statusCode, reference.body).toBe(200)
+    expect(reference.json().summary.read.fields.trips).toBe('14')
   })
 })

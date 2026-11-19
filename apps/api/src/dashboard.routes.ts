@@ -28,8 +28,10 @@ import {
   emptyProfitTotals,
   isCalendarDate,
   isDriverBlockLine,
+  isProfitCost,
   isLive,
   minor,
+  parseMinor,
   monthStartFor,
   netProfit,
   resolveFxDay,
@@ -51,6 +53,8 @@ import { ServiceError, includedOrders, todayFor } from './shifts.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { clampToGoLive, goLiveDate } from './go-live.ts'
 import { grantsFromRows } from './rbac.ts'
+import { companyReport } from './company-report.service.ts'
+import { loadCompanyReportSnapshot } from './company-report-snapshot.ts'
 
 /**
  * The minimal ops dashboard (SRS I-1, in scope per the brief's "minimal ops dashboard").
@@ -736,6 +740,36 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
    * sees the operational tiles above but not this figure — hence a SEPARATE endpoint with a
    * SEPARATE permission, rather than a field the branch dashboard hides.
    */
+  app.get('/dashboard/profit-costs', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async req => {
+    const q = z.object({ from: realCalendarDate.optional(), to: realCalendarDate.optional(),
+      kind: z.enum(['operating_cost','vehicle_cost','loss','all']).default('all'),
+      vehicleId:z.string().trim().min(1).max(64).optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().nonnegative().default(0) }).parse(req.query)
+    const today = todayFor(deps), to = q.to ?? today
+    const from = clampToGoLive(q.from ?? weekStartFor(to), await goLiveDate(deps))
+    if (from>to || to>today) throw new ServiceError(422,'invalid_date_range')
+    assertWithinRangeCap(from,to)
+    const branchId=resolveBranchId(req)
+    return deps.financialUnitOfWork.run({lockKey:`receivables:${branchId}`,actorId:req.actor!.userId,requestId:req.requestId},async tx=>{
+      const [entries,vehicles]=await Promise.all([tx.ledger.listByRange(branchId,from,to),deps.directory.listVehicles(branchId)])
+      if(q.vehicleId!==undefined&&!vehicles.some(vehicle=>vehicle.id===q.vehicleId)) throw new ServiceError(404,'vehicle_not_found')
+      const classification={vehicleIds:new Set(vehicles.map(vehicle=>vehicle.id))}
+      const rows=entries.flatMap(entry=>entry.lines.flatMap((line,index)=>{
+        const kind=classifyProfitLine(line.fundCode,classification)
+        if(!isProfitCost(kind) || (q.kind!=='all'&&kind!==q.kind)) return []
+        if(q.vehicleId!==undefined&&vehicleIdOfCostLine(line.fundCode,classification)!==q.vehicleId) return []
+        if(line.currency!=='SYP_NEW') throw new ServiceError(500,'branch_profit_currency_integrity_error')
+        return [{id:`${entry.id}:${index}`,entryId:entry.id,businessDate:entry.businessDate,postingDate:entry.postingDate,
+          eventType:entry.eventType,description:entry.reason??'',fundCode:line.fundCode,side:line.side,kind,
+          amount:serializeMoney(minor(signedCost(line.side,line.amount))),vehicleId:vehicleIdOfCostLine(line.fundCode,classification),
+          vehicleCode:vehicles.find(vehicle=>vehicle.id===vehicleIdOfCostLine(line.fundCode,classification))?.code ?? null}]
+      })).sort((a,b)=>b.businessDate.localeCompare(a.businessDate)||b.entryId-a.entryId||a.id.localeCompare(b.id))
+      const total=rows.reduce((sum,row)=>sum+parseMinor(row.amount),0n)
+      return {from,to,branchId,currency:'SYP_NEW',kind:q.kind,basis:'immutable_ledger_net',includesReversals:true,
+        total:serializeMoney(minor(total)),count:rows.length,limit:q.limit,offset:q.offset,rows:rows.slice(q.offset,q.offset+q.limit)}
+    })
+  })
+
   app.get('/dashboard/profit', { config: { permission: 'profit.view_total', subject: () => ({}) } }, async (req) => {
     const q = z.object({ from: realCalendarDate.optional(), to: realCalendarDate.optional() }).parse(req.query)
     const today = todayFor(deps)
@@ -763,12 +797,15 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
      * `baseDriverShare` for every shift the range touches, and the legacy share lines otherwise.
      */
     const companyBranch = await deps.directory.companyBranch()
-    const [range, vehicles, companyCommands, companyDebts] = await Promise.all([
+    const [range, vehicles, companyCurrent] = await Promise.all([
       deps.ledgerRange.readRange(branchId, from, to),
       // Every vehicle of the branch, retired ones included: a stopped bike's old costs are costs.
       deps.directory.listVehicles(branchId),
-      companyBranch ? deps.companyLedger.listCommands(companyBranch.id, { from, to }) : Promise.resolve([]),
-      companyBranch ? deps.companyFinance.listDebts(companyBranch.id) : Promise.resolve([]),
+      companyBranch ? deps.financialUnitOfWork.run({ mode: 'read_snapshot', lockKey: `receivables:${companyBranch.id}`,
+        actorId: req.actor!.userId, requestId: req.requestId }, async tx => companyReport(
+          await loadCompanyReportSnapshot(tx, companyBranch.id, todayFor(deps)),
+          { from, to, view: 'current_corrected', dateBasis: 'occurrence', generatedAtMs: deps.clock.nowMs() },
+        )) : null,
     ])
     const classification = { vehicleIds: new Set(vehicles.map((vehicle) => vehicle.id)) }
 
@@ -835,41 +872,16 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       }
       companyPerDay.set(businessDate, day)
     }
-    for (const command of companyCommands) {
-      if (command.kind === 'income' || command.kind === 'expense') {
-        addCompanyProfit(
-          command.businessDate,
-          command.kind,
-          asSyp(command.amount, command.currency, command.sypMinorPerUsd),
-        )
-      } else if (command.kind === 'reversal' && (command.targetKind === 'income' || command.targetKind === 'expense')) {
-        const target = await deps.companyLedger.findCommand(command.targetId)
-        if (!target || (target.kind !== 'income' && target.kind !== 'expense')) {
-          throw new ServiceError(500, 'company_command_integrity_error')
-        }
-        addCompanyProfit(
-          command.businessDate,
-          target.kind === 'income' ? 'expense' : 'income',
-          asSyp(target.amount, target.currency, target.sypMinorPerUsd),
-        )
-      }
-    }
-    for (const debt of companyDebts) {
-      if (debt.businessDate >= from && debt.businessDate <= to && (debt.origin === 'expense' || debt.origin === 'income')) {
-        addCompanyProfit(
-          debt.businessDate,
-          debt.origin,
-          asSyp(debt.principal, debt.currency, debt.sypMinorPerUsd),
-        )
-      }
-      for (const event of await deps.companyFinance.listDebtEvents(debt.id)) {
-        if (event.kind !== 'writeoff' || event.businessDate < from || event.businessDate > to) continue
-        addCompanyProfit(
-          event.businessDate,
-          debt.direction === 'payable' ? 'income' : 'expense',
-          asSyp(event.amount, debt.currency, event.sypMinorPerUsd),
-        )
-      }
+    // The same current-event projection as finance: deletions vanish even from their old day;
+    // correction legs are not new income. Debt facts remain P&L only if their ledger says so.
+    for (const row of companyCurrent?.rows ?? []) for (const line of row.lines) {
+      // Outside-owner evidence has its own panel and is not automatically a company profit cost.
+      if (row.source === 'owner_outside') continue
+      const kind = line.fundCode.startsWith('company_income:') ? 'income' :
+        line.fundCode.startsWith('company_expense:') ? 'expense' : null
+      if (!kind) continue
+      const signed = parseMinor(line.netAmount) * ((kind === 'income' ? line.side === 'C' : line.side === 'D') ? 1n : -1n)
+      addCompanyProfit(row.occurredOn, kind, asSyp(signed, line.currency, row.sypMinorPerUsd === null ? null : BigInt(row.sypMinorPerUsd)))
     }
     const branchNet = netProfit(totals)
     const companyNet = companyIncome - companyExpenseTotal
@@ -878,6 +890,10 @@ export function registerDashboardRoutes(app: FastifyInstance, deps: Deps): void 
       from,
       to,
       weekStart,
+      scope: { branchId, companyBranchId:companyBranch?.id??null },
+      basis: 'current_net_before_depreciation',
+      companyBasis: 'current_corrected_occurrence',
+      currency: 'SYP_NEW',
       companyShareSyp: serializeMoney(minor(totals.company)),
       driverShareSyp: serializeMoney(minor(driverShare)),
       yalagoShareSyp: serializeMoney(minor(totals.yalago)),

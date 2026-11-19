@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { COMPANY_BRANCH, type Harness, makeHarness, sypStr } from './harness.ts'
+import { buildApp } from '../src/app.ts'
 
 let h: Harness
 let gm: string
@@ -42,6 +43,41 @@ beforeEach(async () => {
 afterEach(async () => h.app.close())
 
 describe('historical company-fund movements', () => {
+  it('can pause new historical journals while still returning exact prior receipts', async () => {
+    const payload = historical()
+    const original = await post(payload)
+    expect(original.statusCode).toBe(201)
+    const gated = await buildApp({ deps: h.deps, companyHistoricalPostingEnabled: false, companyHistoricalCreationEnabled: true, logger: false })
+    try {
+      const headers = { cookie: h.cookie(gm) }
+      const before = await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')
+      const state = await gated.inject({ method: 'GET', url: '/company/historical-movements/preflight', headers })
+      expect(state.json().postingEnabled).toBe(false)
+      const blocked = await gated.inject({ method: 'POST', url: '/company/historical-movements', headers,
+        payload: historical({ externalReference: 'NEW-WHILE-RECONCILING' }) })
+      expect(blocked.statusCode).toBe(409)
+      expect(blocked.json().error).toBe('historical_posting_requires_reconciliation')
+      expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(before)
+      const replay = await gated.inject({ method: 'POST', url: '/company/historical-movements', headers, payload })
+      expect(replay.statusCode).toBe(200)
+      expect(replay.json().command.id).toBe(original.json().command.id)
+      const changed = await gated.inject({ method: 'POST', url: '/company/historical-movements', headers,
+        payload: { ...payload, amount: '999.00' } })
+      expect(changed.statusCode).toBe(409)
+      expect(changed.json().error).toBe('idempotency_key_conflict')
+      const ordinaryBackdate = await gated.inject({ method: 'POST', url: '/company/deposits', headers,
+        payload: { idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: '15.00', occurredOn: '2025-01-10', reason: 'not a permitted backfill shortcut' } })
+      // The retired intake flag no longer blocks an explicit ordinary financial-day addition.
+      expect(ordinaryBackdate.statusCode).toBe(201)
+      expect(ordinaryBackdate.json().command.businessDate).toBe('2025-01-10')
+      expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(before + 1500n)
+      const reverseExisting = await gated.inject({ method: 'POST', url: '/company/historical-movements', headers,
+        payload: { idempotencyKey: crypto.randomUUID(), type: 'reversal', targetId: original.json().command.id,
+          occurredOn: '2026-07-21', reason: 'Reverse a known posted fact, not introduce a prior-period cost' } })
+      expect(reverseExisting.statusCode, reverseExisting.body).toBe(201)
+      expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(1500n)
+    } finally { await gated.close() }
+  })
   it('is GM/system-admin only, keeps the actual date, and freezes a supplied USD rate', async () => {
     const manager = await h.loginAs('manager')
     const denied = await post(historical(), manager)
@@ -52,7 +88,7 @@ describe('historical company-fund movements', () => {
 
     const preflight = await get('/company/historical-movements/preflight')
     expect(preflight.statusCode).toBe(200)
-    expect(preflight.json()).toEqual({ pockets: { SYP_NEW: '0.00', USD: '0.00' }, canStart: true })
+    expect(preflight.json()).toEqual({ pockets: { SYP_NEW: '0.00', USD: '0.00' }, canStart: true, postingEnabled: true, creationEnabled: true })
 
     const created = await post(historical({
       type: 'deposit', currency: 'USD', amount: '10.00', historicalRate: '170.00', occurredOn: '2025-02-15',

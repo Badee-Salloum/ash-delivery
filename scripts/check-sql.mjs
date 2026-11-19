@@ -55,6 +55,11 @@ const MUST_AUDIT = [
   // Purchase price, financing link and schedule are financial facts; the deterministic schedule
   // rows themselves are immutable derived data and are exempted below.
   'fixed_assets', 'asset_installment_plans', 'asset_installment_occurrences',
+  'company_existing_assets', 'company_existing_asset_events', 'company_existing_asset_evidence',
+  'company_existing_asset_payment_events',
+  'company_movement_metadata', 'company_historical_intake_sessions', 'company_movement_correction_versions',
+  'company_historical_drafts', 'company_historical_draft_revisions',
+  'company_restoration_proposals', 'company_restoration_proposal_legs', 'company_restoration_review_revisions', 'company_restoration_review_legs',
   'depreciation_transfers', 'depreciation_releases',
   // Fixed expenses are promises plus explicit human paid/skipped decisions. Both influence what
   // managers expect to leave the box, and a paid occurrence links to an ordinary audited expense.
@@ -68,7 +73,12 @@ const MUST_AUDIT = [
   // moved a branch's company_box into the company pocket and each mirror of a branch company_box
   // movement after it. Who moved which dollars, at which frozen rate, is exactly an audit question.
   'company_moves', 'company_expenses', 'company_incomes', 'company_fx_exchanges', 'company_reversals',
-  'company_ledger_cutovers', 'company_restoration_mirrors',
+  'company_ledger_cutovers', 'company_restoration_mirrors', 'company_historical_transfers',
+  'company_historical_import_batches', 'company_historical_import_receipts',
+  'company_historical_source_corrections',
+  'company_historical_restoration_settlements', 'company_historical_restoration_settlement_groups',
+  'company_historical_restoration_settlement_sources', 'company_historical_restoration_settlement_legs',
+  'company_historical_branch_links',
 ]
 
 /**
@@ -84,6 +94,7 @@ const AUDIT_EXEMPT = {
   income_categories: 'reference data',
   checkin_windows: 'a rota of expected times, not money; every change is a settings-shaped edit and the checkins it judges are audited',
   sessions: 'high churn; login/logout is covered by login_attempts',
+  operational_request_batches: 'sanitized aggregate HTTP diagnostics only; 30-day retention, no financial or personal payloads',
   login_attempts: 'already an append-only audit record in its own right',
   driver_registration_attempts:
     'append-only, password-free rate-limit facts containing only a one-way address hash and timestamp; expired rows are retention-deleted',
@@ -123,6 +134,7 @@ const AUDIT_EXEMPT = {
   gps_pings: 'high-volume append-only telemetry (SRS K); auditing every ping would dwarf the audit log',
   gps_tracker_health: 'high-frequency coordinate-free device heartbeat; status transitions are recorded separately',
   gps_tracker_health_events: 'append-only coordinate-free diagnostic events; retention is 30 days',
+  shift_permission_events: 'coordinate-free permission incident/recovery history; automatic device diagnostics, with recipient notifications instead of duplicate generic audit snapshots',
   gps_tracking_windows: 'server-maintained GPS capture intervals; shift state transitions are audited',
   battery_swaps: 'append-only event log; its substance — the pack fitment change on batteries and the swap_out/swap_in readings — is already audited, and the route appends an explicit audit row',
   audit_log: 'the audit log itself',

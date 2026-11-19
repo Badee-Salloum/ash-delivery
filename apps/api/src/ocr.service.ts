@@ -1,4 +1,6 @@
 import type { Deps, OcrField, OcrReading, OcrReadRecord, OcrResult } from '@ash/contracts'
+import { moneySchema, serializeMoney } from '@ash/contracts'
+import { minor } from '@ash/domain'
 import { ServiceError } from './shifts.service.ts'
 import { MAX_UPLOAD_BYTES, sha256Of, sniffImageType } from './media.service.ts'
 
@@ -10,7 +12,7 @@ import { MAX_UPLOAD_BYTES, sha256Of, sniffImageType } from './media.service.ts'
  * reader never serves an answer produced by an older one.
  */
 
-export const OCR_FIELDS_TUPLE = ['orders', 'payments_log', 'wallet', 'odometer', 'bms'] as const
+export const OCR_FIELDS_TUPLE = ['orders', 'payments_log', 'wallet', 'odometer', 'bms', 'daily_summary'] as const
 export const OCR_FIELDS: readonly OcrField[] = OCR_FIELDS_TUPLE
 
 /** Below the function ceiling, but above every configured logical-read/pass timeout. */
@@ -247,6 +249,61 @@ function delay(ms: number): Promise<void> {
 /** Field-level publication invariants independent of any one OCR adapter implementation. */
 function safeFieldResult(field: OcrField, result: OcrResult): OcrResult {
   if (!result.ok) return result
+  if (field === 'daily_summary') {
+    const keys = ['grossTotal','blueTotal','trips','distanceKm','onlineMinutes']
+    const scalarFields = result.fields
+    const fields = Object.fromEntries(keys.map(key => [key,
+      typeof scalarFields[key] === 'string' && scalarFields[key]!.length <= 64 ? scalarFields[key] : null,
+    ]))
+    return Object.values(fields).some(value => value !== null)
+      ? {...result, rows: [], fields}
+      : {ok:false, reason:'no_fields', detail:'daily summary contained no supported scalar fields'}
+  }
+  if (field === 'orders' || field === 'payments_log' || field === 'wallet') {
+    result = {
+      ...result,
+      rows: result.rows.map(row => {
+        // OCR's signed decimal vocabulary permits an explicit plus; the money wire does not.
+        // Removing that sign/outer whitespace is exact, unlike guessing comma/dot grouping.
+        const text = typeof row.value === 'string' ? row.value.trim() : null
+        const value = text !== null && /^\+\d+(?:\.\d{1,2})?$/.test(text) ? text.slice(1) : text
+        return { ...row, value }
+      }),
+    }
+  }
+  // Provider output AND old cache entries cross this boundary. Never pass a formatted/unknown
+  // amount to parseMinor while materialising the draft, nor silently drop one archival row and
+  // mark the rest of its page complete. Keep the transcript for diagnosis; do not guess separators.
+  if (field === 'payments_log') {
+    const rows = result.rows.map(row => !row.cancelled && !moneySchema.safeParse(row.value).success
+      ? { ...row, value: null, reviewRequired: true } : row)
+    if (!rows.some(row => !row.cancelled && row.value !== null)) {
+      return {
+        ok: false, reason: 'no_fields',
+        detail: 'payments_log publication guard: no readable signed money rows',
+        raw: result.raw,
+        ...(result.attemptCount === undefined ? {} : { attemptCount: result.attemptCount }),
+      }
+    }
+    // Archive clear rows, but keep every refusal as an observation. The linked draft marks this
+    // page failed/partial so a successful subset can never masquerade as a fully read page.
+    result = { ...result, rows, retryable: rows.some(row => row.reviewRequired === true) || result.retryable === true }
+  }
+  if (field === 'orders') {
+    result = {
+      ...result,
+      rows: result.rows.map(row => {
+        if (row.value === null) return row
+        const parsed = moneySchema.safeParse(row.value)
+        // Negative orders become positive deductions. Even MIN_BIGINT must have a storable
+        // positive magnitude before it can be offered as a deduction.
+        const storable = parsed.success && moneySchema.safeParse(
+          serializeMoney(parsed.data < 0n ? minor(-parsed.data) : parsed.data),
+        ).success
+        return storable ? row : { ...row, value: null, reviewRequired: true }
+      }),
+    }
+  }
   // An orders read cannot be "complete" solely because a provider returned unrelated scalar
   // fields. That green/zero state tells the driver the page was understood while publishing no
   // accounting row at all.
@@ -255,17 +312,20 @@ function safeFieldResult(field: OcrField, result: OcrResult): OcrResult {
       ok: false,
       reason: 'no_fields',
       detail: 'orders publication guard: successful result contained 0 rows',
+      raw: result.raw,
       ...(result.attemptCount === undefined ? {} : { attemptCount: result.attemptCount }),
     }
   }
   // A wallet screen has exactly one live balance; never let a status-bar number win by position.
   if (field === 'wallet' && (
-    result.rows.length !== 1 || result.rows[0]?.cancelled || result.rows[0]?.value === null
+    result.rows.length !== 1 || result.rows[0]?.cancelled ||
+    !moneySchema.safeParse(result.rows[0]?.value).success
   )) {
     return {
       ok: false,
       reason: 'no_fields',
       detail: `wallet publication guard: expected 1 live balance, received ${result.rows.length}`,
+      raw: result.raw,
       ...(result.attemptCount === undefined ? {} : { attemptCount: result.attemptCount }),
     }
   }
@@ -277,7 +337,10 @@ function cachedOutput(input: ReadInput, result: OcrResult, used: number): ReadOu
   return {
     result: safeResult,
     cached: true,
-    retryable: canRetry(safeResult),
+    // An old cached "success" rejected by this newer publication guard is not retryable at
+    // the repository (unless the original reader explicitly allowed it). Do not promise a paid
+    // retry which would just return the same cache entry forever; retake/manual review still work.
+    retryable: canRetry(safeResult) && (!result.ok || result.retryable === true),
     reads: { used, max: input.maxReadsPerShift },
   }
 }

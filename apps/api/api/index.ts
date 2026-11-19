@@ -32,17 +32,22 @@ import { buildDeps } from '../src/deps.ts'
  */
 
 let appPromise: Promise<FastifyInstance> | null = null
+let settleDiagnostics: (() => Promise<void>) | null = null
 
 async function getApp(): Promise<FastifyInstance> {
   appPromise ??= (async () => {
     const config = loadConfig()
-    const { deps } = await buildDeps(config)
+    const { deps, operationalDiagnostics } = await buildDeps(config)
+    settleDiagnostics = operationalDiagnostics ? () => operationalDiagnostics.settled() : null
     const app = await buildApp({
       deps,
+      ...(operationalDiagnostics ? { operationalDiagnostics } : {}),
       logger: true,
       splitGate: config.BR1_SPLIT_GATE,
       maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
       driverSelfRegistrationEnabled: config.DRIVER_SELF_REGISTRATION_ENABLED,
+      companyRestorationReviewEnabled: config.COMPANY_RESTORATION_REVIEW_ENABLED,
+      companyHistoricalPostingEnabled: config.COMPANY_HISTORICAL_POSTING_ENABLED,
     })
     await app.ready()
     return app
@@ -85,6 +90,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     headers: headers as never,
     payload: payload as never,
   })
+  // inject resolves before async onResponse hooks finish. Keep an already-started diagnostic
+  // write alive until it settles; do not flush a new batch or delay ordinary healthy requests.
+  await settleDiagnostics?.()
 
   res.statusCode = response.statusCode
   for (const [key, value] of Object.entries(response.headers)) {

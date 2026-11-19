@@ -1,0 +1,86 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BRANCH, COMPANY_BRANCH, makeHarness, type Harness } from './harness.ts'
+let h: Harness, gm: string, categoryId: string
+const key = () => crypto.randomUUID()
+const post = (url: string, payload: Record<string, unknown>, token = gm) => h.app.inject({ method: 'POST', url, headers: { cookie: h.cookie(token) }, payload })
+const get = (url: string) => h.app.inject({ method: 'GET', url, headers: { cookie: h.cookie(gm) } })
+const transfer = (extra: Record<string, unknown> = {}) => ({ idempotencyKey: key(), direction: 'to_custody', currency: 'SYP_NEW', amount: '200.00', occurredOn: '2026-07-21', reason: 'actual handover', ...extra })
+beforeEach(async () => {
+  h = await makeHarness(); gm = await h.loginAs('gm'); categoryId = key()
+  await h.deps.expenses.createCategory({ id: categoryId, code: `CUSTODY-${categoryId}`, nameAr: 'مصروف', active: true })
+  expect((await post('/company/deposits', { idempotencyKey: key(), amount: '1000.00', reason: 'company funds' })).statusCode).toBe(201)
+})
+afterEach(async () => { await h.app.close() })
+describe('company money held in owner custody', () => {
+  it('rejects old spending and returns funded only by a later custody handover',async()=>{
+    await post('/company/custody/transfers',transfer())
+    const before=structuredClone(h.deps.ledger.entries)
+    const oldExpense=await post('/company/expenses',{idempotencyKey:key(),currency:'SYP_NEW',amount:'25.00',categoryId,paidFrom:'owner_custody',occurredOn:'2026-07-01',description:'Cannot borrow from future custody'})
+    expect(oldExpense.statusCode,oldExpense.body).toBe(422)
+    expect(oldExpense.json().error).toBe('company_custody_historical_insufficient')
+    const oldReturn=await post('/company/custody/transfers',transfer({direction:'to_company',occurredOn:'2026-07-01',amount:'25.00'}))
+    expect(oldReturn.statusCode,oldReturn.body).toBe(422)
+    expect(h.deps.ledger.entries).toEqual(before)
+  })
+  it('pays purchases, financed installments and supplier debt from custody without owner equity or branch cash', async () => {
+    await post('/company/custody/transfers', transfer({amount:'500.00'}))
+    const branchBefore = structuredClone(h.deps.ledger.entries.filter(row=>row.branchId===BRANCH))
+    const purchase = await post('/company/assets',{idempotencyKey:key(),kind:'equipment',name:'Custody charger',currency:'SYP_NEW',
+      price:'120.00',paidNow:'70.00',paidFrom:'owner_custody',purchasedOn:'2026-07-21',description:'Purchase paid with company custody',financedPartyName:'Supplier',
+      installmentPlan:{idempotencyKey:key(),amount:'50.00',paidFrom:'owner_custody',scheduleKind:'monthly_first',weekday:null,intervalDays:null,startsOn:'2026-07-21'}})
+    expect(purchase.statusCode,purchase.body).toBe(201)
+    const asset=purchase.json().asset
+    const debt=await post('/company/debts',{idempotencyKey:key(),direction:'payable',partyName:'Other supplier',currency:'SYP_NEW',principal:'100.00',openedOn:'2026-07-21',origin:'opening'})
+    expect(debt.statusCode,debt.body).toBe(201)
+    const pay={idempotencyKey:key(),amount:'25.00',source:'owner_custody',reason:'Pay supplier from company funds in custody'}
+    expect((await post(`/company/debts/${debt.json().debt.id}/payments`,pay)).statusCode).toBe(201)
+    expect((await post(`/company/debts/${debt.json().debt.id}/payments`,pay)).statusCode).toBe(200)
+    expect((await get('/company/custody')).json().balances.SYP_NEW).toBe('405.00')
+    const receipt=await post(`/company/debts/${asset.debtId}/payments`,{idempotencyKey:key(),amount:'50.00',source:'owner_custody',reason:'Pay remaining motor debt'})
+    expect(receipt.statusCode,receipt.body).toBe(201)
+    expect((await get('/company/custody')).json().balances.SYP_NEW).toBe('355.00')
+    const owners=(await get('/company/owner-payments')).json()
+    expect(owners.totals.SYP_NEW).toBe('0.00')
+    expect(h.deps.ledger.entries.filter(row=>row.branchId===BRANCH)).toEqual(branchBefore)
+    const before=structuredClone(h.deps.ledger.entries)
+    const failed=await post('/company/assets',{idempotencyKey:key(),kind:'equipment',name:'Too expensive',currency:'SYP_NEW',price:'356.00',paidNow:'356.00',paidFrom:'owner_custody',purchasedOn:'2026-07-21',description:'Must refuse overdraw'})
+    expect(failed.statusCode,failed.body).toBe(422)
+    expect(h.deps.ledger.entries).toEqual(before)
+  })
+  it('transfers and returns exactly once with no profit, owner funding or branch effect', async () => {
+    const before = h.deps.ledger.entries.filter(e => e.branchId === BRANCH), body = transfer()
+    const results = await Promise.all([post('/company/custody/transfers', body), post('/company/custody/transfers', body)])
+    expect(results.map(r => r.statusCode).sort()).toEqual([200, 201])
+    expect((await get('/company/custody')).json().balances.SYP_NEW).toBe('200.00')
+    const overview = (await get('/company/overview')).json()
+    expect(overview.pockets.SYP_NEW).toBe('800.00')
+    expect(overview.companyCashIncludingCustody.SYP_NEW).toBe('1000.00')
+    expect(overview.period.SYP_NEW).toMatchObject({ income: '0.00', expense: '0.00', deposits: '1000.00', withdrawals: '0.00' })
+    expect((await post('/company/custody/transfers', transfer({ direction: 'to_company', amount: '50.00' }))).statusCode).toBe(201)
+    expect((await get('/company/custody')).json().balances.SYP_NEW).toBe('150.00')
+    expect(h.deps.ledger.entries.filter(e => e.branchId === BRANCH)).toEqual(before)
+    expect((await post('/company/custody/transfers', { ...body, amount: '201.00' })).statusCode).toBe(409)
+    expect((await post('/company/deposits', { idempotencyKey: body.idempotencyKey, amount: '200.00', reason: body.reason })).statusCode).toBe(409)
+  })
+  it('spends company custody without counting it as owner personal payment', async () => {
+    expect((await post('/company/custody/transfers', transfer())).statusCode).toBe(201)
+    const result = await post('/company/expenses', { idempotencyKey: key(), currency: 'SYP_NEW', amount: '75.00',
+      categoryId, paidFrom: 'owner_custody', description: 'paid from company custody' })
+    expect(result.statusCode, result.body).toBe(201)
+    expect((await get('/company/custody')).json().balances.SYP_NEW).toBe('125.00')
+    const overview = (await get('/company/overview')).json()
+    expect(overview.pockets.SYP_NEW).toBe('800.00')
+    expect(overview.period.SYP_NEW).toMatchObject({ companyFundedExpense: '75.00', ownerOutsideExpense: '0.00' })
+    const report = (await get('/company/reports?from=2026-07-21&to=2026-07-21')).json()
+    expect(report.custodyBalances.SYP_NEW).toEqual({ opening: '0.00', closing: '125.00' })
+    expect(report.rows.filter((row: { kind: string; source: string }) => row.kind === 'company_custody_transfer')[0].source).toBe('owner_custody')
+  })
+  it('rejects excess return/spending, nonpositive amounts and branch-manager access', async () => {
+    expect((await post('/company/custody/transfers', transfer({ direction: 'to_company' }))).json().error).toBe('company_custody_insufficient')
+    expect((await post('/company/expenses', { idempotencyKey: key(), currency: 'SYP_NEW', amount: '1.00', categoryId,
+      paidFrom: 'owner_custody', description: 'no custody available' })).json().error).toBe('company_custody_insufficient')
+    expect((await post('/company/custody/transfers', transfer({ amount: '-1.00' }))).statusCode).toBe(400)
+    expect((await post('/company/custody/transfers', transfer(), await h.loginAs('manager'))).statusCode).toBe(403)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_custody:SYP_NEW')).toBe(0n)
+  })
+})

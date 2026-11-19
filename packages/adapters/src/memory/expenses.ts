@@ -1,6 +1,8 @@
 import type {
   ExpenseCategoryRecord,
   ExpenseRecord,
+  ExpenseReadFilter,
+  ExpenseReadResult,
   ExpenseRepo,
   RecurringExpenseOccurrenceRecord,
   RecurringExpenseRepo,
@@ -13,8 +15,9 @@ export class MemoryExpenseRepo implements ExpenseRepo {
   readonly categories = new Map<string, ExpenseCategoryRecord>()
   readonly rows = new Map<string, ExpenseRecord>()
 
-  async listCategories(): Promise<ExpenseCategoryRecord[]> {
-    return [...this.categories.values()].filter((c) => c.active)
+  async listCategories(includeInactive = false): Promise<ExpenseCategoryRecord[]> {
+    return [...this.categories.values()].filter((c) => includeInactive || c.active)
+      .sort((a, b) => a.code.localeCompare(b.code)).map((c) => ({ ...c }))
   }
   async createCategory(category: ExpenseCategoryRecord): Promise<void> {
     for (const c of this.categories.values()) {
@@ -40,6 +43,31 @@ export class MemoryExpenseRepo implements ExpenseRepo {
   restoreRows(snapshot: Map<string, ExpenseRecord>): void {
     this.rows.clear()
     for (const [id, row] of snapshot) this.rows.set(id, structuredClone(row))
+  }
+  async search(branchId: string, filter: ExpenseReadFilter, page?: { limit: number; offset: number }): Promise<ExpenseReadResult> {
+    const branchRows = [...this.rows.values()].filter((row) => row.branchId === branchId)
+    const query = filter.query?.toLocaleLowerCase()
+    const rows = branchRows.filter((row) =>
+      (filter.from === undefined || row.businessDate >= filter.from) && row.businessDate <= filter.to &&
+      (filter.categoryId === undefined || row.categoryId === filter.categoryId) &&
+      (filter.costCenterKind === undefined || (filter.costCenterKind === 'operating'
+        ? row.costCenterKind !== 'vehicle' : row.costCenterKind === filter.costCenterKind)) &&
+      (filter.vehicleId === undefined || row.vehicleId === filter.vehicleId) &&
+      (filter.channel === undefined || row.channel === filter.channel) &&
+      (query === undefined || row.description.toLocaleLowerCase().includes(query) || row.id.toLocaleLowerCase().includes(query) || String(row.journalEntryId ?? '').includes(query)) &&
+      (filter.receipt === undefined || (filter.receipt === 'with') === (row.receiptMediaId !== null)) &&
+      (filter.minAmount === undefined || row.amount >= filter.minAmount) &&
+      (filter.maxAmount === undefined || row.amount <= filter.maxAmount),
+    // Memory records have no database created_at; the immutable posting sequence breaks day ties.
+    ).sort((a, b) => b.businessDate.localeCompare(a.businessDate) ||
+      (b.journalEntryId ?? 0) - (a.journalEntryId ?? 0) || b.id.localeCompare(a.id))
+    const earliestBusinessDate = branchRows.reduce<string | null>((first, row) => first === null || row.businessDate < first ? row.businessDate : first, null)
+    return {
+      expenses: (page ? rows.slice(page.offset, page.offset + page.limit) : rows).map((row) => ({ ...row })),
+      count: rows.length,
+      total: minor(rows.reduce((sum, row) => sum + row.amount, 0n)),
+      earliestBusinessDate,
+    }
   }
   async listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {
     return [...this.rows.values()]

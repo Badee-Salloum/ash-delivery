@@ -12,6 +12,8 @@ export * from './fleet.ts'
 export * from './reading-checks.ts'
 export * from './numerals.ts'
 export * from './client-uuid.ts'
+export * from './login-error.ts'
+export type { OwnerWithdrawal, OwnerWithdrawalsView } from '@ash/contracts'
 
 /** Pluralization travels with the catalogues, but app code imports it from the root. */
 export { plural, pluralCategory, type PluralForms } from './i18n/index.ts'
@@ -165,3 +167,4 @@ export function formatBusinessDateRange(
  * depend on `@ash/contracts`, and this is the package it does depend on.
  */
 export { MAX_OCR_SAMPLE_CHARS } from '@ash/contracts'
+export { compareDailySummary, suggestDailySummaryDate } from './daily-summary.ts'

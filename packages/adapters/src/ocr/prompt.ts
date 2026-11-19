@@ -25,15 +25,26 @@ import type { OcrField } from '@ash/contracts'
 
 /** What each screen is, in the model's own terms. A reader told what it is looking at reads better. */
 const FIELD_HINT: Record<OcrField, string> = {
+  daily_summary:
+    'the delivery app HOME SCREEN with Today\'s total / إجمالي اليوم. It is partial reference evidence. ' +
+    'Return rows: []. In fields use EXACT keys: blueTotal (large blue earnings), grossTotal (with fees / شاملة الرسوم), ' +
+    'trips (integer count), distanceKm (trip distance), onlineMinutes (hours*60+minutes of online time). ' +
+    'Copy money as decimal digit strings without currency, preserving every digit. Never derive grossTotal from blueTotal. ' +
+    'Digits may be Arabic, Persian or Western. Omit any unreadable or absent field independently. ' +
+    'Do not treat the phone clock as online duration, or infer a date from it. Ignore the map, addresses and coordinates. ' +
+    'If this is not a home summary screen return no fields. The online duration may be labelled 12س 52 دقيقة or 7h 17min. ' +
+    'These summary metrics belong in fields even when they represent money.',
   orders:
     'a RECENT ORDERS list. Each card is one delivery: a signed fee beside "SYP", a time, and one or two addresses. A negative fee is a cash deduction and its minus sign must be preserved.',
   payments_log:
-    'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer.',
+    'a PAYMENTS LOG («سجل المدفوعات»). Every row is SIGNED — "+" is money arriving, "−" money leaving — and the sign is part of the answer. ' +
+    'Transcribe each visible row independently in screen order. A clipped or unreadable amount has value null; keep that row and continue reading the other clear rows. ' +
+    'Do not infer a missing sign from color, description, nearby rows or a balance. Preserve every printed digit and sign; do not replace an unclear amount with zero.',
   wallet:
-    'a Yallago WALLET BALANCE screen. Read the ONE large white balance near the top of the orange wallet card; ' +
+    'a Yallago WALLET BALANCE screen. Read the ONE large balance on the wallet card in light or dark mode; ' +
     'ignore the phone status bar, dates, buttons, payment-log rows and promotional numbers.\n\n' +
-    'This screen uses Arabic-Indic digits. Inspect EACH glyph rather than guessing a plausible balance. ' +
-    'In particular, do not confuse the leading ٢ (two) with ٣ (three): ٣ has two adjacent upper teeth/curves, ' +
+    'Digits may be Western, Arabic-Indic or Persian. Inspect EACH glyph rather than guessing a plausible balance. ' +
+    'When Arabic-Indic glyphs are present, do not confuse ٢ (two) with ٣ (three): ٣ has two adjacent upper teeth/curves, ' +
     'while ٢ has one leading hook/stroke. A live incident mistook a leading ٢ for ٣. Compare the ' +
     'first glyph explicitly before answering, without assuming either one. The currency suffix «SYP» is not ' +
     'part of the number.',
@@ -89,6 +100,15 @@ const FIELD_HINT: Record<OcrField, string> = {
 }
 
 export function readPrompt(field: OcrField): string {
+  if (field === 'daily_summary') {
+    return `Read only the home-screen daily summary card. ${FIELD_HINT.daily_summary}
+Return an empty rows array. Return fields entries as {label, value} using only these keys:
+blueTotal, grossTotal, trips, distanceKm, onlineMinutes. Values are decimal ASCII strings or null.
+Keep blue earnings and the smaller total including fees independent. Never calculate one from the other.
+Do not infer absent or cropped digits. For a missing field use null or omit its entry.
+Do not report any phone-clock value, map label, address, coordinate, or date.
+Screenshots can be Arabic, Persian or English, light or dark. Read the card exactly as printed.`
+  }
   const timeRule = field === 'orders'
     ? '- On every ORDERS card, `time` is the time EXACTLY AS PRINTED, including the original Arabic-Indic or Western digits and the printed `ص` / `م` / AM / PM marker. Convert NOTHING and do not infer 24-hour time. If any time glyph is unreadable, return null.'
     : '- Times: Arabic "م" is PM, "ص" is AM. Report 24-hour HH:MM. Some screens already print 24-hour times.'
@@ -271,13 +291,52 @@ Read every visible card, in the same top-to-bottom order, so the two readings li
 }
 
 export function walletReadPrompts(): readonly [string, string, string] {
-  const base = readPrompt('wallet')
+  const base = `WALLET BALANCE SAFETY CHECK
+Identify the image BEFORE reading money. Set screenKind to "wallet" only for a Yallago wallet
+balance screen: the wallet title ("المحفظة" / "Wallet") and its balance card, with SYP and
+top-up/transfer controls. The card can be orange, grey, light or dark; colour is NOT evidence.
+A cropped balance card is acceptable only when its wallet identity is still visible.
+Physical bike dashboards (ODO, speed, voltage, P, battery), BMS, orders lists and payment logs
+("سجل المدفوعات") are NOT wallet balances: screenKind "other", rows []. If identity is unclear
+because of blur or cropping, use "unknown", rows []; unclear is not proof of a wrong image. Never promote a
+status-bar clock, voltage, odometer, transaction amount or an unrelated number to the balance.
+
+Read exactly ONE current signed SYP balance. A zero or negative balance is valid. Digit glyphs
+may be Western, Arabic-Indic ٠١٢٣٤٥٦٧٨٩ or Persian ۰۱۲۳۴۵۶۷۸۹. Copy EVERY visible digit and sign.
+Do not assume the first digit is ٢ or ٣; check those shapes only when those glyphs are present.
+Return verification fields before the amount: hasDecimal (a fractional part), hasThousands
+(grouping), digitCount (digits only), printed (EXACT glyphs/separators/sign), value (Western
+digits, '.' decimal, as a STRING), cancelled false. Unreadable glyphs: '?' and value null.
+
+Locales differ. "1.180,83" means value "1180.83", hasDecimal true, hasThousands true,
+digitCount 6. "1,180.83" and "١٬١٨٠٫٨٣" mean the same amount with different printed glyphs.
+"674,30" means "674.30", hasDecimal true, hasThousands false, NOT "67430".
+Grouping is always groups of THREE digits; the final fractional part is one or two digits.
+Never drop a separator or minus sign. Never guess missing digits from ledger arithmetic,
+previous balances, dates or other numbers. This output is evidence, not an account adjustment.`
   return [
-    `${base}\n\nWALLET CHECK A — Read the complete large white balance as a whole, then re-check every glyph once before returning it.`,
-    `${base}\n\nWALLET CHECK B — Work glyph by glyph. Start with the LEFTMOST digit of the balance and explicitly decide whether it is ٢ or ٣ by its visible strokes; then transcribe the remaining digits and separators. Do not infer the answer from a previous balance or from ledger arithmetic.`,
-    `${base}\n\nWALLET CHECK C — Treat ٢↔٣ as an adversarial ambiguity. Test both hypotheses against the actual first white glyph on the orange card, reject the one whose strokes do not match, and only then assemble the amount. Do not copy any number elsewhere on the screen.`,
+    `${base}\n\nWALLET CHECK A — Read the complete large printed balance as a whole, then re-check every glyph once before returning it.`,
+    `${base}\n\nWALLET CHECK B — Work glyph by glyph from the first printed digit, verifying the sign and each separator independently. For Arabic ٢ or ٣ compare the visible strokes without assuming either. Do not infer the answer from a previous balance.`,
+    `${base}\n\nWALLET CHECK C — Independently verify fractional and grouping marks first, then read all digits. Where ٢↔٣ is genuinely ambiguous compare both hypotheses against the actual strokes. Never copy a number elsewhere on the screen.`,
   ]
 }
+
+/** Three independent wallet passes use this compact shape, not a delivery-row schema. */
+export const WALLET_READ_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['screenKind', 'rows'],
+  properties: {
+    screenKind: { type: 'string', enum: ['wallet', 'other', 'unknown'], description: 'wallet: visibly a balance screen; other: visibly another type of screen; unknown: identity cannot be established (blurred/cropped). Unknown is NOT proof of the wrong screen.' },
+    rows: { type: 'array', maxItems: 1, items: {
+      type: 'object', additionalProperties: false,
+      required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'cancelled'],
+      properties: {
+        hasDecimal: { type: 'boolean' }, hasThousands: { type: 'boolean' },
+        digitCount: { type: 'integer' }, printed: { type: 'string' },
+        value: { type: ['string', 'null'] }, cancelled: { type: 'boolean' },
+      },
+    } },
+  },
+} as const
 
 /** A compact strict schema for the orders pass that intentionally cannot emit route text. */
 export const ORDERS_MONEY_READ_SCHEMA = {
@@ -415,6 +474,30 @@ export const READ_SCHEMA = {
         additionalProperties: false,
         required: ['label', 'value'],
         properties: { label: { type: 'string' }, value: { type: ['string', 'null'] } },
+      },
+    },
+    notes: { type: ['string', 'null'] },
+  },
+} as const
+
+/** Archival movements need money/time, never addresses or dashboard scalar fields. */
+export const PAYMENTS_LOG_READ_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['rows', 'notes'],
+  properties: {
+    rows: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        required: ['hasDecimal', 'hasThousands', 'digitCount', 'printed', 'value', 'time', 'dateIso', 'cancelled'],
+        properties: {
+          hasDecimal: READ_SCHEMA.properties.rows.items.properties.hasDecimal,
+          hasThousands: READ_SCHEMA.properties.rows.items.properties.hasThousands,
+          digitCount: READ_SCHEMA.properties.rows.items.properties.digitCount,
+          printed: READ_SCHEMA.properties.rows.items.properties.printed,
+          value: READ_SCHEMA.properties.rows.items.properties.value,
+          time: READ_SCHEMA.properties.rows.items.properties.time,
+          dateIso: READ_SCHEMA.properties.rows.items.properties.dateIso,
+          cancelled: READ_SCHEMA.properties.rows.items.properties.cancelled,
+        },
       },
     },
     notes: { type: ['string', 'null'] },

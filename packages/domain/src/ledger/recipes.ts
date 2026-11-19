@@ -80,6 +80,10 @@ export type CompanyLedgerEvent =
   | 'company_opening_transfer'
   /** The HQ half of a branch entry that moved `company_box` («كييش» / «شحن») after cutover. */
   | 'company_restoration_mirror'
+  /** HQ-only record of an old branch cash transfer; does not touch today's branch book. */
+  | 'company_historical_transfer'
+  /** Human-reviewed noncash counterpart for an already posted historical restoration transfer. */
+  | 'company_historical_restoration_reclass'
   | 'company_deposit'
   | 'company_withdrawal'
   | 'company_expense'
@@ -95,10 +99,13 @@ export type CompanyLedgerEvent =
   /** Money released back from «الاهتلاك» to the company pocket, with a written reason. */
   | 'depreciation_release'
   | 'company_correction'
+  | 'company_custody_transfer'
 
 export const COMPANY_LEDGER_EVENTS = [
   'company_opening_transfer',
   'company_restoration_mirror',
+  'company_historical_transfer',
+  'company_historical_restoration_reclass',
   'company_deposit',
   'company_withdrawal',
   'company_expense',
@@ -111,6 +118,7 @@ export const COMPANY_LEDGER_EVENTS = [
   'depreciation_transfer',
   'depreciation_release',
   'company_correction',
+  'company_custody_transfer',
 ] as const satisfies readonly CompanyLedgerEvent[]
 
 /** Every value PostgreSQL's `ledger_event` enum accepts, in one runtime list for strict APIs. */
@@ -240,12 +248,14 @@ export type FundRef =
  */
 export type CompanyFundRef =
   | { readonly kind: 'company_cash'; readonly currency: Currency }
+  | { readonly kind: 'company_custody'; readonly currency: Currency }
   | { readonly kind: 'depreciation_reserve'; readonly currency: Currency }
   | { readonly kind: 'company_fx_position'; readonly currency: Currency }
   | { readonly kind: 'company_equity'; readonly currency: Currency; readonly account: CompanyEquityAccount }
   | { readonly kind: 'company_expense'; readonly currency: Currency; readonly centre: CompanyExpenseCentre }
   | { readonly kind: 'company_income'; readonly currency: Currency; readonly account: CompanyIncomeAccount }
   | { readonly kind: 'branch_clearing'; readonly branchId: string }
+  | { readonly kind: 'historical_branch_transit'; readonly branchId: string }
   | { readonly kind: 'company_payable'; readonly debtId: string; readonly currency: Currency }
   | { readonly kind: 'company_receivable'; readonly debtId: string; readonly currency: Currency }
   | { readonly kind: 'fixed_asset'; readonly assetId: string; readonly currency: Currency }
@@ -264,9 +274,11 @@ export type CompanyFundKind = CompanyFundRef['kind']
 /** Every company account kind — the same ten `fund_type` values 0065 added. */
 export const COMPANY_FUND_KINDS = [
   'company_cash',
+  'company_custody',
   'depreciation_reserve',
   'company_fx_position',
   'branch_clearing',
+  'historical_branch_transit',
   'company_payable',
   'company_receivable',
   'fixed_asset',
@@ -281,6 +293,7 @@ export const COMPANY_FUND_KINDS = [
  */
 export const COMPANY_FUND_ALLOWED_EVENTS: Readonly<Record<CompanyFundKind, readonly CompanyLedgerEvent[]>> = {
   company_cash: [
+    'company_custody_transfer',
     'company_deposit',
     'company_withdrawal',
     'company_expense',
@@ -288,6 +301,7 @@ export const COMPANY_FUND_ALLOWED_EVENTS: Readonly<Record<CompanyFundKind, reado
     'company_fx_exchange',
     'company_opening_transfer',
     'company_restoration_mirror',
+    'company_historical_transfer',
     'company_debt_open',
     'company_debt_payment',
     'asset_purchase',
@@ -303,8 +317,14 @@ export const COMPANY_FUND_ALLOWED_EVENTS: Readonly<Record<CompanyFundKind, reado
     'asset_purchase',
     'company_correction',
   ],
+  company_custody: ['company_custody_transfer', 'company_expense', 'company_correction'],
   company_fx_position: ['company_fx_exchange', 'company_correction'],
-  branch_clearing: ['company_opening_transfer', 'company_restoration_mirror'],
+  branch_clearing: [
+    'company_opening_transfer',
+    'company_restoration_mirror',
+    'company_historical_restoration_reclass',
+  ],
+  historical_branch_transit: ['company_historical_transfer', 'company_historical_restoration_reclass'],
   company_payable: [
     'company_debt_open',
     'company_debt_payment',
@@ -1744,6 +1764,7 @@ export function fundCode(fund: FundRef): string {
       return `cost_center:${fund.costCenterId}`
     // ── The company ledger. The enum literal is the currency segment. ──────────────────────
     case 'company_cash':
+    case 'company_custody':
     case 'depreciation_reserve':
     case 'company_fx_position':
       return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}`
@@ -1754,6 +1775,7 @@ export function fundCode(fund: FundRef): string {
     case 'company_expense':
       return `${fund.kind}:${codeCurrency(fund.kind, fund.currency)}:${expenseCentre(fund.centre)}`
     case 'branch_clearing':
+    case 'historical_branch_transit':
       return `${fund.kind}:${codeId(fund.kind, 'branch id', fund.branchId)}`
     case 'company_payable':
     case 'company_receivable':
@@ -1831,6 +1853,7 @@ export function fundRefFromCode(code: string): FundRef {
       return { kind: 'cost_center', costCenterId: tail }
     // ── The company ledger ──────────────────────────────────────────────────────────────────
     case 'company_cash':
+    case 'company_custody':
     case 'depreciation_reserve':
     case 'company_fx_position':
       segments(1, `${head}:<CUR>`)
@@ -1853,6 +1876,7 @@ export function fundRefFromCode(code: string): FundRef {
       if (rest.length < 2) throw new RangeError(`${head} is ${head}:<CUR>:<centre>, got ${JSON.stringify(code)}`)
       return { kind: head, currency: codeCurrency(head, rest[0]), centre: expenseCentre(rest.slice(1).join(':')) }
     case 'branch_clearing':
+    case 'historical_branch_transit':
       segments(1, `${head}:<branchId>`)
       return { kind: head, branchId: codeId(head, 'branch id', rest[0] ?? '') }
     case 'company_payable':

@@ -116,10 +116,14 @@ export function reversalTargetKindOf(command: CompanyCommandRecord): CompanyReve
 export interface CompanyCutoverRecord {
   branchId: string
   companyBranchId: string
-  /** The branch's company_box balance at cutover, moved as-is. */
+  /** Frozen branch company_box balance. A link-only transition does NOT transfer this cash. */
   openingAmount: Minor
-  /** The `company_opening_transfer` entry; null exactly when the opening amount is zero. */
+  /** Old transitions may have an opening transfer; every link-only transition leaves this null. */
   openingEntryId: number | null
+  /** Absent on legacy callers means the old, already posted cash-opening workflow. */
+  mode?: 'cash_opening' | 'link_only'
+  /** Frozen, disclosed unmatched starting difference; never a balancing cash entry. */
+  baselineDifference?: Minor
   /** max(journal_entries.id) read under the locks. Every company_box line after it is mirrored. */
   watermarkEntryId: number
   businessDate: CalendarDate
@@ -142,7 +146,67 @@ export interface CompanyMirrorRecord {
   createdAtMs: number
 }
 
+/** One verified historical HQ transfer reclassified without replaying its cash movement. */
+export interface CompanyHistoricalRestorationSettlementLeg {
+  restorationId: number
+  sourceReference: string
+  historicalJournalEntryId: number
+  direction: MirrorDirection
+  amount: Minor
+  /** New HQ entry, containing only historical_branch_transit and branch_clearing. */
+  journalEntryId: number
+}
+
+/** A whole restoration run: all of its branch legs and all of its linked HQ sources. */
+export interface CompanyHistoricalRestorationSettlementGroup {
+  restorationId: number
+  /** Original branch financial day, not the new reclassification's booking day. */
+  businessDate: CalendarDate
+  /** Verified company_box movements, fixed to SYP_NEW; opposing directions remain separate. */
+  branchSourceEntries: Array<{ sourceEntryId: number; direction: MirrorDirection; amount: Minor }>
+  /** Complete source set for this run. A subset of a multi-source run cannot be settled. */
+  sourceReferences: string[]
+  branchNet: Minor
+  companyNet: Minor
+  /** branchNet − companyNet, disclosed rather than silently adjusted. */
+  variance: Minor
+}
+
+/**
+ * Append-only, human-approved cash-neutral reclassification of linked historical transfers.
+ * The frozen link-only cutover baseline is evidence, never rewritten by this record.
+ */
+export interface CompanyHistoricalRestorationSettlement {
+  /** Canonical client UUID; also the batch's idempotency key. */
+  id: string
+  companyBranchId: string
+  sourceBranchId: string
+  /** Consecutive within sourceBranchId; persisted with compare-and-swap under branch → HQ locks. */
+  version: number
+  cutoverWatermarkEntryId: number
+  /** Preview fingerprint of the cutover, effective evidence, current clearing and prior batches. */
+  evidenceHash: string
+  /** Immutable fingerprint of the approved request and actor for retry/conflict detection. */
+  requestHash: string
+  /** Current financial day; original cash entries keep their original dates. */
+  businessDate: CalendarDate
+  reason: string
+  groups: CompanyHistoricalRestorationSettlementGroup[]
+  legs: CompanyHistoricalRestorationSettlementLeg[]
+  createdBy: string
+  createdAtMs: number
+}
+
+export interface CompanyHistoricalBranchLink {
+  id: string; companyBranchId: string; sourceBranchId: string; sourceEntryId: number; companyEntryId: number
+  createdEntry: boolean; amount: Minor; direction: MirrorDirection; occurredOn: CalendarDate
+  reason: string; requestHash: string; createdBy: string; createdAtMs: number
+}
+
 export interface CompanyLedgerRepo {
+  createHistoricalBranchLink(row: CompanyHistoricalBranchLink): Promise<void>
+  findHistoricalBranchLink(id: string): Promise<CompanyHistoricalBranchLink | null>
+  listHistoricalBranchLinks(companyBranchId: string): Promise<CompanyHistoricalBranchLink[]>
   /**
    * Store one command row. Written AFTER its journal entry, in the same unit of work.
    * Throws `{ code: 'DUPLICATE_COMPANY_COMMAND' }` when the id is already a command of any kind.
@@ -174,6 +238,17 @@ export interface CompanyLedgerRepo {
   createMirror(row: CompanyMirrorRecord): Promise<void>
   findMirrorBySource(sourceEntryId: number): Promise<CompanyMirrorRecord | null>
   listMirrors(sourceBranchId: string): Promise<CompanyMirrorRecord[]>
+
+  /** Append one batch with version = expectedVersion + 1; sources can belong to one batch only. */
+  createHistoricalSettlement(row: CompanyHistoricalRestorationSettlement, expectedVersion: number): Promise<void>
+  findHistoricalSettlement(id: string): Promise<CompanyHistoricalRestorationSettlement | null>
+  listHistoricalSettlements(
+    companyBranchId: string,
+    sourceBranchId?: string,
+  ): Promise<CompanyHistoricalRestorationSettlement[]>
+  findHistoricalSettlementBySource(
+    historicalJournalEntryId: number,
+  ): Promise<CompanyHistoricalRestorationSettlement | null>
 }
 
 export interface CompanyPeriodTotals {
@@ -207,9 +282,39 @@ export interface CompanyMovementRecord {
   entry: JournalEntryRecord
   /**
    * The company pocket balance right AFTER this entry, for each currency the entry moved a pocket
-   * in — the running balance in posting order, counting every entry, shown or not.
+   * in — the running balance in financial-day order (then entry id), counting every entry,
+   * shown or not. Backfilled history must not be displayed after later live transactions.
    */
   pocketAfter: Partial<Record<Currency, Minor>>
+}
+
+/** Final historical source evidence. Owner-direct rows have no HQ journal by design. */
+export interface CompanyHistoricalImportReceiptRecord {
+  sourceReference: string
+  sourcePosition: number
+  occurredOn: CalendarDate
+  movementType: 'branch_receipt' | 'branch_payment' | 'expense' | 'asset_payment' | 'exchange' | 'refund'
+  paidFrom: 'pocket' | 'owner_outside'
+  currency: Currency | null
+  amount: Minor | null
+  description: string
+  originalAmount: string
+  originalDescription: string
+  sourceFunding: string
+  originalDeltas: readonly [number, number, number, number]
+  fromCurrency: Currency | null
+  fromAmount: Minor | null
+  toCurrency: Currency | null
+  toAmount: Minor | null
+  rateBasis: 'documented' | 'estimated' | null
+  sypMinorPerUsd: bigint | null
+  sourceBranchId: string | null
+  journalEntryId: number | null
+  branchJournalEntryId: number | null
+  restorationId: number | null
+  /** Original import provenance, not a new financial approval or an amount-only match. */
+  linkStatus?: string | null
+  linkNote?: string | null
 }
 
 export interface CompanyLedgerSource {
@@ -217,11 +322,15 @@ export interface CompanyLedgerSource {
     companyBranchId: string,
     range: { from: CalendarDate; to: CalendarDate },
   ): Promise<CompanyOverviewRecord>
-  /** The company row's entries whose business date is in the range, oldest first. */
+  /** The company row's entries whose business date is in the range, financial-day oldest first. */
   listMovements(
     companyBranchId: string,
     range: { from: CalendarDate; to: CalendarDate },
   ): Promise<CompanyMovementRecord[]>
+  listHistoricalImportReceipts(
+    companyBranchId: string,
+    range: { from: CalendarDate; to: CalendarDate },
+  ): Promise<CompanyHistoricalImportReceiptRecord[]>
 }
 
 /** Transaction-scoped financial locks, in the namespace `FinancialUnitOfWorkInput.lockKey` uses. */

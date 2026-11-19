@@ -10,6 +10,15 @@ describe('configuration is validated at boot, not discovered at 2am', () => {
     expect(c.BR1_SPLIT_GATE).toBe('advisory') // pilot default until BR1 is calibrated
     expect(c.TZ_OFFSET_MINUTES).toBe(180) // Asia/Damascus, UTC+3 year-round since Oct 2022
     expect(c.DRIVER_SELF_REGISTRATION_ENABLED).toBe(true)
+    expect(c.COMPANY_HISTORICAL_POSTING_ENABLED).toBe(false)
+    expect(c.COMPANY_RESTORATION_REVIEW_ENABLED).toBe(false)
+    expect(c.OPERATIONAL_HISTORY_ENABLED).toBe(false)
+  })
+
+  it('requires an explicit diagnostics opt-in after the additive schema is installed', () => {
+    expect(loadConfig({ OPERATIONAL_HISTORY_ENABLED: 'true' } as NodeJS.ProcessEnv).OPERATIONAL_HISTORY_ENABLED).toBe(true)
+    expect(loadConfig({ OPERATIONAL_HISTORY_ENABLED: 'false' } as NodeJS.ProcessEnv).OPERATIONAL_HISTORY_ENABLED).toBe(false)
+    expect(() => loadConfig({ OPERATIONAL_HISTORY_ENABLED: '0' } as NodeJS.ProcessEnv)).toThrow(/OPERATIONAL_HISTORY_ENABLED/)
   })
 
   it('parses the driver registration kill switch without treating "false" as truthy', () => {
@@ -22,6 +31,12 @@ describe('configuration is validated at boot, not discovered at 2am', () => {
     // Otherwise a misconfigured deploy silently runs against an in-memory store and every
     // shift approved that day evaporates on restart.
     expect(() => loadConfig({ NODE_ENV: 'production' } as NodeJS.ProcessEnv)).toThrow(/DATABASE_URL/)
+  })
+
+  it('requires an explicit validated opt-in to historical financial posting', () => {
+    expect(loadConfig({ COMPANY_HISTORICAL_POSTING_ENABLED: 'false' } as NodeJS.ProcessEnv).COMPANY_HISTORICAL_POSTING_ENABLED).toBe(false)
+    expect(loadConfig({ COMPANY_HISTORICAL_POSTING_ENABLED: 'true' } as NodeJS.ProcessEnv).COMPANY_HISTORICAL_POSTING_ENABLED).toBe(true)
+    expect(() => loadConfig({ COMPANY_HISTORICAL_POSTING_ENABLED: '0' } as NodeJS.ProcessEnv)).toThrow(/COMPANY_HISTORICAL_POSTING_ENABLED/)
   })
 
   it('accepts a production config with a database', () => {

@@ -83,6 +83,14 @@ export class MemoryRestorationRepo implements RestorationRepo {
   /** A sequence, like the identity column: a rolled-back run does not give its id back. */
   private nextId = 1
 
+  async getById(id: number): Promise<StoredRestoration | null> {
+    return structuredClone(this.rows.find((row) => row.id === id) ?? null)
+  }
+
+  async list(branchId: string): Promise<StoredRestoration[]> {
+    return structuredClone(this.rows.filter((row) => row.branchId === branchId).sort((a, b) => a.id - b.id))
+  }
+
   snapshotRows(): StoredRestoration[] {
     return structuredClone(this.rows)
   }

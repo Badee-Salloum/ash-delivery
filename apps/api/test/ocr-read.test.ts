@@ -1,4 +1,5 @@
 import type { LightMyRequestResponse } from 'fastify'
+import { createHash } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ScriptedOcrReader } from '@ash/adapters/memory'
 import type { OcrReader, OcrReading } from '@ash/contracts'
@@ -179,6 +180,25 @@ describe('cloud OCR: the same pixels are never billed twice', () => {
 })
 
 describe('cloud OCR: wallet publication guard', () => {
+  it('retains failed wallet diagnostics internally and serves repeated failure without another paid read', async () => {
+    const diagnostics = { reader: 'wallet-ai-consensus-v2', passes: [{ transcript: { screenKind: 'unknown', rows: [] } }] }
+    const reader = new ScriptedOcrReader([{ ok: false, reason: 'no_fields', raw: diagnostics }])
+    h = await makeHarness({ ocr: reader })
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const shiftId = await openShift(driver, manager)
+    const before = await h.deps.shifts.findById(shiftId)
+    const first = await read(driver, shiftId, 'wallet')
+    const again = await read(driver, shiftId, 'wallet')
+    expect(first.json()).toMatchObject({ ok: false, reason: 'no_fields', rows: [] })
+    expect(again.json()).toMatchObject({ ok: false, reason: 'no_fields', cached: true })
+    expect(reader.calls).toBe(1)
+    expect(await h.deps.shifts.findById(shiftId)).toEqual(before)
+    const saved = await h.deps.ocrReads.findBySha(before!.branchId,
+      createHash('sha256').update(TINY_JPEG).digest('hex'), 'wallet', reader.cacheSignature('wallet'))
+    expect(saved?.result).toMatchObject({ ok: false, raw: diagnostics })
+  })
+
   it('publishes one AI wallet balance verbatim', async () => {
     const reader = new ScriptedOcrReader([
       {

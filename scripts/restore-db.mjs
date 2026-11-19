@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createGunzip } from 'node:zlib'
 import { resetOwnedSequences } from './restore-db-sequences.mjs'
+import { RESTORE_TARGET_COLUMNS_SQL, restoreInsertColumns } from './restore-db-columns.mjs'
 import { migrationChecksumMatches } from '../packages/db/migration-http-plan.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -118,6 +119,11 @@ async function main() {
   }
 
   const order = loadOrder(manifest.tables, manifest.fks)
+  // Validate the entire original column manifest BEFORE emptying anything. Computed columns
+  // remain in the backup/count evidence but must be reconstructed, not explicitly inserted.
+  const targetColumns = await sql.query(RESTORE_TARGET_COLUMNS_SQL)
+  const insertColumns = new Map(order.map(table => [table,
+    restoreInsertColumns(table, manifest.columns[table], targetColumns)]))
 
   // Never load on top of live data by accident.
   const busy = []
@@ -210,7 +216,7 @@ async function main() {
   console.log('loading…')
   let loaded = 0
   for (const t of order) {
-    const cols = manifest.columns[t]
+    const cols = insertColumns.get(t)
     if (!cols || cols.length === 0) continue
     const file = join(dir, `${t}.jsonl.gz`)
     const names = cols.map((c) => `"${c.name}"`).join(', ')

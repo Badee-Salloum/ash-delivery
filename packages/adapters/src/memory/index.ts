@@ -1,3 +1,4 @@
+import { trackingPermissionStates } from '@ash/domain'
 import type {
   AssignmentRecord,
   AssignmentRepo,
@@ -52,6 +53,7 @@ import type {
   GpsTrackerHealth,
   GpsTrackerHealthRepo,
   GpsTrackerReadiness,
+  GpsReadinessTimingRejection,
   TrackerDeviceRecord,
   TrackerDeviceRepo,
   OrderPointRecord,
@@ -80,6 +82,14 @@ import type {
   WeekLockRecord,
   WeekLockRepo,
 } from '@ash/contracts'
+import { MemoryExistingAssetRepo } from './existing-assets.ts'
+import { MemoryCompanyRestorationReviewRepo } from './company-restoration-review.ts'
+import { MemoryCompanyMovementReviewRepo } from './company-movement-review.ts'
+import { MemoryCompanyHistoricalDraftRepo } from './company-historical-draft.ts'
+export { MemoryExistingAssetRepo } from './existing-assets.ts'
+export { MemoryCompanyRestorationReviewRepo } from './company-restoration-review.ts'
+export { MemoryCompanyMovementReviewRepo } from './company-movement-review.ts'
+export { MemoryCompanyHistoricalDraftRepo } from './company-historical-draft.ts'
 // P2 — the timing-only shift read.
 import type { ShiftTimingRecord } from '@ash/contracts'
 import {
@@ -1435,6 +1445,9 @@ export class MemoryLedgerRepo implements LedgerRepo {
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.entries.filter((e) => e.branchId === branchId && e.weekStartDate === weekStartDate)
   }
+  async listByRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<JournalEntryRecord[]> {
+    return this.entries.filter(e=>e.branchId===branchId && e.businessDate>=from && e.businessDate<=to)
+  }
   async listTreasuryMovements(
     branchId: string,
     filter: TreasuryMovementFilter,
@@ -1496,6 +1509,14 @@ export class MemoryLedgerRepo implements LedgerRepo {
     return this.entries.find(
       (entry) => entry.branchId === branchId && entry.externalReference === externalReference,
     ) ?? null
+  }
+  async findEntryById(id: number): Promise<JournalEntryRecord | null> {
+    return structuredClone(this.entries.find((entry) => entry.id === id) ?? null)
+  }
+  async findEntriesByIds(ids: readonly number[]): Promise<JournalEntryRecord[]> {
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new RangeError('journal source IDs must be positive safe integers')
+    const selected = new Set(ids)
+    return structuredClone(this.entries.filter(entry => selected.has(entry.id)).sort((a,b) => a.id-b.id))
   }
   async fundBalance(branchId: string, fundCode: string): Promise<Minor> {
     let total = 0n
@@ -2405,12 +2426,26 @@ export class MemoryGpsPingRepo implements GpsPingRepo {
 
 /** Coordinate-free tracker readiness and diagnostic heartbeat. */
 export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
+  async recordBrowserClient(shiftId: string): Promise<void> {
+    this.rows.set(shiftId,{...emptyGpsTrackerHealth(shiftId),...this.rows.get(shiftId),readinessClient:'browser'})
+  }
+  readonly permissionHistory: import('@ash/contracts').GpsPermissionEvent[] = []
+  async permissionEvents(shiftId: string): Promise<import('@ash/contracts').GpsPermissionEvent[]> {
+    return structuredClone(this.permissionHistory.filter(event => event.shiftId === shiftId))
+  }
+
   readonly rows = new Map<string, GpsTrackerHealth>()
+  readonly timingRejections: GpsReadinessTimingRejection[] = []
+
+  async recordReadinessTimingRejection(input: GpsReadinessTimingRejection): Promise<void> {
+    this.timingRejections.push(structuredClone(input))
+  }
 
   async recordReadiness(input: GpsTrackerReadiness): Promise<void> {
     const previous = this.rows.get(input.shiftId)
     this.rows.set(input.shiftId, {
       ...emptyGpsTrackerHealth(input.shiftId), ...previous,
+      readinessClient: input.client ?? 'android',
       readinessAtMs: input.atMs,
       readinessCapturedAtMs: input.capturedAtMs,
       readinessAccuracyM: input.accuracyM,
@@ -2426,9 +2461,23 @@ export class MemoryGpsTrackerHealthRepo implements GpsTrackerHealthRepo {
   }
 
   async recordHeartbeat(input: GpsTrackerHealth): Promise<void> {
+    const states = trackingPermissionStates(input)
+    for (const [permission, granted] of Object.entries(states)) {
+      if (granted === null) continue
+      const existing = this.permissionHistory.find(event => event.shiftId === input.shiftId && event.permission === permission && event.recoveredAt === null)
+      const now = new Date(input.heartbeatAtMs ?? 0).toISOString()
+      if (granted && existing) existing.recoveredAt = now
+      if (!granted && !existing) this.permissionHistory.push({
+        id: String(this.permissionHistory.length + 1), shiftId: input.shiftId,
+        permission: permission as import('@ash/contracts').GpsPermissionEvent['permission'],
+        openedAt: now, observedAt: input.observedAtMs == null ? null : new Date(input.observedAtMs).toISOString(),
+        recoveredAt: null, appBuild: input.appBuild,
+      })
+    }
     const previous = this.rows.get(input.shiftId)
     this.rows.set(input.shiftId, {
       ...emptyGpsTrackerHealth(input.shiftId), ...previous, ...structuredClone(input),
+      readinessClient: previous?.readinessClient ?? 'android',
       readinessAtMs: previous?.readinessAtMs ?? null,
       readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
       readinessAccuracyM: previous?.readinessAccuracyM ?? null,
@@ -2565,6 +2614,10 @@ export interface MemoryDeps extends Deps {
   capitalTargets: MemoryOfficeCapitalTargetRepo
   restorations: MemoryRestorationRepo
   companyLedger: MemoryCompanyLedgerRepo
+  existingAssets: MemoryExistingAssetRepo
+  companyRestorationReviews: MemoryCompanyRestorationReviewRepo
+  companyMovementReview: MemoryCompanyMovementReviewRepo
+  companyHistoricalDrafts: MemoryCompanyHistoricalDraftRepo
   companyLedgerSource: MemoryCompanyLedgerSource
   tiers: MemoryTierRepo
   notifications: MemoryNotificationRepo
@@ -2615,6 +2668,10 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
   private readonly restorations: MemoryRestorationRepo
   private readonly companyLedger: MemoryCompanyLedgerRepo
   private readonly companyFinance: MemoryCompanyFinanceRepo
+  private readonly existingAssets: MemoryExistingAssetRepo
+  private readonly companyRestorationReviews: MemoryCompanyRestorationReviewRepo
+  private readonly companyMovementReview: MemoryCompanyMovementReviewRepo
+  private readonly companyHistoricalDrafts: MemoryCompanyHistoricalDraftRepo
   /** The locks the LAST unit of work asked for, in order — a test reads the lock order here. */
   readonly locks = new MemoryFinancialLocks()
   private readonly gate: MemoryTransactionGate
@@ -2632,6 +2689,12 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     gate: MemoryTransactionGate,
     companyLedger: MemoryCompanyLedgerRepo,
     companyFinance: MemoryCompanyFinanceRepo,
+    existingAssets: MemoryExistingAssetRepo,
+    companyRestorationReviews: MemoryCompanyRestorationReviewRepo,
+    companyMovementReview: MemoryCompanyMovementReviewRepo,
+    companyHistoricalDrafts: MemoryCompanyHistoricalDraftRepo,
+    directory: MemoryDirectoryRepo,
+    companyLedgerSource: MemoryCompanyLedgerSource,
   ) {
     this.expenses = expenses
     this.recurringExpenses = recurringExpenses
@@ -2643,11 +2706,16 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     this.restorations = restorations
     this.companyLedger = companyLedger
     this.companyFinance = companyFinance
+    this.existingAssets = existingAssets
+    this.companyRestorationReviews = companyRestorationReviews
+    this.companyMovementReview = companyMovementReview
+    this.companyHistoricalDrafts = companyHistoricalDrafts
     this.gate = gate
     this.deps = {
       expenses, recurringExpenses, incomes, advances, ledger, receivableEvents, cashCounts, capitalTargets, restorations,
-      companyLedger, locks: this.locks,
+      companyLedger, locks: this.locks, directory, companyLedgerSource,
       companyFinance,
+      existingAssets, companyRestorationReviews, companyMovementReview, companyHistoricalDrafts,
     }
   }
 
@@ -2658,9 +2726,13 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
     return this.gate.run(async () => {
       // The unit of work's own lock comes first, exactly as PgFinancialUnitOfWork takes it.
       this.locks.taken.length = 0
-      await this.locks.acquire(input.lockKey)
+      if (input.mode !== 'read_snapshot') await this.locks.acquire(input.lockKey)
       const companySnapshot = this.companyLedger.snapshot()
       const companyFinanceSnapshot = this.companyFinance.snapshot()
+      const existingAssetSnapshot = this.existingAssets.snapshot()
+      const restorationReviewSnapshot = this.companyRestorationReviews.snapshot()
+      const movementReviewSnapshot = this.companyMovementReview.snapshot()
+      const historicalDraftSnapshot = this.companyHistoricalDrafts.snapshot()
       const expenseSnapshot = this.expenses.snapshotRows()
       const recurringExpenseSnapshot = this.recurringExpenses.snapshotState()
       const incomeSnapshot = this.incomes.snapshotRows()
@@ -2682,6 +2754,10 @@ export class MemoryFinancialUnitOfWork implements FinancialUnitOfWork {
         this.restorations.restoreRows(restorationSnapshot)
         this.companyLedger.restore(companySnapshot)
         this.companyFinance.restore(companyFinanceSnapshot)
+        this.existingAssets.restore(existingAssetSnapshot)
+        this.companyRestorationReviews.restore(restorationReviewSnapshot)
+        this.companyMovementReview.restore(movementReviewSnapshot)
+        this.companyHistoricalDrafts.restore(historicalDraftSnapshot)
         throw error
       }
     })
@@ -2756,6 +2832,9 @@ export class MemoryShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     input: ShiftCloseUnitOfWorkInput,
     work: (deps: ShiftCloseTransactionDeps) => Promise<T>,
   ): Promise<T> {
+    if (input.scope === 'evidence' && input.serializeDriverDay) {
+      throw new Error('evidence commits cannot serialize financial driver/day approvals')
+    }
     return this.gate.run(async () => {
       const shiftSnapshot = new Map([...this.shifts.rows].map(([id, row]) => [id, structuredClone(row)]))
       const breakSnapshot = new Map([...this.breaks.rows].map(([id, row]) => [id, structuredClone(row)]))
@@ -2865,6 +2944,11 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     ledger.entries.reduce((max, entry) => (entry.id > max ? entry.id : max), 0),
   )
   const companyFinance = new MemoryCompanyFinanceRepo()
+  const existingAssets = new MemoryExistingAssetRepo()
+  const companyRestorationReviews = new MemoryCompanyRestorationReviewRepo()
+  const companyMovementReview = new MemoryCompanyMovementReviewRepo()
+  const companyHistoricalDrafts = new MemoryCompanyHistoricalDraftRepo()
+  const companyLedgerSource = new MemoryCompanyLedgerSource(() => ledger.entries, () => directory.listBranches(), companyLedger)
   const assignments = new MemoryAssignmentRepo()
   const preapprovedShiftRules = new MemoryPreapprovedShiftRuleRepo()
   const financialUnitOfWork = new MemoryFinancialUnitOfWork(
@@ -2880,11 +2964,14 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     gate,
     companyLedger,
     companyFinance,
+    existingAssets, companyRestorationReviews, companyMovementReview, companyHistoricalDrafts, directory, companyLedgerSource,
   )
   const operationRemovals = new MemoryOperationRemovalRepo()
+  const settings = new MemorySettingsRepo()
   const transactionDeps: ShiftCloseTransactionDeps = {
     shifts,
     breaks,
+    settings,
     preapprovedShiftRules,
     orders,
     cashDeductions,
@@ -2958,14 +3045,11 @@ export function createMemoryDeps(nowMs: number): MemoryDeps {
     restorations,
     companyLedger,
     companyFinance,
-    companyLedgerSource: new MemoryCompanyLedgerSource(
-      () => ledger.entries,
-      () => directory.listBranches(),
-      companyLedger,
-    ),
+    existingAssets, companyRestorationReviews, companyMovementReview, companyHistoricalDrafts,
+    companyLedgerSource,
     tiers,
     notifications: new MemoryNotificationRepo(),
-    settings: new MemorySettingsRepo(),
+    settings,
     media,
     blobs: new MemoryBlobStore(),
     // `available: false`. Every test that exists today inherits a reader that never calls out, so

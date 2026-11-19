@@ -7,7 +7,60 @@ import {
   readInCloud,
 } from '../src/api.ts'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers() })
+
+it('bounds login and session reads without retrying the login write', async () => {
+  vi.useFakeTimers()
+  const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+  }))
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  for (const read of [() => api.login('driver1', 'test-password'), () => api.me(), () => api.get('/me/assignment', { timeoutMs: 20_000 })]) {
+    const assertion = expect(read()).rejects.toMatchObject({ status: 408, error: 'request_timeout' })
+    await vi.advanceTimersByTimeAsync(20_000)
+    await assertion
+  }
+  expect(fetchMock).toHaveBeenCalledTimes(3)
+})
+
+it('preserves caller cancellation when a read also has a timeout', async () => {
+  const controller = new AbortController()
+  vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const cancel = (): void => reject(new DOMException('Aborted', 'AbortError'))
+    if (init.signal!.aborted) cancel()
+    else init.signal!.addEventListener('abort', cancel, { once: true })
+  })))
+  const assertion = expect(new ApiClient('/api').get('/me/assignment', { timeoutMs: 20_000, signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+  controller.abort()
+  await assertion
+})
+
+it('bounds review and settlement refresh reads without replaying them', async () => {
+  vi.useFakeTimers()
+  const fetchMock = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    init.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+  }))
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  for (const read of [() => api.shiftReview('test-shift', { timeoutMs: 20_000 }), () => api.shiftSettlement('test-shift', undefined, undefined, { timeoutMs: 20_000 })]) {
+    const assertion = expect(read()).rejects.toMatchObject({ status: 408, error: 'request_timeout' })
+    await vi.advanceTimersByTimeAsync(20_000)
+    await assertion
+  }
+  expect(fetchMock).toHaveBeenCalledTimes(2)
+})
+
+it('does not attach the selected branch to HQ reads but preserves branch expense scope', async () => {
+  const fetchMock = vi.fn().mockImplementation(async () => new Response('{}', { status: 200 }))
+  vi.stubGlobal('fetch', fetchMock)
+  const api = new ApiClient('/api')
+  api.setBranch('10000000-0000-4000-8000-000000000001')
+  await api.get('/company/reports?from=2026-07-01&to=2026-07-21')
+  expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/company/reports?from=2026-07-01&to=2026-07-21')
+  await api.get('/expenses?from=2026-07-01&to=2026-07-21')
+  expect(fetchMock.mock.calls[1]?.[0]).toBe('/api/expenses?from=2026-07-01&to=2026-07-21&branchId=10000000-0000-4000-8000-000000000001')
+})
 
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1])
 

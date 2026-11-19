@@ -1,0 +1,372 @@
+[
+  {
+    "name": "calendar-subset",
+    "fields": {
+      "blueTotal": "2128",
+      "grossTotal": "2660",
+      "trips": "11",
+      "distanceKm": "55",
+      "onlineMinutes": "758"
+    },
+    "photoSha256": "6a1bc1b367958b8910a37c05bc2dfe2cba501d2a603aa0b973677f302f3c96b0",
+    "recordedPhotoDate": "2026-11-05",
+    "orders": [
+      {
+        "fee": "505.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "145.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "160.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "400.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "385.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "160.00",
+        "occurredDate": "2026-11-05",
+        "included": true
+      }
+    ],
+    "id": "calendar-subset"
+  },
+  {
+    "name": "gross-mismatch",
+    "fields": {
+      "blueTotal": "1744",
+      "grossTotal": "2180",
+      "trips": "10",
+      "distanceKm": "35",
+      "onlineMinutes": "640"
+    },
+    "photoSha256": "0f132cb14e9272b875fcdcd8d1239ef78402c99385515ffcd32e36a5eaa458b0",
+    "recordedPhotoDate": null,
+    "orders": [
+      {
+        "fee": "390.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "255.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "260.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "155.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "310.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      }
+    ],
+    "id": "gross-mismatch"
+  },
+  {
+    "name": "matched-short",
+    "fields": {
+      "blueTotal": "1724",
+      "grossTotal": "2155",
+      "trips": "9",
+      "distanceKm": "38",
+      "onlineMinutes": "307"
+    },
+    "photoSha256": "f70c1630305fc500f9134bbc3c6dce0129599a4a5db6af4e761ee012e50020cf",
+    "recordedPhotoDate": null,
+    "orders": [
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "185.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "260.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "635.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "200.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "155.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "320.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      }
+    ],
+    "id": "matched-short"
+  },
+  {
+    "name": "matched-long",
+    "fields": {
+      "blueTotal": "3476",
+      "grossTotal": "4345",
+      "trips": "20",
+      "distanceKm": "79",
+      "onlineMinutes": "600"
+    },
+    "photoSha256": "f24c81ff19e0d54d1d4f20bd3899f5785abab15f6a04258f20dca7b1655dc01e",
+    "recordedPhotoDate": null,
+    "orders": [
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "160.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "185.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "255.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "250.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "420.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "150.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "335.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "235.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "200.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "355.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "340.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "180.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "190.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "270.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      }
+    ],
+    "id": "matched-long"
+  },
+  {
+    "name": "matched-standard",
+    "fields": {
+      "blueTotal": "1558",
+      "grossTotal": "1940",
+      "trips": "12",
+      "distanceKm": "29",
+      "onlineMinutes": "406"
+    },
+    "photoSha256": "2cf1cd21e9ac65fca4b3cd704fc271b25b595f676dbccdcc3b9a80c8cddadc18",
+    "recordedPhotoDate": null,
+    "orders": [
+      {
+        "fee": "270.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "160.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "235.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "130.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "155.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "140.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      },
+      {
+        "fee": "160.00",
+        "occurredDate": "2026-11-04",
+        "included": true
+      }
+    ],
+    "id": "matched-standard"
+  }
+]

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DRIVER_ID, type Harness, VEHICLE_ID, makeHarness, sypStr } from './harness.ts'
 
 let h: Harness
@@ -26,6 +26,19 @@ async function openShift(driver: string, manager: string): Promise<string> {
 }
 
 describe('driver breaks', () => {
+  it('uses transaction-owned settings while starting and reading a break', async () => {
+    const driver = await h.loginAs('driver1'), manager = await h.loginAs('manager')
+    const id = await openShift(driver, manager)
+    const original = h.deps.closeUnitOfWork.run.bind(h.deps.closeUnitOfWork)
+    const get = vi.fn(async () => 90)
+    const scopedSettings = { get, set: h.deps.settings.set.bind(h.deps.settings), receiptRequiredAbove: h.deps.settings.receiptRequiredAbove.bind(h.deps.settings), kwhPriceMinor: h.deps.settings.kwhPriceMinor.bind(h.deps.settings) }
+    vi.spyOn(h.deps.closeUnitOfWork, 'run').mockImplementation((input, work) => original(input, tx => work({ ...tx, settings: scopedSettings })))
+    vi.spyOn(h.deps.settings, 'get').mockImplementation(async () => { throw new Error('unscoped settings would exhaust the pool') })
+    const response = await post(driver, `/shifts/${id}/break/start`, { breakId: crypto.randomUUID() })
+    expect(response.statusCode, response.body).toBe(200)
+    expect(response.json().activeBreak.limitMinutes).toBe(90)
+    expect(get).toHaveBeenCalledWith('shift.break_limit_minutes')
+  })
   it('keeps the shift open past its global allowance, records excess and snapshots setting changes', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

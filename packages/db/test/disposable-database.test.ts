@@ -33,6 +33,13 @@ describe('disposable PostgreSQL test guard', () => {
     )).toEqual({ database: 'ash_conformance', host: 'isolated.example' })
   })
 
+  it('refuses transaction poolers even for an opted-in test name', () => {
+    expect(() => assertDisposableDatabaseUrl(
+      'postgresql://test@ep-test-pooler.eu-central-1.aws.neon.tech/ash_test',
+      { ...optedIn, ASH_ALLOW_REMOTE_DESTRUCTIVE_DATABASE_TESTS: '1' },
+    )).toThrow(/direct disposable endpoint/)
+  })
+
   it('verifies the connected database and loopback server before destructive SQL', async () => {
     const query = async () => ({
       rows: [{ database: 'ash_test', serverAddress: '127.0.0.1/32' }],

@@ -169,11 +169,20 @@ describe('the company vocabulary', () => {
       for (const event of allowed) expect(COMPANY_LEDGER_EVENTS).toContain(event)
       expect(new Set(allowed).size).toBe(allowed.length)
     }
-    // The clearing account moves only with the cutover and the restoration mirror — never through
-    // a generic correction, which would break the mirror invariant with the branch company_box.
+    // Legacy counterparts may be reclassified only by the separately guarded, cash-neutral event;
+    // never by a generic correction that could silently alter the branch matching invariant.
     expect(COMPANY_FUND_ALLOWED_EVENTS.branch_clearing).toEqual([
       'company_opening_transfer',
       'company_restoration_mirror',
+      'company_historical_restoration_reclass',
     ])
+  })
+
+  it('restricts historical restoration reclassification to the two noncash matching accounts', () => {
+    for (const kind of COMPANY_FUND_KINDS) {
+      expect(COMPANY_FUND_ALLOWED_EVENTS[kind].includes('company_historical_restoration_reclass')).toBe(
+        kind === 'branch_clearing' || kind === 'historical_branch_transit',
+      )
+    }
   })
 })

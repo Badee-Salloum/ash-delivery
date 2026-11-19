@@ -10,12 +10,10 @@
  * endpoint and a handful of request-body fields differ, and those live in `PROVIDERS` rather than in
  * conditionals scattered through `runPass`.
  *
- * WHERE THIS RUNS MATTERS — for `openai` specifically. OpenAI geo-blocks Syria, which is why
- * `tools/gemini-relay/` exists at all. The production API function runs in `iad1` (US East) because
- * `vercel.json` sets no `regions` key, so a call made from inside it originates in Virginia and needs
- * no relay and no VPN. Move the API to a region Syria cannot reach through and the `openai` provider
- * stops working with a confusing error. The paragraph stays because `OCR_DRIVER=openai` is the
- * revert path; `scripts/vision-bench.mjs` measured that OpenRouter answers Damascus directly.
+ * Provider calls originate in the deployed API region. The local deployment configuration now
+ * targets Frankfurt beside Neon; production remains in its old region until a separately reviewed
+ * release. Provider reachability and regional latency still need preview verification before
+ * promotion. A local reader test cannot prove either property of a remote deployment.
  *
  * Wallet money gets extra care. One live Yallago screenshot visibly printed `٢٧٩٫٥٠`, while one
  * otherwise well-formed model answer confidently transcribed both `printed` and `value` as
@@ -43,6 +41,8 @@ import {
   ORDERS_SCREEN_KIND_SCHEMA,
   ORDERS_TIME_READ_SCHEMA,
   READ_SCHEMA,
+  PAYMENTS_LOG_READ_SCHEMA,
+  WALLET_READ_SCHEMA,
   ordersMoneyReadPrompt,
   ordersMoneySecondReadPrompt,
   ordersScreenKindPrompt,
@@ -236,11 +236,14 @@ export class ChatCompletionsOcrReader implements OcrReader {
       const kindTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_TIMEOUT_MS)
       const kindRetryTimeout = Math.min(this.config.timeoutMs, ORDERS_SCREEN_KIND_RETRY_TIMEOUT_MS)
       const routeTimeout = Math.min(this.config.timeoutMs, ORDERS_ROUTE_TIMEOUT_MS)
-      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:kind-retry-${kindRetryTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
+      return `${prefix}:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v3:time-validation-v3:edge-row-alignment-v2:position-evidence-v1:cancellation-consensus-v1:kind-timeout-${kindTimeout}:kind-retry-${kindRetryTimeout}:money-timeout-${moneyTimeout}:time-timeout-${timeTimeout}:route-timeout-${routeTimeout}:route-grace-${ORDERS_ROUTE_GRACE_AFTER_MONEY_MS}:kind-max-${ORDERS_SCREEN_KIND_MAX_COMPLETION_TOKENS}:money-max-${ORDERS_MONEY_MAX_COMPLETION_TOKENS}:time-max-${ORDERS_TIME_MAX_COMPLETION_TOKENS}:route-max-${MAX_COMPLETION_TOKENS}`
     }
     const budget = `timeout-${this.config.timeoutMs}:max-${MAX_COMPLETION_TOKENS}`
     if (field === 'wallet') {
-      return `${prefix}:wallet-consensus-v1:money-validation-v2:${budget}`
+      return `${prefix}:wallet-consensus-v2:wallet-screen-v2:wallet-prompt-v2:money-validation-v3:${budget}`
+    }
+    if (field === 'payments_log') {
+      return `${prefix}:payments-log-prompt-v2:compact-archive-v1:money-validation-v3:partial-archive-v1:${budget}`
     }
     // The BMS v2 prompt knows the fleet's black/green 50Ah gauge and, critically, separates its
     // central charge percentage from «Rem. Cap.» / «Capacity» values expressed in Ah. Old cached
@@ -282,7 +285,9 @@ export class ChatCompletionsOcrReader implements OcrReader {
 
       // Parallel, not sequential: three 20-second inspections must still fit below a 60-second
       // function ceiling. Each pass has its own abort signal and no pass can hold the others open.
-      passes = await Promise.all(prompts.map(async (prompt) => await this.runPass(request, prompt)))
+      passes = await Promise.all(prompts.map(async (prompt) => await this.runPass(request, prompt,
+        request.field === 'wallet' ? { schema: WALLET_READ_SCHEMA, schemaName: 'wallet_balance' }
+          : request.field === 'payments_log' ? { schema: PAYMENTS_LOG_READ_SCHEMA, schemaName: 'payments_log' } : {})))
       result = request.field === 'wallet' ? walletConsensus(passes) : passes[0]!.result
     }
 
@@ -638,6 +643,108 @@ async function routePassWithinGrace(
   }
 }
 
+type SuccessfulOrderPass = ModelPass & { result: Extract<OcrResult, { ok: true }> }
+interface AlignedOrderPass {
+  source: SuccessfulOrderPass
+  /** Canonical money-row index -> ORIGINAL reader-row index. Null never contributes a vote. */
+  indexes: Array<number | null>
+  basis: 'positional' | 'edge_anchored' | 'sparse_edge_anchored'
+}
+
+/** Not a paid/cancelled card, not a malformed clock, and not a refused but visible fee. */
+function isUnidentifiedEdgeFragment(row: ParsedRow | undefined): boolean {
+  if (!row || row.cancelled !== false) return false
+  const blank = (value: string | null | undefined): boolean => !value || value.trim() === ''
+  return blank(row.time) && row.value == null &&
+    (blank(row.printed) || row.printed?.trim() === '?') &&
+    (!row.digitCount || row.digitCount === 0) &&
+    (blank(row.pointA) || blank(row.pointB))
+}
+
+function visibleCore(pass: SuccessfulOrderPass): number[] {
+  let start = 0, end = pass.result.rows.length
+  while (start < end && isUnidentifiedEdgeFragment(pass.raw?.rows?.[start])) start += 1
+  while (end > start && isUnidentifiedEdgeFragment(pass.raw?.rows?.[end - 1])) end -= 1
+  return Array.from({ length: end - start }, (_, index) => start + index)
+}
+
+/** Candidate fixed-offset windows; only demonstrably blank edge fragments may be outside. */
+function edgeWindows(pass: SuccessfulOrderPass): number[][] {
+  const core = visibleCore(pass)
+  if (core.length === 0) return []
+  const windows: number[][] = []
+  for (let start = 0; start <= core[0]!; start += 1) {
+    for (let end = core.at(-1)! + 1; end <= pass.result.rows.length; end += 1) {
+      windows.push(Array.from({ length: end - start }, (_v, index) => start + index))
+    }
+  }
+  return windows
+}
+
+/**
+ * A cropped address-only edge card may be omitted by the money reader but included by the time
+ * reader. Equal list lengths are not a requirement for the SAME remaining cards to vote.
+ *
+ * Only unmatched EDGE fragments may be skipped. Each matched card must have the same literal
+ * clock evidence AND valid date at the same relative position. A partial match requires at least
+ * two distinct, unique dated anchors; unread/conflicting neighbours get no votes. Never align by fee alone (two 260
+ * deliveries at 13:43 and 13:12 are distinct), truncate a real fee, remove an interior row, sort,
+ * infer a clock/date, or turn the second money pass into an independent time vote.
+ *
+ * Canonical financial rows are never removed, even when their own edge fragment has no matching
+ * verifier row. A missing match contributes NO votes, including no cancellation vote. Original
+ * responses and source indexes survive in raw diagnostics for audit and exact replay.
+ */
+function alignOrderPass(base: SuccessfulOrderPass, pass: ModelPass): AlignedOrderPass | null {
+  if (!pass.result.ok) return null
+  const source = pass as SuccessfulOrderPass
+  if (source.result.rows.length === base.result.rows.length) {
+    return { source, indexes: base.result.rows.map((_row, index) => index), basis: 'positional' }
+  }
+  if (base.raw?.rows?.length !== base.result.rows.length || source.raw?.rows?.length !== source.result.rows.length) return null
+  const baseCore = visibleCore(base), sourceCore = visibleCore(source)
+  if (baseCore.length === 0 || sourceCore.length === 0) return null
+  const indexes: Array<number | null> = base.result.rows.map(() => null)
+  const anchors = (pass: SuccessfulOrderPass, core: number[]): Array<string | null> => core.map((index) => {
+    const row = pass.raw!.rows![index]!, clock = printedOrderTimeEvidence(row.time)
+    return clock && row.dateIso && datedMinute(row.dateIso, '00:00') !== null
+      ? `${row.dateIso}|${clock.key}|${row.cancelled === true ? 'cancelled' : 'live'}` : null
+  })
+  const leftAnchors = anchors(base, baseCore), rightAnchors = anchors(source, sourceCore)
+  let complete = baseCore.length === sourceCore.length
+  for (let index = 0; index < Math.min(baseCore.length, sourceCore.length); index += 1) {
+    const baseIndex = baseCore[index]!, sourceIndex = sourceCore[index]!
+    if (leftAnchors[index] === null || leftAnchors[index] !== rightAnchors[index]) { complete = false; continue }
+    indexes[baseIndex] = sourceIndex
+  }
+  if (complete) return { source, indexes, basis: 'edge_anchored' }
+  // An empty final time-only row may be a clipped genuine card rather than an extra fragment.
+  // Retain it when testing edge windows. Never skip an interior row, align by fee, or select the
+  // most convenient offset: EVERY admissible window must imply the same original-row mapping.
+  const candidates = new Map<string, Array<number | null>>()
+  for (const baseWindow of edgeWindows(base)) for (const sourceWindow of edgeWindows(source)) {
+    if (baseWindow.length !== sourceWindow.length) continue
+    const left = anchors(base, baseWindow), right = anchors(source, sourceWindow)
+    const mapping: Array<number | null> = base.result.rows.map(() => null)
+    let matches = 0
+    baseWindow.forEach((baseIndex, position) => {
+      const key = left[position]
+      if (!key || key !== right[position] || left.filter(k => k === key).length !== 1 ||
+        right.filter(k => k === key).length !== 1) return
+      mapping[baseIndex] = sourceWindow[position]!
+      matches += 1
+    })
+    if (matches >= 2) candidates.set(JSON.stringify(mapping), mapping)
+  }
+  if (candidates.size !== 1) return null
+  return { source, indexes: [...candidates.values()][0]!, basis: 'sparse_edge_anchored' }
+}
+
+function alignedRow(pass: AlignedOrderPass, index: number): OcrRow | undefined {
+  const sourceIndex = pass.indexes[index]
+  return sourceIndex == null ? undefined : pass.source.result.rows[sourceIndex]
+}
+
 /**
  * Money comes from the compact pass when available. Time never comes from one model answer: every
  * row is published with a clock/date only when two independently-started passes agree at the same
@@ -705,15 +812,13 @@ function ordersPassResult(
     `moneyPasses` votes on the FEE, where the second pass is a genuinely independent reading: a
     different prompt attacking the digits adversarially, never shown the other's answer.
   */
-  const alignedPasses = [money, time, route].filter(
-    (pass): pass is ModelPass & { result: Extract<OcrResult, { ok: true }> } =>
-      pass.result.ok && pass.result.rows.length === baseLength,
-  )
-  const moneyPasses = [money, moneySecond, route].filter(
-    (pass): pass is ModelPass & { result: Extract<OcrResult, { ok: true }> } =>
-      pass.result.ok && pass.result.rows.length === baseLength,
-  )
-  const routePositionsAligned = route.result.ok && route.result.rows.length === baseLength
+  const moneyAligned = alignOrderPass(base, money)!
+  const secondAligned = alignOrderPass(base, moneySecond)
+  const timeAligned = alignOrderPass(base, time)
+  const routeAligned = alignOrderPass(base, route)
+  const matched = (pass: AlignedOrderPass | null): pass is AlignedOrderPass => pass !== null
+  const alignedPasses = [moneyAligned, timeAligned, routeAligned].filter(matched)
+  const moneyPasses = [moneyAligned, secondAligned, routeAligned].filter(matched)
   const financialDisagreementIndexes: number[] = []
   const timeDisagreementIndexes: number[] = []
   const dateDisagreementIndexes: number[] = []
@@ -767,8 +872,8 @@ function ordersPassResult(
       yBottom: null,
     }
 
-    if (!routePositionsAligned || !route.result.ok) return row
-    const routeRow = route.result.rows[index]!
+    const routeRow = routeAligned ? alignedRow(routeAligned, index) : undefined
+    if (!routeRow) return row
     if (!ordersRowsFinanciallyAgree(baseRow, routeRow)) {
       financialDisagreementIndexes.push(index)
       return row
@@ -803,8 +908,16 @@ function ordersPassResult(
     raw: {
       reader: 'orders-ai-money-and-time-consensus-v5',
       screenKind: screenKind.raw,
-      routesAligned:
-        routePositionsAligned && routeAgreementIndexes.length === baseLength,
+      routesAligned: routeAligned !== null && routeAgreementIndexes.length === baseLength,
+      rowAlignment: Object.fromEntries([
+        ['money', money, moneyAligned], ['moneySecond', moneySecond, secondAligned],
+        ['time', time, timeAligned], ['route', route, routeAligned],
+      ].map(([name, original, aligned]) => {
+        const pass = original as ModelPass, mapping = aligned as AlignedOrderPass | null
+        return [name, { basis: mapping?.basis ?? (pass.result.ok ? 'rejected' : 'unavailable'),
+          sourceRowCount: pass.result.ok ? pass.result.rows.length : null,
+          sourceIndexes: mapping?.indexes ?? null }]
+      })),
       financialDisagreementIndexes,
       timeDisagreementIndexes,
       dateDisagreementIndexes,
@@ -830,13 +943,13 @@ function ordersPassResult(
 }
 
 function orderCancellationConsensus(
-  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  passes: readonly AlignedOrderPass[],
   index: number,
 ): { value: boolean | null; votes: number; disagreement: boolean } {
   let cancelledVotes = 0
   let liveVotes = 0
   for (const pass of passes) {
-    const row = pass.result.rows[index]
+    const row = alignedRow(pass, index)
     if (row === undefined) continue
     if (row.cancelled) cancelledVotes += 1
     else liveVotes += 1
@@ -848,16 +961,16 @@ function orderCancellationConsensus(
 }
 
 function orderDateTimeConsensus(
-  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  passes: readonly AlignedOrderPass[],
   index: number,
   cancelled: boolean,
 ): { time: string | null; printedTime: string | null; dateIso: string | null; timeVotes: number } {
   const candidates = passes
-    .map((pass) => ({ pass, row: pass.result.rows[index] }))
+    .map((pass) => ({ pass, row: alignedRow(pass, index) }))
     // A cancellation disagreement is a row-alignment warning, not supporting time evidence.
     .filter(
       (candidate): candidate is {
-        pass: ModelPass & { result: Extract<OcrResult, { ok: true }> }
+        pass: AlignedOrderPass
         row: OcrRow
       } => candidate.row !== undefined && candidate.row.cancelled === cancelled,
     )
@@ -865,15 +978,14 @@ function orderDateTimeConsensus(
   // Vote on the printed clock evidence, not the already-normalized public row. Otherwise
   // `12:03 AM` and a second pass that illegally omitted its marker as `00:03` would appear to
   // agree even though only one model actually transcribed the printed clock.
-  const timeEvidence = candidates.map(({ pass }) =>
-    printedOrderTimeEvidence(pass.raw?.rows?.[index]?.time),
-  )
+  const printedTimes = candidates.map(({ pass }) => pass.source.raw?.rows?.[pass.indexes[index]!]?.time)
+  const timeEvidence = printedTimes.map(printedOrderTimeEvidence)
   const timeWinner = consensusValue(timeEvidence.map((evidence) => evidence?.key ?? null))
   const winningIndex = timeEvidence.findIndex((evidence) => evidence?.key === timeWinner.value)
   const winningEvidence = winningIndex < 0 ? null : timeEvidence[winningIndex] ?? null
   const winningPrinted = winningIndex < 0
     ? null
-    : candidates[winningIndex]?.pass.raw?.rows?.[index]?.time
+    : printedTimes[winningIndex]
   const dateWinner = consensusValue(candidates.map(({ row }) => row.dateIso))
   return {
     time: winningEvidence === null ? null : normalizePrintedOrderTimeEvidence(winningEvidence),
@@ -907,11 +1019,11 @@ function orderDateTimeConsensus(
  * A cancelled card has no amount and is settled by `orderCancellationConsensus` before this runs.
  */
 function orderMoneyConsensus(
-  passes: ReadonlyArray<ModelPass & { result: Extract<OcrResult, { ok: true }> }>,
+  passes: readonly AlignedOrderPass[],
   index: number,
 ): { value: string | null; votes: number; conflict: boolean } {
   const readings = passes
-    .map((pass) => pass.result.rows[index])
+    .map((pass) => alignedRow(pass, index))
     .filter((row): row is OcrRow => row !== undefined && !row.cancelled)
     .map((row) => row.value)
     .filter((value): value is string => value !== null)
@@ -1296,12 +1408,19 @@ function receivedAtMinute(receivedAt: OrdersEvidenceReceivedAt): number | null {
  * `67430`. A malformed grouping or a `printed`/`value` disagreement now makes that row a refusal.
  */
 export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
+  if (field === 'wallet' && parsed.screenKind !== 'wallet') {
+    return {
+      ok: false,
+      reason: parsed.screenKind === 'other' ? 'wrong_screen' : 'no_fields',
+      detail: 'wallet screen gate: expected an identified wallet balance screen',
+    }
+  }
   const parsedRows = parsed.rows ?? []
   const rows: OcrRow[] = parsedRows.map((r, index) => {
     const ordinaryValue = r.value == null ? null : String(r.value)
     const value = r.cancelled
       ? null
-      : field === 'wallet' || field === 'orders'
+      : field === 'wallet' || field === 'orders' || field === 'payments_log'
         ? verifiedMoneyValue(r)
         : ordinaryValue
     return {
@@ -1317,6 +1436,7 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
           }
         : {}),
       value,
+      ...(field === 'payments_log' && !r.cancelled && value === null ? { reviewRequired: true } : {}),
       cancelled: r.cancelled === true,
       time:
         field === 'orders'
@@ -1345,7 +1465,9 @@ export function parsedResult(field: OcrField, parsed: ParsedScreen): OcrResult {
       detail: `pass ${field}: model returned a well-formed but empty transcription (0 rows, 0 fields)`,
     }
   }
-  return field === 'orders'
+  return field === 'payments_log'
+    ? { ok: true, retryable: rows.some(row => !row.cancelled && row.value === null), rows, fields, raw: parsed }
+    : field === 'orders'
     ? { ok: true, retryable: ordersRowsRetryable(rows), rows, fields, raw: parsed }
     : { ok: true, rows, fields, raw: parsed }
 }
@@ -1364,7 +1486,24 @@ function walletConsensus(passes: readonly ModelPass[]): OcrResult {
   }
 
   const winner = [...votes.values()].find((group) => group.length >= 2)
-  if (!winner) return { ok: false, reason: consensusFailure(passes) }
+  if (!winner) {
+    const statuses = passes.map((pass, index) => {
+      const status = !pass.result.ok ? pass.result.reason
+        : pass.result.rows.length !== 1 ? 'invalid_row_count'
+          : pass.result.rows[0]?.cancelled ? 'cancelled_balance'
+            : pass.result.rows[0]?.value === null ? 'value_rejected' : 'readable_vote'
+      return `${index + 1}:${status}`
+    })
+    return {
+      ok: false,
+      reason: consensusFailure(passes),
+      detail: `wallet consensus: ${statuses.join(',')}; no two verified balances agreed`,
+      raw: {
+        reader: 'wallet-ai-consensus-v2',
+        passes: passes.map(pass => ({ result: pass.result, transcript: pass.raw })),
+      },
+    }
+  }
 
   const representative = winner[0]!
   return {
@@ -1372,7 +1511,7 @@ function walletConsensus(passes: readonly ModelPass[]): OcrResult {
     rows: [representative.row],
     fields: representative.pass.result.ok ? representative.pass.result.fields : {},
     raw: {
-      reader: 'wallet-ai-consensus-v1',
+      reader: 'wallet-ai-consensus-v2',
       agreeingPasses: winner.length,
       passes: passes.map((pass) => (pass.result.ok ? pass.raw : pass.result)),
     },
@@ -1383,6 +1522,8 @@ function consensusFailure(passes: readonly ModelPass[]): OcrFailure {
   // Disagreement between readable amounts is an accuracy refusal, not an upstream outage.
   if (passes.some((pass) => pass.result.ok)) return 'no_fields'
   const reasons = passes.map((pass) => (pass.result.ok ? 'no_fields' : pass.result.reason))
+  if (reasons.filter(reason => reason === 'wrong_screen').length >= 2) return 'wrong_screen'
+  if (reasons.filter(reason => reason === 'no_fields').length >= 2) return 'no_fields'
   if (reasons.every((reason) => reason === 'timeout')) return 'timeout'
   if (reasons.every((reason) => reason === 'refused')) return 'refused'
   return 'unavailable'
@@ -1416,7 +1557,8 @@ function verifiedMoneyValue(row: ParsedRow): string | null {
   if (typeof row.hasDecimal !== 'boolean' || typeof row.hasThousands !== 'boolean') return null
   if (!Number.isInteger(row.digitCount) || Number(row.digitCount) < 1) return null
 
-  let printed = row.printed.trim().replace(/\s*SYP\s*/giu, '').replace(/\s/gu, '')
+  let printed = row.printed.normalize('NFKC').replace(/[\u061c\u200e\u200f\u2066-\u2069]/gu, '')
+    .trim().replace(/\s*SYP\s*/giu, '').replace(/\s/gu, '')
   if (printed.includes('?')) return null
   let sign = ''
   if (/^[+＋]/u.test(printed)) {
@@ -1431,9 +1573,14 @@ function verifiedMoneyValue(row: ParsedRow): string | null {
   if (digitCount !== Number(row.digitCount)) return null
   if (!/^[0-9.,٫٬،]+$/u.test(western)) return null
 
+  // European grouped balances seen in the dark wallet: 1.180,83. Only this exact grammar
+  // changes the role of a dot; flags, digit count and independently converted value must agree.
+  const dotGrouping = row.hasThousands && (row.hasDecimal
+    ? /^\d{1,3}(?:\.\d{3})+[,،]\d{1,2}$/u.test(western)
+    : /^\d{1,3}(?:\.\d{3})+$/u.test(western))
   const decimalCandidates = [...western]
     .map((glyph, index) => ({ glyph, index }))
-    .filter(({ glyph }) => glyph === '.' || glyph === '٫')
+    .filter(({ glyph }) => glyph === '٫' || glyph === '.' && !dotGrouping)
   // A comma is decimal only when the model explicitly said there is a decimal part. When both
   // kinds are present, the final comma may be decimal and earlier commas remain grouping marks.
   if (row.hasDecimal && decimalCandidates.length === 0) {
@@ -1449,10 +1596,11 @@ function verifiedMoneyValue(row: ParsedRow): string | null {
   const fraction = decimalAt < 0 ? '' : western.slice(decimalAt + 1)
   if (row.hasDecimal && !/^\d{1,2}$/u.test(fraction)) return null
 
-  const groupingMarks = [...wholePrinted].filter((glyph) => glyph === ',' || glyph === '،' || glyph === '٬')
+  const groupingPattern = dotGrouping ? /[.]/u : /[,،٬]/u
+  const groupingMarks = [...wholePrinted].filter((glyph) => groupingPattern.test(glyph))
   // A decimal comma was sliced away above, so any separators left in the whole part are grouping.
   if (row.hasThousands !== (groupingMarks.length > 0)) return null
-  const groups = wholePrinted.split(/[,،٬]/u)
+  const groups = wholePrinted.split(groupingPattern)
   if (groups.length === 0 || groups.some((group) => !/^\d+$/u.test(group))) return null
   if (groups.length > 1 && (groups[0]!.length > 3 || groups.slice(1).some((group) => group.length !== 3))) {
     return null
@@ -1504,7 +1652,7 @@ interface OpenAiResponse {
 }
 
 export interface ParsedScreen {
-  screenKind?: 'orders' | 'payments_log' | 'unknown'
+  screenKind?: 'orders' | 'payments_log' | 'wallet' | 'other' | 'unknown'
   rows?: ParsedRow[]
   fields?: Array<{ label?: string; value?: string | null }>
   notes?: string | null

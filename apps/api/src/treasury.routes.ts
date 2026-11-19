@@ -4,6 +4,7 @@ import { z } from 'zod'
 import type {
   CashCountLine,
   CashCountRecord,
+  CompanyRestorationProposal,
   Deps,
   FinancialTransactionDeps,
   JournalEntryRecord,
@@ -165,7 +166,11 @@ function sameCommandEntry(entry: JournalEntryRecord, posting: Posting, reason: s
  * Both are branch manager + GM per the §3 matrix and decision D-5 — explicitly NOT the system
  * admin, who owns rules and periods rather than money.
  */
-export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
+export function registerTreasuryRoutes(
+  app: FastifyInstance,
+  deps: Deps,
+  options: { companyRestorationReviewEnabled?: boolean; companyRestorationDirectPostingEnabled?: boolean } = {},
+): void {
   // The branch a request targets, from `?branchId=` or the body, else the actor's own session.
   // Shared so a read and a write resolve it identically — see branch-scope.ts for why a GET must
   // have a channel at all.
@@ -516,7 +521,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         body.businessDate ?? todayFor(deps),
         body.reason.trim(),
         ...body.lines.map((l) => `${l.fundCode}|${l.side}|${l.amount.toString()}`),
-      ].join(' '))
+      ].join('\u0000'))
       .digest('hex')
       .slice(0, 32)
 
@@ -568,6 +573,21 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
 
       const original = await findEntry(deps, branchId, entryId)
       if (!original) throw new ServiceError(404, 'entry_not_found')
+      if (await deps.companyRestorationReviews.getBySource(entryId)) {
+        // An executed reviewed restoration is not a legacy directly mirrored transfer. Sending
+        // its reversal through that old path would invent an HQ cash movement before acceptance.
+        throw new ServiceError(409, 'restoration_source_requires_reviewed_correction')
+      }
+      const assertHistoricalSourceUnsettled = async (repo: Pick<FinancialTransactionDeps, 'companyLedger'>) => {
+        if (original.eventType !== 'restoration') return
+        const company = await deps.directory.companyBranch()
+        if (!company) return
+        const batches = await repo.companyLedger.listHistoricalSettlements(company.id, branchId)
+        if (batches.some(batch => batch.groups.some(group => group.branchSourceEntries.some(source => source.sourceEntryId === entryId)))) {
+          throw new ServiceError(409, 'historical_settlement_source_requires_reviewed_correction')
+        }
+      }
+      await assertHistoricalSourceUnsettled(deps)
 
       // Reversing an entry that moved صندوق الشركة moves it again, the other way — a GM's deposit, a
       // hand «كييش», a الترميم run. That is company-fund management, so it needs the fund's own
@@ -635,6 +655,12 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
             { lockKey: `receivables:${branchId}`, actorId: req.actor!.userId, requestId: req.requestId },
             async (tx) => {
               const mirror = await prepareCompanyMirror(tx, branchId, [posting])
+              // Recheck under branch -> HQ locks: a concurrent historical approval must not be
+              // followed by the legacy reversal path, which would invent another cash mirror.
+              await assertHistoricalSourceUnsettled(tx)
+              if (await tx.companyRestorationReviews.getBySource(entryId)) {
+                throw new ServiceError(409, 'restoration_source_requires_reviewed_correction')
+              }
               const [written] = await tx.ledger.post(branchId, [posting], meta)
               if (written) await mirrorCompanyBoxEntries(tx, mirror, [written], null)
               return written
@@ -1519,7 +1545,7 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
      * :59/:00 straddle the bucket and both post, which is exactly the case this has to stop.
      */
     const occurrenceKey = createHash('sha256')
-      .update([branchId, businessDate, from, to, body.amount.toString(), body.reason.trim()].join(' '))
+      .update([branchId, businessDate, from, to, body.amount.toString(), body.reason.trim()].join('\u0000'))
       .digest('hex')
       .slice(0, 32)
 
@@ -1812,8 +1838,17 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
   })
 
   app.post('/treasury/restoration', { config: { permission: 'journal.manual.write', subject: targetBranch } }, async (req, reply) => {
-    const body = z.object({ reason: z.string().trim().min(1).max(500) }).parse(req.body)
+    const body = z.object({ reason: z.string().trim().min(1).max(500), idempotencyKey: z.string().uuid().optional() }).parse(req.body)
     const branchId = resolveBranch(req)
+    const proposalId = body.idempotencyKey?.toLowerCase()
+    const requestHash = createHash('sha256').update(JSON.stringify([branchId, req.actor!.userId, body.reason])).digest('hex')
+    if (proposalId) {
+      const prior = await deps.companyRestorationReviews.get(proposalId)
+      if (prior) {
+        if (prior.requestHash !== requestHash) throw new ServiceError(409, 'idempotency_key_conflict')
+        return reply.code(200).send({ ...(prior.response as Record<string, unknown>), replayed: true })
+      }
+    }
     const businessDate = todayFor(deps)
     await assertWeekOpen(deps, branchId, businessDate)
     const actorId = req.actor!.userId
@@ -1829,6 +1864,22 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         requestId: req.requestId,
       },
       async (tx: FinancialTransactionDeps) => {
+        // A new cash-neutral branch marker is authoritative even while the global release flag
+        // stays off. Read it under the branch lock, so activation cannot race a legacy cash mirror.
+        // Unactivated branches retain their existing restoration protocol instead of stopping.
+        const cutover = await tx.companyLedger.cutoverFor(branchId)
+        const direct = options.companyRestorationDirectPostingEnabled !== false
+        if (direct && !cutover) throw new ServiceError(409, 'company_cutover_required')
+        const reviewed = cutover !== null && (direct || options.companyRestorationReviewEnabled === true || cutover.mode === 'link_only')
+        if (reviewed && !proposalId) throw new ServiceError(422, 'restoration_idempotency_key_required')
+        // Retry check precedes mutable balance/target reads, including after later branch activity.
+        if (proposalId) {
+          const prior = await tx.companyRestorationReviews.get(proposalId)
+          if (prior) {
+            if (prior.requestHash !== requestHash) throw new ServiceError(409, 'idempotency_key_conflict')
+            return { reviewedResponse: prior.response as Record<string, unknown>, replayed: true }
+          }
+        }
         /*
           WHICH RUN OF THE DAY THIS IS. Owner, 2026-09-02: «اجعل خيار الترميم متاح دوما». الترميم
           was once per business date, and with the day starting at 04:00 he found the button gone at
@@ -1853,7 +1904,16 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         // it makes الترميم refuse loudly rather than post under a key the guard cannot check.
         const restorationPostings = postingsForRestoration(plan, `${businessDate}#${runNo}`)
         assertPersistableTreasuryPostings(restorationPostings)
-        const mirror = await prepareCompanyMirror(tx, branchId, restorationPostings)
+        const mirror = reviewed ? null : await prepareCompanyMirror(tx, branchId, restorationPostings)
+        const company = reviewed ? await deps.directory.companyBranch() : null
+        if (reviewed) {
+          // HQ readers use this lock for their multi-source snapshot. Serialize proposal creation
+          // with them in the established branch -> HQ order, before posting the actual branch run.
+          if (company) await tx.locks.acquire(`receivables:${company.id}`)
+          if (!company || !cutover || cutover.companyBranchId !== company.id) {
+            throw new ServiceError(409, 'company_cutover_required')
+          }
+        }
         const entries = restorationPostings.length === 0 ? [] : await tx.ledger.post(branchId, restorationPostings, {
           shiftId: null,
           businessDate,
@@ -1903,6 +1963,60 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
           }
           throw err
         }
+        if (reviewed && proposalId && company) {
+          // Keep the immutable source/revision workflow, but confirm the exact initial HQ half
+          // in this SAME transaction. Existing pending runs are never replayed by this switch.
+          const response = {
+            businessDate, source: 'live_ledger', counted: true,
+            openingBalances, legs: responseLegs, netToCompany: serializeMoney(plan.netToCompany),
+            postings: restorationPostings.length, reconciliationPostings: 0,
+            restorationId, proposalId, companyReviewStatus: direct ? 'confirmed' : 'pending_review', replayed: false,
+          }
+          const proposal: CompanyRestorationProposal = {
+            id: proposalId, restorationId, branchId, companyBranchId: company.id, businessDate,
+            reason: body.reason, requestHash, runNo,
+            snapshot: { openingBalances, legs: snapshotLegs }, response,
+            legs: entries.map((entry) => {
+              const movement = companyBoxMovement(entry.lines)
+              const officeLine = entry.lines.find((line) => line.fundCode === 'office_cash' || line.fundCode === 'office_wallet')
+              if (!movement || !officeLine) throw new ServiceError(500, 'restoration_source_integrity_error')
+              return { sourceEntryId: entry.id, fundCode: officeLine.fundCode as 'office_cash' | 'office_wallet',
+                ...movement, sourceEntry: entry }
+            }),
+            createdBy: actorId, createdAtMs: deps.clock.nowMs(),
+          }
+          try {
+            await tx.companyRestorationReviews.create(proposal)
+          } catch (error) {
+            if ((error as { code?: string }).code === 'DUPLICATE_RESTORATION_PROPOSAL') {
+              throw new ServiceError(409, 'idempotency_key_conflict')
+            }
+            throw error
+          }
+          if (direct) {
+            await assertWeekOpen(deps, company.id, businessDate)
+            const revisionId = deps.ids.uuid()
+            const legs = []
+            for (const source of proposal.legs) {
+              if (await tx.companyLedger.findMirrorBySource(source.sourceEntryId)) {
+                throw new ServiceError(409, 'restoration_source_already_mirrored')
+              }
+              const posting = restorationMirror(source.direction, source.amount, branchId, source.sourceEntryId)
+              const [entry] = await tx.ledger.post(company.id, [{ ...posting,
+                occurrenceKey: `review:${revisionId}:${source.sourceEntryId}` }], {
+                shiftId: null, businessDate, postingDate: businessDate, weekStartDate: weekStartFor(businessDate),
+                fxDayId, sypMinorPerUsd: null, createdBy: actorId, reason: body.reason,
+              })
+              if (!entry) throw new ServiceError(409, 'restoration_review_journal_conflict')
+              legs.push({ sourceEntryId: source.sourceEntryId, amount: source.amount,
+                journalEntryId: entry.id, reversalEntryId: null })
+            }
+            await tx.companyRestorationReviews.appendRevision({ id: revisionId, proposalId, version: 1,
+              kind: 'confirm', requestHash, reason: body.reason, occurredOn: businessDate, businessDate,
+              legs, createdBy: actorId, createdAtMs: deps.clock.nowMs() })
+          }
+          return { reviewedResponse: response, replayed: false }
+        }
         await mirrorCompanyBoxEntries(tx, mirror, entries, restorationId)
 
         return {
@@ -1913,6 +2027,8 @@ export function registerTreasuryRoutes(app: FastifyInstance, deps: Deps): void {
         }
       },
     )
+
+    if ('reviewedResponse' in outcome) return reply.code(outcome.replayed ? 200 : 201).send(outcome.reviewedResponse)
 
     return reply.code(201).send({
       businessDate,

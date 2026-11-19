@@ -94,6 +94,12 @@ export class MemoryCloseDraftRepo implements CloseDraftRepo {
         slot.attachmentToken === input.attachmentToken,
     )
     if (!attached) return null
+    const archiveDraft = this.rows.get(input.shiftId)
+    const priorArchive = archiveDraft?.data.reads[`${input.attachmentToken}|${input.read.field}`]
+    if (input.read.field === 'payments_log' && priorArchive?.status === 'failed' && (priorArchive.rowCount ?? 0) > 0 &&
+      (input.replacesCompletedRead !== true || priorArchive.attempts >= 2)) {
+      return archiveDraft ? structuredClone(archiveDraft) : null
+    }
     // At most one COMPLETE read per (shift, media, attachment generation, field) — the same rule the
     // Postgres repo enforces under the shift row lock. See the comment there for why.
     if (input.read.status === 'complete' && input.replacesCompletedRead !== true) {

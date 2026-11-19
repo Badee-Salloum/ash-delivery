@@ -38,6 +38,8 @@ export const COMPANY_LINE_ROLES = {
   openingTransfer: 'opening_transfer',
   kaishMirror: 'kaish_mirror',
   shahnMirror: 'shahn_mirror',
+  historicalBranchTransfer: 'historical_branch_transfer',
+  historicalRestorationReclass: 'historical_restoration_reclass',
 } as const
 
 export type CompanyMoveKind = 'deposit' | 'withdrawal'
@@ -51,8 +53,8 @@ export type CompanyDepositAccount = 'owner_funding' | 'opening'
  *  • `owner_outside` — the owner paid it himself outside the system: no pocket moves, the cost is
  *    recorded against his funding so the books still see it.
  */
-export type CompanyPaidFrom = 'pocket' | 'reserve' | 'owner_outside'
-export const COMPANY_PAID_FROM = ['pocket', 'reserve', 'owner_outside'] as const satisfies readonly CompanyPaidFrom[]
+export type CompanyPaidFrom = 'pocket' | 'reserve' | 'owner_outside' | 'owner_custody'
+export const COMPANY_PAID_FROM = ['pocket', 'reserve', 'owner_outside', 'owner_custody'] as const satisfies readonly CompanyPaidFrom[]
 
 /** The direction of a branch `company_box` movement, as the restoration names it. */
 export type MirrorDirection = 'to_company' | 'from_company'
@@ -122,6 +124,8 @@ export function companyExpenseSource(currency: Currency, paidFrom: CompanyPaidFr
       return cash(currency)
     case 'reserve':
       return { kind: 'depreciation_reserve', currency }
+    case 'owner_custody':
+      return { kind: 'company_custody', currency }
     case 'owner_outside':
       return { kind: 'company_equity', currency, account: 'owner_funding' }
   }
@@ -280,6 +284,64 @@ export function restorationMirror(
   })
 }
 
+/** A pre-platform transfer remembered in HQ without re-running a live branch restoration. */
+export function historicalBranchTransfer(
+  direction: MirrorDirection,
+  amount: Minor,
+  branchId: string,
+  occurrenceKey: string,
+): Posting {
+  positive('historical branch transfer', amount)
+  const transit: FundRef = { kind: 'historical_branch_transit', branchId }
+  const pocket = cash('SYP_NEW')
+  return assertBalanced({
+    eventType: 'company_historical_transfer',
+    occurrenceKey: key(occurrenceKey),
+    lines: direction === 'to_company'
+      ? [D(pocket, amount, COMPANY_LINE_ROLES.historicalBranchTransfer),
+        C(transit, amount, COMPANY_LINE_ROLES.historicalBranchTransfer)]
+      : [D(transit, amount, COMPANY_LINE_ROLES.historicalBranchTransfer),
+        C(pocket, amount, COMPANY_LINE_ROLES.historicalBranchTransfer)],
+  })
+}
+
+/**
+ * Settle the counterpart of one verified historical HQ transfer, without posting its cash again.
+ * The caller proves the complete restoration group and human approval before persisting a batch.
+ * Both accounts are HQ SYP_NEW accounts; neither branch cash nor profit/loss is a line here.
+ */
+export function historicalRestorationReclassification(
+  direction: MirrorDirection,
+  amount: Minor,
+  sourceBranchId: string,
+  historicalJournalEntryId: number,
+  batchId: string,
+): Posting {
+  positive('historical restoration reclassification', amount)
+  if (direction !== 'to_company' && direction !== 'from_company') {
+    throw new RangeError(`a historical restoration reclassification needs a direction, got ${direction}`)
+  }
+  if (!Number.isSafeInteger(historicalJournalEntryId) || historicalJournalEntryId <= 0) {
+    throw new RangeError(`a historical restoration reclassification needs its HQ source entry id, got ${historicalJournalEntryId}`)
+  }
+  if (sourceBranchId.trim() === '' || sourceBranchId.includes(':')) {
+    throw new RangeError('a historical restoration reclassification needs its source branch id without a colon')
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(batchId)) {
+    throw new RangeError('a historical restoration reclassification needs a UUID batch id')
+  }
+  const transit: FundRef = { kind: 'historical_branch_transit', branchId: sourceBranchId }
+  const clearing: FundRef = { kind: 'branch_clearing', branchId: sourceBranchId }
+  const role = COMPANY_LINE_ROLES.historicalRestorationReclass
+  return assertBalanced({
+    eventType: 'company_historical_restoration_reclass',
+    occurrenceKey: `historical-reclass:${batchId.toLowerCase()}:${historicalJournalEntryId}`,
+    lines: direction === 'to_company'
+      ? [D(transit, amount, role), C(clearing, amount, role)]
+      : [D(clearing, amount, role), C(transit, amount, role)],
+  })
+}
+
 /** Cutover: the branch's `company_box` balance, moved as-is into the company SYP pocket. */
 export function companyOpeningTransfer(branchId: string, amount: Minor): Posting {
   positive('opening transfer', amount)
@@ -330,4 +392,3 @@ export function companyPocketAfterRestoration(
   const pocketAfter = minor(pocket + plan.netToCompany)
   return { pocketAfter, warning: pocketAfter < ZERO }
 }
-

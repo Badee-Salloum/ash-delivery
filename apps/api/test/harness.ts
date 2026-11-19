@@ -102,6 +102,10 @@ export async function makeHarness(
     trackerIngestEnabled?: boolean
     trackerGatewayToken?: string
     minDriverAndroidTrackerBuild?: number
+    companyRestorationReviewEnabled?: boolean
+    companyRestorationDirectPostingEnabled?: boolean
+    companyHistoricalPostingEnabled?: boolean
+    companyHistoricalCreationEnabled?: boolean
   } = {},
 ): Promise<Harness> {
   const deps = createMemoryDeps(NOW_MS)
@@ -184,6 +188,11 @@ export async function makeHarness(
 
   const app = await buildApp({
     deps,
+    // Legacy historical intake fixtures remain testable; production defaults to retired.
+    companyHistoricalCreationEnabled: opts.companyHistoricalCreationEnabled ?? true,
+    companyRestorationDirectPostingEnabled: opts.companyRestorationDirectPostingEnabled ?? false,
+    ...(opts.companyRestorationReviewEnabled !== undefined ? { companyRestorationReviewEnabled: opts.companyRestorationReviewEnabled } : {}),
+    ...(opts.companyHistoricalPostingEnabled !== undefined ? { companyHistoricalPostingEnabled: opts.companyHistoricalPostingEnabled } : {}),
     ...(opts.splitGate ? { splitGate: opts.splitGate } : {}),
     ...(opts.maxOcrReadsPerShift !== undefined ? { maxOcrReadsPerShift: opts.maxOcrReadsPerShift } : {}),
     ...(opts.driverSelfRegistrationEnabled !== undefined

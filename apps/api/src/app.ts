@@ -1,4 +1,7 @@
+import { hasCurrentTrackingPermissions, hasStartTrackingReadiness } from './tracking-start-gate.ts'
 import cookie from '@fastify/cookie'
+import { isDatabaseUnavailable } from './database-availability.ts'
+import { installOperationalDiagnostics, type OperationalDiagnostics } from './operational-diagnostics.ts'
 import Fastify, { type FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { Deps, GpsIdentifiedFix, GpsTrackerHealth, ShiftOrderRecord } from '@ash/contracts'
@@ -90,7 +93,18 @@ import { registerNotificationRoutes } from './notification.routes.ts'
 import { registerTierRoutes } from './tier.routes.ts'
 import { registerTreasuryRoutes } from './treasury.routes.ts'
 import { registerCompanyRoutes } from './company.routes.ts'
+import { registerCompanyHistoricalDraftRoutes } from './company-historical-draft.routes.ts'
 import { registerCompanyRecurringRoutes } from './company-recurring.routes.ts'
+import { registerExistingAssetRoutes } from './company-assets-existing.routes.ts'
+import { registerCompanyRestorationReviewRoutes } from './company-restoration-review.routes.ts'
+import { registerCompanyHistoricalRestorationSettlementRoutes } from './company-historical-restoration-settlements.routes.ts'
+import { registerCompanyMovementReviewRoutes } from './company-movement-corrections.routes.ts'
+import { registerCompanyOperationActionRoutes } from './company-operation-actions.routes.ts'
+import { registerCompanyBranchTransferRoutes } from './company-branch-transfers.routes.ts'
+import { registerCompanyReportRoutes } from './company-report.routes.ts'
+import { registerCompanyCustodyRoutes } from './company-custody.routes.ts'
+import { registerCompanyOwnerWithdrawalRoutes } from './company-owner-withdrawals.routes.ts'
+import { registerCompanyHistoricalSourceRoutes } from './company-historical-source.routes.ts'
 import {
   MAX_UPLOAD_BYTES,
   acknowledgeStaleEvidence,
@@ -154,6 +168,7 @@ function wireCloseBlocker(blocker: CloseBlocker) {
 
 export interface AppOptions {
   deps: Deps
+  operationalDiagnostics?: OperationalDiagnostics
   logger?: boolean
   splitGate?: 'advisory' | 'strict'
   /** Runaway guard on paid cloud OCR. Defaults here so a test never has to think about spend. */
@@ -165,6 +180,14 @@ export interface AppOptions {
   trackerGatewayToken?: string | undefined
   /** Zero disables the new-shift Android build gate. */
   minDriverAndroidTrackerBuild?: number
+  /** One switch for branch execution + deferred HQ review. Legacy behavior remains the default. */
+  companyRestorationReviewEnabled?: boolean
+  /** New runs post both books atomically; false only supports legacy protocol tests. */
+  companyRestorationDirectPostingEnabled?: boolean
+  /** Compatibility default is enabled; an unreconciled release can explicitly stop new intake. */
+  companyHistoricalPostingEnabled?: boolean
+  /** Retired in the deployed UI/API; explicit opt-in exists only for legacy regression fixtures. */
+  companyHistoricalCreationEnabled?: boolean
 }
 
 /**
@@ -195,6 +218,7 @@ export function isSealedWeekPgError(err: unknown): boolean {
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const { deps } = opts
   const app = Fastify({ logger: opts.logger ?? false, genReqId: () => deps.ids.uuid() })
+  if (opts.operationalDiagnostics) installOperationalDiagnostics(app, opts.operationalDiagnostics)
 
   resetRouteRegistry()
   collectRoutes(app)
@@ -256,6 +280,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.addHook('preHandler', authorize)
 
   app.setErrorHandler(async (err, req, reply) => {
+    if (isDatabaseUnavailable(err)) {
+      req.log.warn({ err }, 'database temporarily unavailable; transaction did not complete')
+      return reply.header('Retry-After', '5').code(503).send({ error: 'database_busy', detail: null })
+    }
     if (err instanceof ServiceError) {
       return reply.code(err.status).send({ error: err.code, detail: err.detail ?? null })
     }
@@ -1028,21 +1056,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = startPackageRequest.parse(req.body)
       const before = await deps.shifts.findById(id)
-      if (before?.state === 'draft' && (opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
-        const readiness = await deps.gpsHealth.findByShift(id)
-        const nowMs = deps.clock.nowMs()
-        if (!readiness || readiness.appBuild === null ||
-            readiness.appBuild < opts.minDriverAndroidTrackerBuild! ||
-            readiness.readinessAtMs === null || nowMs - readiness.readinessAtMs > 120_000 ||
-            readiness.readinessCapturedAtMs === null ||
-            Math.abs(nowMs - readiness.readinessCapturedAtMs) > 120_000 ||
-            readiness.readinessAccuracyM === null || readiness.readinessAccuracyM > 100 ||
-            readiness.readinessPrecise !== true || readiness.readinessLocationEnabled !== true ||
-            readiness.readinessBackgroundPermission !== true ||
-            readiness.readinessNotificationPermission !== true ||
-            readiness.readinessBatteryOptimizationExempt !== true ||
-            readiness.readinessAutostartAcknowledged !== true ||
-            readiness.readinessQueueAvailable !== true) {
+      if (before?.state === 'draft' && body.trackingClient === 'browser') {
+        // This records the client channel only, without claiming a location or permission check.
+        await deps.gpsHealth.recordBrowserClient(id)
+      } else if (before?.state === 'draft' && (opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
+        if (!hasStartTrackingReadiness(await deps.gpsHealth.findByShift(id), deps.clock.nowMs(), opts.minDriverAndroidTrackerBuild!, body.trackingClient)) {
           throw new ServiceError(409, 'gps_preflight_required', {
             minAndroidBuild: opts.minDriverAndroidTrackerBuild,
           })
@@ -1070,6 +1088,10 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = approveOpenRequest.parse(req.body)
+      if ((opts.minDriverAndroidTrackerBuild ?? 0) > 0 &&
+        !hasCurrentTrackingPermissions(await deps.gpsHealth.findByShift(id), deps.clock.nowMs(), opts.minDriverAndroidTrackerBuild!)) {
+        throw new ServiceError(409, 'gps_preflight_required', {minAndroidBuild: opts.minDriverAndroidTrackerBuild})
+      }
       const shift = await approveOpen(deps, req.actor!, id, body)
       return { id: shift.id, state: shift.state }
     },
@@ -1235,7 +1257,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         }
       }
       const committed = await deps.closeUnitOfWork.run(
-        { shiftId: id, actorId: req.actor!.userId, requestId: req.requestId },
+        { shiftId: id, actorId: req.actor!.userId, requestId: req.requestId, scope: 'evidence' },
         async (transaction) => {
           const transactionDeps: Deps = { ...deps, ...transaction }
           const current = await getCloseDraft(transactionDeps, req.actor!, id)
@@ -1350,7 +1372,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
           ...(clientExpectedRevision === null ? {} : {
             runCommit: <T>(work: (transactionDeps: Deps) => Promise<T>): Promise<T> =>
               deps.closeUnitOfWork.run(
-                { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId },
+                { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId, scope: 'evidence' },
                 (transaction) => work({ ...deps, ...transaction }),
               ),
             beforeCommit: async (transactionDeps: Deps) => {
@@ -1523,7 +1545,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         }
         const expectedRevision = Number(revisionHeader)
         const committed = await deps.closeUnitOfWork.run(
-          { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId },
+          { shiftId: params.id, actorId: req.actor!.userId, requestId: req.requestId, scope: 'evidence' },
           async (transaction) => {
             const transactionDeps: Deps = { ...deps, ...transaction }
             const current = await getCloseDraft(transactionDeps, req.actor!, params.id)
@@ -1938,6 +1960,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const signer = confirmedById === null ? null : await deps.users.findById(confirmedById)
 
       return {
+        managerChargeBps: (await deps.shifts.findById(id))?.managerChargeBps ?? null,
         policyCode: plan.policyCode,
         driverRateBps: plan.driverRateBps,
         deliveryFeeTotal: serializeMoney(plan.deliveryFeeTotal),
@@ -2068,6 +2091,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = approveCloseRequest.parse(req.body)
+      if ([body.keepAsReceivable, body.cashReceivableDeferred, body.walletReceivableDeferred, body.cashShortageReceivable]
+        .some(amount => amount !== undefined && amount !== 0n)) {
+        const current = await deps.shifts.findById(id)
+        if (current?.state !== 'approved' && current?.state !== 'week_locked') throw new ServiceError(422, 'close_deferral_disabled')
+      }
       const result = await approveClose(deps, req.actor!, id, body.reviewedOrdersHash, opts.splitGate ?? 'advisory', {
         ...(body.keepAsReceivable === undefined ? {} : { keepAsReceivable: body.keepAsReceivable }),
         ...(body.payShareNow === undefined ? {} : { payShareNow: body.payShareNow }),
@@ -2296,10 +2324,12 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         before: before === null ? null : {
           managerCharge: serializeMoney(before.managerCharge),
           managerChargeReason: before.managerChargeReason,
+          managerChargeBps: before.managerChargeBps ?? null,
         },
         after: {
           managerCharge: serializeMoney(shift.managerCharge),
           managerChargeReason: shift.managerChargeReason,
+          managerChargeBps: shift.managerChargeBps ?? null,
         },
       })
       return {
@@ -2423,6 +2453,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     async (req) => {
       const { id } = z.object({ id: z.string() }).parse(req.params)
       const body = forceCloseRequest.parse(req.body)
+      if (!body.prepareOnly && [body.cashReceivableDeferred, body.walletReceivableDeferred, body.cashShortageReceivable]
+        .some(amount => amount !== undefined && amount !== 0n)) {
+        const current = await deps.shifts.findById(id)
+        if (current?.state !== 'approved' && current?.state !== 'week_locked') throw new ServiceError(422, 'close_deferral_disabled')
+      }
       const result = await forceClose(deps, req.actor!, id, body)
       if (result.prepared) {
         return { id: result.shift.id, state: result.shift.state, postings: 0, prepared: true }
@@ -2544,14 +2579,29 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       if (shift.state !== 'draft') return reply.code(409).send({ error: 'shift_not_draft' })
       const nowMs = deps.clock.nowMs()
       if (body.capturedAtMs > nowMs + 5_000 || nowMs - body.capturedAtMs > 30_000) {
-        return reply.code(422).send({ error: 'gps_fix_not_fresh' })
+        const timing = {
+          reason: body.capturedAtMs > nowMs ? 'future' as const : 'stale' as const,
+          serverTimeMs: nowMs, capturedAtMs: body.capturedAtMs, ageMs: nowMs - body.capturedAtMs,
+          maxAgeMs: 30_000, maxFutureSkewMs: 5_000, retryable: true,
+        }
+        try {
+          await deps.gpsHealth.recordReadinessTimingRejection({
+            shiftId: id, atMs: nowMs, capturedAtMs: body.capturedAtMs,
+            appBuild: body.appBuild, reason: timing.reason, ageMs: timing.ageMs,
+          })
+        } catch {
+          // A diagnostic outage must not turn a recoverable timing refusal into a server error.
+          req.log.warn({ ...timing, appBuild: body.appBuild }, 'gps_readiness_timing_log_failed')
+        }
+        return reply.code(422).send({ error: 'gps_fix_not_fresh', detail: timing })
       }
-      if (body.appBuild < (opts.minDriverAndroidTrackerBuild ?? 0)) {
+      if (body.client === 'android' && body.appBuild < (opts.minDriverAndroidTrackerBuild ?? 0)) {
         return reply.code(426).send({ error: 'android_update_required', minAndroidBuild: opts.minDriverAndroidTrackerBuild })
       }
       // Persist all checkable settings before returning a permission refusal. A later failed
       // permission check replaces earlier true flags, so the start route never trusts them.
       await deps.gpsHealth.recordReadiness({
+        client: body.client,
         shiftId: id, atMs: nowMs, capturedAtMs: body.capturedAtMs,
         accuracyM: body.accuracyM, appBuild: body.appBuild,
         precise: body.precise, locationEnabled: body.locationEnabled,
@@ -2563,7 +2613,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       })
       if (!body.precise) return reply.code(409).send({ error: 'gps_precise_location_required' })
       if (!body.locationEnabled) return reply.code(409).send({ error: 'gps_location_enabled_required' })
-      if ((opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
+      if (body.client === 'android' && (opts.minDriverAndroidTrackerBuild ?? 0) > 0) {
         if (body.backgroundPermission !== true) {
           return reply.code(409).send({ error: 'gps_background_permission_required' })
         }
@@ -2598,6 +2648,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       const nowMs = deps.clock.nowMs()
       const health: GpsTrackerHealth = {
         shiftId: id,
+        readinessClient: previous?.readinessClient ?? 'android',
         readinessAtMs: previous?.readinessAtMs ?? null,
         readinessCapturedAtMs: previous?.readinessCapturedAtMs ?? null,
         readinessAccuracyM: previous?.readinessAccuracyM ?? null,
@@ -2610,6 +2661,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         readinessQueueAvailable: previous?.readinessQueueAvailable ?? null,
         appBuild: body.appBuild ?? previous?.appBuild ?? null,
         heartbeatAtMs: nowMs,
+        observedAtMs: body.observedAtMs ?? null,
         service: body.service, permission: body.permission,
         locationEnabled: body.locationEnabled, network: body.network,
         backgroundPermission: body.backgroundPermission ?? null,
@@ -2626,6 +2678,32 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       }
       await deps.gpsHealth.recordHeartbeat(health)
       return reply.code(202).send({ recorded: true, cause: trackerCause(health, nowMs) })
+    },
+  )
+
+  for (const [path, permission] of [
+    ['/shifts/:id/close-reference', 'shift.approve'],
+    ['/shifts/:id/close-reference/driver', 'shift.operate'],
+  ] as const) app.get(path,
+    { config: { permission, subject: shiftSubject } },
+    async (req) => {
+      const { id } = z.object({id: z.string()}).parse(req.params)
+      const [draft, slots, permissionEvents, shift] = await Promise.all([
+        deps.closeDrafts.findByShift(id), deps.media.listSlots(id), deps.gpsHealth.permissionEvents(id), deps.shifts.findById(id),
+      ])
+      const attachment = slots.find(slot => slot.package === 'end' && slot.slot === 'daily_summary')
+      const read = attachment && draft ? draft.data.reads[`${attachment.attachmentToken}|daily_summary`] ?? null : null
+      const periodStart = shift?.windowOpensAt ?? shift?.driverConfirmedAt ?? shift?.openApprovedAt ?? null
+      const periodEnd = shift?.submittedAt ?? new Date(deps.clock.nowMs()).toISOString()
+      const elapsedMs = periodStart === null ? null : Date.parse(periodEnd) - Date.parse(periodStart)
+      const startOdometer = shift?.odoStart ?? null
+      const endOdometer = draft?.data.figures.odometerKm ?? shift?.odoEnd ?? null
+      return { summary: attachment ? {mediaId: attachment.mediaId, read,
+        date: draft?.data.figures.dailySummaryDate ?? null} : null, permissionEvents,
+        shiftMetrics: {periodStart, periodEnd,
+          durationMinutes: elapsedMs !== null && elapsedMs >= 0 ? Math.floor(elapsedMs / 60000) : null,
+          distanceKm: startOdometer !== null && endOdometer !== null && endOdometer >= startOdometer ? endOdometer - startOdometer : null} }
+
     },
   )
 
@@ -3007,9 +3085,22 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   registerCheckInRoutes(app, deps)
 
   // ── Treasury: daily cash count + manual entries (SRS E-3, E-5) ──────────────────
-  registerTreasuryRoutes(app, deps)
-  registerCompanyRoutes(app, deps)
+  registerTreasuryRoutes(app, deps, { companyRestorationReviewEnabled: opts.companyRestorationReviewEnabled ?? false,
+    companyRestorationDirectPostingEnabled: opts.companyRestorationDirectPostingEnabled ?? true })
+  registerCompanyRoutes(app, deps, { historicalPostingEnabled: opts.companyHistoricalPostingEnabled ?? true,
+    historicalCreationEnabled: opts.companyHistoricalCreationEnabled === true })
+  registerCompanyHistoricalDraftRoutes(app, deps, opts.companyHistoricalCreationEnabled === true)
   registerCompanyRecurringRoutes(app, deps)
+  registerExistingAssetRoutes(app, deps)
+  registerCompanyRestorationReviewRoutes(app, deps, { enabled: opts.companyRestorationReviewEnabled ?? false })
+  registerCompanyHistoricalRestorationSettlementRoutes(app, deps)
+  registerCompanyMovementReviewRoutes(app, deps)
+  registerCompanyOperationActionRoutes(app, deps)
+  registerCompanyBranchTransferRoutes(app, deps)
+  registerCompanyReportRoutes(app, deps)
+  registerCompanyCustodyRoutes(app, deps)
+  registerCompanyOwnerWithdrawalRoutes(app, deps)
+  registerCompanyHistoricalSourceRoutes(app, deps)
 
   // ── Tier admin (SRS F-3…F-6) ────────────────────────────────────────────────────
   registerTierRoutes(app, deps)

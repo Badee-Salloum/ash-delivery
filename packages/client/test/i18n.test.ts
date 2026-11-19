@@ -17,6 +17,31 @@ describe('i18n parity', () => {
     expect(keyPaths(en).sort()).toEqual(keyPaths(ar).sort())
   })
 
+  it('uses plain Arabic asset-account value terms without changing catalog keys', () => {
+    expect(JSON.stringify(ar)).not.toMatch(/دفترية/)
+    expect(ar.companyFinance.bookValue).toBe('قيمة الأصل في الحسابات')
+    expect(ar.existingAssetReview.baselineValue).toContain('قيمة الأصل في الحسابات')
+    expect(ar.financeReview.pendingValuation).toContain('بانتظار الاعتماد')
+    expect(ar.dashboard.pendingAssetRecognition).toBe('بطاقات بانتظار اعتماد قيم الأصول في الحسابات')
+    for (const explanation of [ar.existingAssetReview.bookValueHint, ar.dashboard.assetBookValueHint]) {
+      expect(explanation).toContain('القيمة المعتمدة للأصل ناقص الاهتلاك المعتمد')
+      expect(explanation).toContain('خفض القيمة المعتمد إن وجد')
+      expect(explanation).toContain('ليست سعر بيع ولا رصيد صندوق')
+      expect(explanation).toContain('البطاقة الإدارية لا تدخل الحسابات تلقائياً')
+    }
+    expect(keyPaths(en).sort()).toEqual(keyPaths(ar).sort())
+    expect(en.companyFinance.bookValue).toContain('Book')
+  })
+
+  it('explains protected historical matching without suggesting a new cash posting or automatic acceptance', () => {
+    expect(ar.financeReview.historicalMatching).toBe('مطابقة الترميمات المسجلة سابقاً')
+    expect(ar.financeReview.counterpartNeutralHint).toContain('لا يتغير نقد الشركة أو نقد الفرع أو الربح')
+    expect(ar.financeReview.historicalDifferenceRemains).toContain('طابور المراجعة المنفصل')
+    expect(ar.financeReview.reviewedHistoricalLinks).toContain('الروابط المتعددة')
+    expect(en.financeReview.counterpartNeutralHint).toContain('cash and profit stay unchanged')
+    expect(keyPaths(en).sort()).toEqual(keyPaths(ar).sort())
+  })
+
   it('keeps the canonical finance, shift, time, and brand terms available to both apps', () => {
     expect(ar.app.title).toBe(ar.glossary.brand.product)
     expect(en.app.title).toBe(en.glossary.brand.product)
@@ -75,8 +100,8 @@ describe('i18n parity', () => {
     expect(ar.settlement.receivableDeferralHint).toContain('يُستهلك تلقائياً')
     expect(ar.settlement.cashReceivableDeferred).toBe('تمويل النوبة القادمة من الكاش')
     expect(ar.settlement.walletReceivableDeferred).toBe('تمويل النوبة القادمة من المحفظة')
-    expect(ar.settlement.walletConfirmed).toContain('سيُستهلك تلقائياً')
-    expect(ar.settlement.cashConfirmed).toContain('سيُستهلك تلقائياً')
+    expect(ar.settlement.walletConfirmed).not.toContain('تمويل النوبة القادمة')
+    expect(ar.settlement.cashConfirmed).not.toContain('تمويل النوبة القادمة')
     expect(ar.errors.invalid_receivable_amount).toContain('تمويل النوبة القادمة')
     expect(ar.errors.receivable_amount_conflict).toContain('تمويل النوبة القادمة')
 
@@ -84,8 +109,8 @@ describe('i18n parity', () => {
     expect(en.settlement.receivableDeferralHint).toContain('consumed automatically')
     expect(en.settlement.cashReceivableDeferred).toBe('Next-shift cash funding')
     expect(en.settlement.walletReceivableDeferred).toBe('Next-shift wallet funding')
-    expect(en.settlement.walletConfirmed).toContain('consumed automatically')
-    expect(en.settlement.cashConfirmed).toContain('consumed automatically')
+    expect(en.settlement.walletConfirmed).not.toContain('next-shift')
+    expect(en.settlement.cashConfirmed).not.toContain('next-shift')
     expect(en.errors.invalid_receivable_amount).toContain('next-shift funding')
     expect(en.errors.receivable_amount_conflict).toContain('next-shift funding')
   })

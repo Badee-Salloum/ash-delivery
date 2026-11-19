@@ -12,9 +12,13 @@ import { PgReceivableEventRepo } from '../src/repos-receivable.ts'
 import { PgLedgerRangeSource } from '../src/repos-range.ts'
 import { PgCompanyLedgerRepo, PgCompanyLedgerSource } from '../src/repos-company.ts'
 import { PgCompanyFinanceRepo } from '../src/repos-company-finance.ts'
+import { PgExistingAssetRepo } from '../src/repos-existing-assets.ts'
+import { PgCompanyRestorationReviewRepo } from '../src/repos-company-restoration-review.ts'
+import { PgCompanyMovementReviewRepo } from '../src/repos-company-movement-review.ts'
+import { PgCompanyHistoricalDraftRepo } from '../src/repos-company-historical-draft.ts'
 import { PgRecurringExpenseRepo } from '../src/repos-recurring.ts'
 import { PgDriverAccountProvisioningRepo } from '../src/repos-driver-account.ts'
-import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl } from './disposable-database.ts'
+import { assertDisposableDatabaseConnection, assertDisposableDatabaseUrl, withTestSearchPath } from './disposable-database.ts'
 import {
   PgAuditRepo,
   PgCashDeductionRepo,
@@ -73,7 +77,7 @@ if (!DATABASE_URL) {
     it.skip('skipped: set DATABASE_URL to run against real Postgres (CI always does)', () => {})
   })
 } else {
-  const pool = createPool(DATABASE_URL)
+  const pool = withTestSearchPath(createPool(DATABASE_URL), 'public')
   let schemaReady: Promise<void> | null = null
 
   const ensureSchema = async (): Promise<void> => {
@@ -246,6 +250,10 @@ if (!DATABASE_URL) {
         companyLedger: new PgCompanyLedgerRepo(pool),
         companyLedgerSource: new PgCompanyLedgerSource(pool),
         companyFinance: new PgCompanyFinanceRepo(pool),
+        existingAssets: new PgExistingAssetRepo(pool),
+        companyRestorationReviews: new PgCompanyRestorationReviewRepo(pool),
+        companyMovementReview: new PgCompanyMovementReviewRepo(pool),
+        companyHistoricalDrafts: new PgCompanyHistoricalDraftRepo(pool),
         tiers: new PgTierRepo(pool),
         notifications: new PgNotificationRepo(pool),
         settings: new PgSettingsRepo(pool),
@@ -284,6 +292,21 @@ if (!DATABASE_URL) {
         [branchId, fund.type, fund.code, fund.currency],
       )
     },
+  })
+
+  describe('single-connection close transaction policy', () => {
+    it('reads break settings and breaks without borrowing a second connection', async () => {
+      await makeDeps()
+      const singlePool = createPool(DATABASE_URL!, 1)
+      try {
+        const result = await new PgShiftCloseUnitOfWork(singlePool).run(
+          { shiftId: SHIFT, actorId: USER },
+          async tx => Promise.all([tx.settings.get('shift.break_limit_minutes'), tx.breaks.listByShift(SHIFT)]),
+        )
+        expect(result).toEqual([null, []])
+        expect((await singlePool.query('SELECT 1 AS ok')).rows[0]).toEqual({ ok: 1 })
+      } finally { await singlePool.end() }
+    })
   })
 
   describe('identified GPS tracking boundary', () => {

@@ -7,6 +7,10 @@ const read = (file: string): string => readFileSync(new URL(file, migrationDir),
 
 const ENUMS = '0065_company_ledger_enum_values.sql'
 const enums = read(ENUMS)
+const historicalEnums = read('0090_company_historical_transit_enums.sql')
+const INITIAL_COMPANY_LEDGER_EVENTS = COMPANY_LEDGER_EVENTS.filter(
+  (event) => event !== 'company_historical_transfer' && event !== 'company_historical_restoration_reclass' && event !== 'company_custody_transfer',
+)
 
 const COMPANY_FUND_TYPES = [
   'company_cash',
@@ -40,9 +44,11 @@ describe('0065 — enum values, and nothing else', () => {
     }
   })
 
-  it('adds exactly the company events the domain declares', () => {
+  it('adds the initial company events, with historical transfer added later in 0090', () => {
     const added = [...enums.matchAll(/ALTER TYPE ledger_event ADD VALUE IF NOT EXISTS '(\w+)';/g)].map((m) => m[1])
-    expect(added).toEqual([...COMPANY_LEDGER_EVENTS])
+    expect(added).toEqual(INITIAL_COMPANY_LEDGER_EVENTS)
+    expect(historicalEnums).toContain("ALTER TYPE ledger_event ADD VALUE IF NOT EXISTS 'company_historical_transfer';")
+    expect(read('0100_company_custody_enums.sql')).toContain("ALTER TYPE ledger_event ADD VALUE IF NOT EXISTS 'company_custody_transfer';")
   })
 
   it('contains no statement other than ALTER TYPE', () => {
@@ -52,7 +58,7 @@ describe('0065 — enum values, and nothing else', () => {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.startsWith('--'))
-    expect(statements.length).toBe(COMPANY_FUND_TYPES.length + COMPANY_LEDGER_EVENTS.length)
+    expect(statements.length).toBe(COMPANY_FUND_TYPES.length + INITIAL_COMPANY_LEDGER_EVENTS.length)
     expect(statements.every((line) => line.startsWith('ALTER TYPE '))).toBe(true)
   })
 

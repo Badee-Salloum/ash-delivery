@@ -1,3 +1,4 @@
+import { allocate } from '@ash/domain'
 import { createHash } from 'node:crypto'
 import type {
   BatteryReadingFields,
@@ -1087,10 +1088,14 @@ async function approveOpenLocked(
      * the bound at the same instant as `openApprovedAt` means the pair can never disagree about
      * which shift they describe.
      *
+     * An explicitly recorded administrative window is already frozen by PgShiftRepo. Preserve it
+     * here too, so the approval response and memory adapter agree with the persisted boundary.
+     * This changes neither the driver's signature nor the real manager approval timestamp.
+     *
      * The fallback keeps a shift whose confirmation instant is somehow missing on exactly today's
      * behaviour; `null` here would classify its every row as `unknown`.
      */
-    windowOpensAt: withFunds.driverConfirmedAt ?? openApprovedAt,
+    windowOpensAt: withFunds.windowOpensAt ?? withFunds.driverConfirmedAt ?? openApprovedAt,
     openApprovedBy: actor.userId,
   }
   await deps.shifts.update(updated, actor.userId)
@@ -1709,7 +1714,7 @@ async function adjustWalletTopupLocked(
       from: input.expectedCurrentTotal,
       to: input.targetTotal,
       reduction,
-      currentTotal: sum(shift.topupTranches),
+      currentTotal: sum(spec.tranchesOf(shift)),
       correctionEntryId: existingEntry.id,
       replayed: true,
     }
@@ -2452,7 +2457,7 @@ interface EndPackageInput {
   walletStrip?: string | null
 }
 
-function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord): OperationsInput {
+export function closeDraftOperationsInput(shiftId: string, closeDraft: CloseDraftRecord): OperationsInput {
   const providerNo = (clientKey: string, supplied: string): string => supplied.trim() !== ''
     ? supplied
     : `YAL-${createHash('sha256').update(`${shiftId}|${clientKey}`).digest('hex').slice(0, 32)}`
@@ -3265,12 +3270,18 @@ export async function submitOperations(
   actor: Actor,
   shiftId: string,
   input: OperationsInput,
-  internal: { canonicalCloseDraft?: boolean; revision?: number; draftHash?: string } = {},
+  internal: { canonicalCloseDraft?: boolean; revision?: number; draftHash?: string; administrativeOnBehalf?: boolean } = {},
 ): Promise<{ shift: ShiftRecord; br1: Br1View; cashDeductions: CashDeductionRecord[] }> {
   const shift = await mustFind(deps, shiftId)
   if (shift.state !== 'open' && shift.state !== 'suspended') throw new ServiceError(409, 'shift_not_open')
 
   const grants = grantsFromRows(await deps.directory.grants())
+  // Internal historical intake must not manufacture a driver's confirmation. No HTTP body
+  // supplies this option; an active system-admin approver records the original source instead.
+  if (internal.administrativeOnBehalf === true && (
+    actor.roleKey !== 'system_admin' ||
+    !can(actor, 'shift.approve', { driverId: shift.driverId, branchId: shift.branchId, ownerUserId: null }, grants).allowed
+  )) throw new ServiceError(403, 'forbidden')
   const decision = can(
     actor,
     'shift.operate',
@@ -3517,7 +3528,7 @@ export async function submitOperations(
       payMode: row.payMode,
       fee: row.fee,
       zone: row.zone ?? null,
-      driverConfirmed: true,
+      driverConfirmed: internal.administrativeOnBehalf !== true,
       source: storedSource(row.source),
       feeOcr: row.feeOcr ?? null,
       // A driver's own list is always Yallago's work. A manual job is the branch's and only a
@@ -3875,7 +3886,7 @@ export async function setManagerCharge(
   deps: Deps,
   actor: Actor,
   shiftId: string,
-  input: { amount: Minor; reason: string | null },
+  input: { amount: Minor; reason: string | null; percentBps?: number | undefined },
 ): Promise<ShiftRecord> {
   return deps.closeUnitOfWork.run({ shiftId, actorId: actor.userId }, async (transaction) => {
     const scoped = withCloseTransaction(deps, transaction)
@@ -3891,9 +3902,14 @@ export async function setManagerCharge(
     )
     if (!decision.allowed) throw new ServiceError(403, 'forbidden')
 
+    if (input.percentBps !== undefined && (input.amount !== 0n || !Number.isInteger(input.percentBps) || input.percentBps < 1 || input.percentBps > 10000)) {
+      throw new ServiceError(422, 'invalid_manager_charge_amount')
+    }
+    const share = input.percentBps === undefined ? null : fixedShiftShare(await scoped.orders.listByShift(shiftId))
+    const amount = share === null ? input.amount : allocate(share.split.driverShare, input.percentBps!, 'half-up')
     if (input.amount < 0n) throw new ServiceError(422, 'invalid_manager_charge_amount')
     const reason = input.reason === null ? null : input.reason.trim()
-    if (input.amount > 0n && (reason === null || reason === '')) {
+    if ((amount > 0n || input.percentBps !== undefined) && (reason === null || reason === '')) {
       throw new ServiceError(422, 'manager_charge_reason_required')
     }
 
@@ -3905,9 +3921,10 @@ export async function setManagerCharge(
      */
     const updated: ShiftRecord = {
       ...shift,
-      managerCharge: input.amount,
+      managerCharge: amount,
+      managerChargeBps: input.percentBps ?? null,
       // Cleared together, so the CHECK constraint's pairing can never be violated from this path.
-      managerChargeReason: input.amount === 0n ? null : reason,
+      managerChargeReason: amount === 0n && input.percentBps === undefined ? null : reason,
     }
     await scoped.shifts.update(updated, actor.userId)
     return updated
@@ -4376,7 +4393,7 @@ export async function settlementFor(
      * ordinary approval, and exceptional close must use the same pure calculation»). Passing it in
      * per-request instead would let a close post a charge the manager never previewed.
      */
-    managerChargeTotal: shift.managerCharge,
+    managerChargeTotal: shift.managerChargeBps == null ? shift.managerCharge : allocate(share.split.driverShare, shift.managerChargeBps, 'half-up'),
   }
   const withoutDeferral = planFixedShareSettlement(settlementInputs)
   const maximumCashReceivable = withoutDeferral.cashClaimToOffice > 0n
@@ -4737,6 +4754,7 @@ async function approveCloseLocked(
     // so the two can never disagree about when the close was signed.
     approvedAt: new Date(confirmedAtMs).toISOString(),
     trackingEndedAt: new Date(confirmedAtMs).toISOString(),
+    managerCharge: settlement.managerChargeTotal,
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     equationDiff: br1.result.scalarDiff,
@@ -5083,6 +5101,7 @@ async function forceCloseLocked(
     // so the two can never disagree about when the close was signed.
     approvedAt: new Date(confirmedAtMs).toISOString(),
     trackingEndedAt: new Date(confirmedAtMs).toISOString(),
+    managerCharge: settlement.managerChargeTotal,
     keptAsReceivable: settlement.cashReceivableDeferred,
     driverSharePaid: settlement.finalEmployeeCash > 0n ? settlement.finalEmployeeCash : minor(0n),
     odoEnd: finalOdometer,

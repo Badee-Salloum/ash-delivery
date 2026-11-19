@@ -15,6 +15,8 @@ import {
   exchangeRate,
   exchangeRoundingGap,
   fxRateFromAmounts,
+  historicalBranchTransfer,
+  historicalRestorationReclassification,
   mirrorOrder,
   restorationMirror,
 } from '../../src/ledger/company.ts'
@@ -255,6 +257,7 @@ describe('«عكس» — the exact inverse, roles kept', () => {
     expect(() => companyReversal(sweepToCompany('office_cash', m(1n)), KEY)).toThrow(/not a reversible/)
     expect(() => companyReversal(companyOpeningTransfer(BRANCH, m(1n)), KEY)).toThrow(/not a reversible/)
     expect(() => companyReversal(restorationMirror('to_company', m(1n), BRANCH, 7), KEY)).toThrow(/not a reversible/)
+    expect(() => companyReversal(historicalRestorationReclassification('to_company', m(1n), BRANCH, 7, KEY), KEY)).toThrow(/not a reversible/)
     expect(() => companyReversal(companyReversal(targets[0]!, 'x'), KEY)).toThrow(/not a reversible/)
     const roleless: Posting = {
       eventType: 'company_deposit',
@@ -265,6 +268,77 @@ describe('«عكس» — the exact inverse, roles kept', () => {
       ],
     }
     expect(() => companyReversal(roleless, KEY)).toThrow(/role/)
+  })
+})
+
+describe('verified historical restoration reclassification — noncash HQ counterpart only', () => {
+  it('reclassifies a receipt from transit into the branch matching account, without receiving it again', () => {
+    const posting = historicalRestorationReclassification('to_company', m(525_000n), BRANCH, 8_869, KEY)
+    expect(posting.eventType).toBe('company_historical_restoration_reclass')
+    expect(posting.occurrenceKey).toBe(`historical-reclass:${KEY}:8869`)
+    expect(shape(posting)).toEqual([
+      [`historical_branch_transit:${BRANCH}`, 'D', 525_000n, 'historical_restoration_reclass'],
+      [`branch_clearing:${BRANCH}`, 'C', 525_000n, 'historical_restoration_reclass'],
+    ])
+    expect(currencyBalances(posting)).toEqual([{ currency: 'SYP_NEW', debits: 525_000n, credits: 525_000n }])
+  })
+
+  it('uses the opposite noncash sides for a payment to the branch', () => {
+    const posting = historicalRestorationReclassification('from_company', m(687_000n), BRANCH, 8_875, KEY)
+    expect(shape(posting)).toEqual([
+      [`branch_clearing:${BRANCH}`, 'D', 687_000n, 'historical_restoration_reclass'],
+      [`historical_branch_transit:${BRANCH}`, 'C', 687_000n, 'historical_restoration_reclass'],
+    ])
+  })
+
+  it('preserves the original cash balance and clears only the historical counterpart (property)', () => {
+    fc.assert(fc.property(
+      fc.constantFrom('to_company' as const, 'from_company' as const),
+      fc.bigInt({ min: 1n, max: 10n ** 14n }),
+      (direction, amount) => {
+        const original = historicalBranchTransfer(direction, m(amount), BRANCH, 'original-history')
+        const reclass = historicalRestorationReclassification(direction, m(amount), BRANCH, 1, KEY)
+        const expectedCash = direction === 'to_company' ? amount : -amount
+        expect(balanceOf([original, reclass], byCode('company_cash:SYP_NEW'))).toBe(expectedCash)
+        expect(balanceOf([original, reclass], byCode(`historical_branch_transit:${BRANCH}`))).toBe(0n)
+        expect(balanceOf([reclass], byCode(`branch_clearing:${BRANCH}`))).toBe(-expectedCash)
+        expect(reclass.lines.every((line) =>
+          line.fund.kind === 'historical_branch_transit' || line.fund.kind === 'branch_clearing',
+        )).toBe(true)
+        expect(balanceOf([reclass], (fund) =>
+          fund.kind === 'company_cash' || fund.kind === 'company_box' || fund.kind === 'office_cash'
+          || fund.kind === 'office_wallet' || fund.kind === 'company_income' || fund.kind === 'company_expense'
+          || fund.kind === 'company_equity' || fund.kind === 'depreciation_reserve',
+        )).toBe(0n)
+        expect(currencyBalances(reclass)).toEqual([{ currency: 'SYP_NEW', debits: amount, credits: amount }])
+      },
+    ))
+  })
+
+  it('keys each source once within a UUID batch and canonicalises UUID case', () => {
+    const first = historicalRestorationReclassification('to_company', m(1n), BRANCH, 1, KEY)
+    expect(historicalRestorationReclassification('to_company', m(1n), BRANCH, 1, KEY.toUpperCase())).toEqual(first)
+    expect(historicalRestorationReclassification('to_company', m(1n), BRANCH, 2, KEY).occurrenceKey).not.toBe(first.occurrenceKey)
+    expect(historicalRestorationReclassification('to_company', m(1n), BRANCH, 1, BRANCH).occurrenceKey).not.toBe(first.occurrenceKey)
+  })
+
+  it('rejects zero or negative amounts instead of generating zero journal legs', () => {
+    for (const amount of [0n, -1n]) {
+      expect(() => historicalRestorationReclassification('to_company', m(amount), BRANCH, 1, KEY)).toThrow(RangeError)
+    }
+  })
+
+  it('requires an exact positive HQ source id, a source branch, a UUID batch and a known direction', () => {
+    for (const entryId of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => historicalRestorationReclassification('to_company', m(1n), BRANCH, entryId, KEY)).toThrow(/source entry id/)
+    }
+    for (const branchId of ['', ' ', 'branch:other']) {
+      expect(() => historicalRestorationReclassification('to_company', m(1n), branchId, 1, KEY)).toThrow(/source branch id/)
+    }
+    for (const batchId of ['', 'manual', ` ${KEY}`, `${KEY}:2`]) {
+      expect(() => historicalRestorationReclassification('to_company', m(1n), BRANCH, 1, batchId)).toThrow(/UUID batch id/)
+    }
+    expect(() => historicalRestorationReclassification('forged' as 'to_company', m(1n), BRANCH, 1, KEY)).toThrow(/direction/)
   })
 })
 

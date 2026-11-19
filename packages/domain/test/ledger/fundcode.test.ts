@@ -57,6 +57,8 @@ const ARBITRARY: { [K in FundRef['kind']]: fc.Arbitrary<Extract<FundRef, { kind:
     .tuple(currency, fc.constantFrom(...COMPANY_INCOME_ACCOUNTS))
     .map(([c, account]) => ({ kind: 'company_income', currency: c, account })),
   branch_clearing: id.map((branchId) => ({ kind: 'branch_clearing', branchId })),
+  company_custody: currency.map((currency) => ({ kind: 'company_custody', currency })),
+  historical_branch_transit: id.map((branchId) => ({ kind: 'historical_branch_transit', branchId })),
   company_payable: fc.tuple(id, currency).map(([debtId, c]) => ({ kind: 'company_payable', debtId, currency: c })),
   company_receivable: fc
     .tuple(id, currency)
@@ -167,11 +169,12 @@ describe('company fund codes', () => {
     ).toThrow(RangeError)
   })
 
-  it('lists the ten company kinds 0065 adds', () => {
+  it('lists the company kinds including company money held in custody', () => {
     expect([...COMPANY_FUND_KINDS].sort()).toEqual(
       [
         'branch_clearing',
         'company_cash',
+        'company_custody',
         'company_equity',
         'company_expense',
         'company_fx_position',
@@ -180,6 +183,7 @@ describe('company fund codes', () => {
         'company_receivable',
         'depreciation_reserve',
         'fixed_asset',
+        'historical_branch_transit',
       ],
     )
   })

@@ -189,6 +189,7 @@ export const createShiftRequest = z.object({
 })
 
 export const startPackageRequest = z.object({
+  trackingClient: z.enum(['android','browser']).default('android'),
   odometerKm: z.number().int().min(0),
   // Nullable on purpose. A blank field used to reach the server as `Number('') === 0`, so "the
   // driver did not answer" was indistinguishable from "the pack is flat". The gate refuses null.
@@ -532,9 +533,10 @@ export const setManagerChargeRequest = z
   .object({
     /** A magnitude. The direction is the instrument, never the sign. */
     amount: nonnegativeMoneySchema,
+    percentBps: z.number().int().min(1).max(10000).optional(),
     reason: nonblankReasonSchema.nullable().default(null),
   })
-  .refine((value) => value.amount === 0n || value.reason !== null, {
+  .refine((value) => (value.amount === 0n && value.percentBps === undefined) || value.reason !== null, {
     message: 'a charge requires an audited reason',
     path: ['reason'],
   })
@@ -581,6 +583,7 @@ export const endPackageRequest = z.object({
 })
 
 const closeDraftFiguresPatch = z.object({
+  dailySummaryDate: isoDateSchema.nullable().optional(),
   odometerKm: z.number().int().min(0).nullable().optional(),
   odometerAnomalyConfirmed: z.boolean().optional(),
   cashDeclared: nonnegativeMoneySchema.nullable().optional(),
@@ -664,7 +667,7 @@ export const linkedCloseDraftReadRequest = z.object({
   expectedRevision: z.number().int().min(0),
   mediaId: z.string().min(1),
   attachmentToken: z.string().min(1),
-  field: z.enum(['orders', 'payments_log', 'wallet', 'odometer', 'bms']),
+  field: z.enum(['orders', 'payments_log', 'wallet', 'odometer', 'bms', 'daily_summary']),
   retryFailed: z.boolean().default(false),
 })
 
@@ -735,6 +738,7 @@ export const shiftFundingPreviewSchema = z.object({
 
 /** The decision-complete settlement preview returned to the manager. */
 export const shiftSettlementViewSchema = z.object({
+  managerChargeBps: z.number().int().min(1).max(10000).nullable().optional(),
   policyCode: settlementPolicySchema,
   driverRateBps: z.literal(4_000),
   deliveryFeeTotal: settlementMoneyStringSchema,
@@ -916,7 +920,8 @@ export const gpsIngestRequest = z.union([gpsBatchRequest, gpsPingRequest])
 
 /** Preflight metadata; location coordinates never leave the handset until confirmation. */
 export const gpsReadinessRequest = z.object({
-  appBuild: z.number().int().min(1).max(2_147_483_647),
+  client: z.enum(['android','browser']).default('android'),
+  appBuild: z.number().int().min(0).max(2_147_483_647),
   capturedAtMs: z.number().int(),
   accuracyM: z.number().min(0).max(100),
   precise: z.boolean(),
@@ -928,11 +933,13 @@ export const gpsReadinessRequest = z.object({
   /** Driver acknowledgement after opening OEM autostart settings; Android cannot verify the toggle. */
   autostartAcknowledged: z.boolean().optional(),
   queueAvailable: z.boolean().optional(),
-})
+}).refine(body => body.client === 'browser' ? body.appBuild === 0 : body.appBuild > 0,
+  {message:'The app build must match the tracking client',path:['appBuild']})
 
 /** A coordinate-free heartbeat. Counters are cumulative on this handset/shift. */
 export const gpsDiagnosticsRequest = z.object({
-  appBuild: z.number().int().positive().optional(),
+  observedAtMs: z.number().int().nonnegative().max(8_640_000_000_000_000).optional(),
+  appBuild: z.number().int().nonnegative().optional(),
   service: z.enum(['running', 'stopped', 'unknown']),
   permission: z.enum(['precise', 'approximate', 'denied', 'unknown']),
   locationEnabled: z.boolean().nullable(),

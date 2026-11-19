@@ -97,7 +97,7 @@ export async function startBreak(deps: Deps, actor: Actor, shiftId: string, brea
     const consumedBeforeMs = rows.reduce(
       (total, entry) => total + Math.max(0, (entry.endedAtMs ?? startedAtMs) - entry.startedAtMs), 0,
     )
-    const limitMinutes = await breakLimitMinutes(deps)
+    const limitMinutes = await breakLimitMinutes(locked)
     await locked.breaks.create({
       id: breakId,
       shiftId,

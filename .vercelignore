@@ -9,6 +9,11 @@ backups
 backups/
 **/backups/
 outputs/
+output/
+tmp/
+visual-tests/
+test-results/
+playwright-report/
 node_modules/
 **/node_modules/
 

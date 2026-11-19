@@ -31,6 +31,8 @@ import type {
   DocumentRecord,
   ExpenseCategoryRecord,
   ExpenseRecord,
+  ExpenseReadFilter,
+  ExpenseReadResult,
   ExpenseRepo,
   IncomeCategoryRecord,
   IncomeRecord,
@@ -183,6 +185,7 @@ export class PgShiftRepo implements ShiftRepo {
            -- refuses a non-zero amount without a reason, so the pair always moves together.
            manager_charge_minor = $30,
            manager_charge_reason = $31,
+           manager_charge_bps = $33,
            tracking_ended_at = CASE
              WHEN state = 'draft' AND $2::shift_state = 'awaiting_open_approval' THEN NULL
              ELSE COALESCE(tracking_ended_at, $32::timestamptz)
@@ -221,6 +224,7 @@ export class PgShiftRepo implements ShiftRepo {
           String(shift.managerCharge),
           shift.managerChargeReason,
           shift.trackingEndedAt ?? null,
+          shift.managerChargeBps ?? null,
         ],
       )
 
@@ -450,6 +454,7 @@ export class PgShiftRepo implements ShiftRepo {
       trackingEndedAt: r.tracking_ended_at == null ? null : (r.tracking_ended_at as Date).toISOString(),
       managerCharge: minor(BigInt((r.manager_charge_minor as string | null) ?? '0')),
       managerChargeReason: (r.manager_charge_reason as string | null) ?? null,
+      managerChargeBps: r.manager_charge_bps == null ? null : Number(r.manager_charge_bps),
     }))
   }
 }
@@ -1743,9 +1748,10 @@ export class PgExpenseRepo implements ExpenseRepo {
     this.pool = pool
   }
 
-  async listCategories(): Promise<ExpenseCategoryRecord[]> {
+  async listCategories(includeInactive = false): Promise<ExpenseCategoryRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
-      'SELECT id, code, name_ar, active FROM expense_categories WHERE active ORDER BY code',
+      'SELECT id, code, name_ar, active FROM expense_categories WHERE active OR $1 ORDER BY code',
+      [includeInactive],
     )
     return rows.map((r) => ({
       id: String(r.id),
@@ -1812,6 +1818,44 @@ export class PgExpenseRepo implements ExpenseRepo {
       [branchId, from, to],
     )
     return rows.map(expenseRecord)
+  }
+
+  async search(branchId: string, filter: ExpenseReadFilter, page?: { limit: number; offset: number }): Promise<ExpenseReadResult> {
+    const values: unknown[] = [branchId, filter.to]
+    const where = ['e.branch_id = $1', 'e.business_date <= $2']
+    const bind = (value: unknown): string => { values.push(value); return `$${values.length}` }
+    if (filter.from !== undefined) where.push(`e.business_date >= ${bind(filter.from)}`)
+    if (filter.categoryId !== undefined) where.push(`e.category_id = ${bind(filter.categoryId)}`)
+    if (filter.costCenterKind === 'operating') where.push("e.cost_center_kind IN ('general', 'branch')")
+    else if (filter.costCenterKind !== undefined) where.push(`e.cost_center_kind = ${bind(filter.costCenterKind)}`)
+    if (filter.vehicleId !== undefined) where.push(`e.vehicle_id = ${bind(filter.vehicleId)}`)
+    if (filter.channel !== undefined) where.push(`e.channel = ${bind(filter.channel)}`)
+    if (filter.query !== undefined) {
+      // A search string is literal data, not SQL or a LIKE wildcard language.
+      const pattern = bind(`%${filter.query.replace(/[\\%_]/g, '\\$&')}%`)
+      where.push(`(e.description ILIKE ${pattern} ESCAPE '\\' OR e.id::text ILIKE ${pattern} ESCAPE '\\' OR e.journal_entry_id::text ILIKE ${pattern} ESCAPE '\\')`)
+    }
+    if (filter.receipt !== undefined) where.push(`e.receipt_media_id IS ${filter.receipt === 'with' ? 'NOT ' : ''}NULL`)
+    if (filter.minAmount !== undefined) where.push(`e.amount_minor >= ${bind(filter.minAmount.toString())}::bigint`)
+    if (filter.maxAmount !== undefined) where.push(`e.amount_minor <= ${bind(filter.maxAmount.toString())}::bigint`)
+    const pagination = page ? `LIMIT ${bind(page.limit)} OFFSET ${bind(page.offset)}` : ''
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `WITH filtered AS (
+         SELECT e.*, e.amount_minor::text AS amount FROM expenses e WHERE ${where.join(' AND ')}
+       ) SELECT
+         (SELECT COUNT(*) FROM filtered)::text AS count,
+         COALESCE((SELECT SUM(amount_minor) FROM filtered), 0)::text AS total,
+         (SELECT MIN(business_date)::text FROM expenses WHERE branch_id = $1) AS earliest,
+         COALESCE((SELECT jsonb_agg(p ORDER BY p.business_date DESC, p.created_at DESC, p.journal_entry_id DESC NULLS LAST, p.id DESC)
+           FROM (SELECT * FROM filtered ORDER BY business_date DESC, created_at DESC, journal_entry_id DESC NULLS LAST, id DESC ${pagination}) p), '[]'::jsonb) AS expenses`,
+      values,
+    )
+    const row = rows[0]!
+    return {
+      expenses: (row.expenses as Record<string, unknown>[]).map(expenseRecord),
+      count: Number(row.count), total: minor(BigInt(String(row.total))),
+      earliestBusinessDate: row.earliest === null ? null : isoDate(row.earliest),
+    }
   }
 
   async listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]> {

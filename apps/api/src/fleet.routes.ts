@@ -51,6 +51,7 @@ import { summarizeBreaks } from './breaks.service.ts'
 import { branchSubject, resolveBranchId } from './branch-scope.ts'
 import { completedShiftFinancial } from './shift-financial.ts'
 import { grantsFromRows } from './rbac.ts'
+import { assetLedgerBookValue } from './company-asset-read.service.ts'
 
 /** The wire shape of a life-log event: cost serialised as a decimal string, time as ISO. */
 function presentVehicleEvent(e: VehicleEventRecord): Record<string, unknown> {
@@ -767,10 +768,23 @@ export function registerFleetRoutes(app: FastifyInstance, deps: Deps): void {
           purchasedOn: asset.purchasedOn,
           paidNow: serializeMoney(asset.paidNow),
           outstanding: serializeMoney(outstanding),
-          bookValue: serializeMoney(assetBookValue(asset.price, asset.purchasedOn, q.to)),
+          bookValue: serializeMoney(await assetLedgerBookValue(deps.ledger,asset.branchId,asset.id,asset.currency,q.to,todayFor(deps))),
+          bookValueBasis:'recognized_ledger',bookValueAsOf:q.to,
+          scheduledBookValue:serializeMoney(assetBookValue(asset.price,asset.purchasedOn,q.to)),
+          scheduleIsPostedDepreciation:false,
           depreciationDue: serializeMoney(minor(scheduledDue - funded)),
           depreciationFunded: serializeMoney(funded),
         }
+      } else {
+        const card=await deps.existingAssets.getByVehicle(id)
+        if(card) assetFinance={id:card.id,kind:'vehicle',name:card.name,currency:card.currency,
+          price:card.price===null?null:serializeMoney(card.price),purchasedOn:card.purchasedOn,
+          registrationMode:'register_existing',status:card.status,accountingStatus:card.accountingStatus,
+          paidNow:null,outstanding:null,depreciationDue:null,depreciationFunded:null,
+          bookValue:card.recognition!==null&&card.accountingStatus==='approved'
+            ? serializeMoney(await assetLedgerBookValue(deps.ledger,card.branchId,card.recognition.accountAssetId,card.currency,q.to,todayFor(deps))) : null,
+          bookValueBasis:card.recognition!==null?'recognized_ledger':'unreviewed',bookValueAsOf:q.to,
+          scheduleIsPostedDepreciation:false}
       }
       const company = await deps.directory.companyBranch()
       if (company) {

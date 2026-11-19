@@ -15,6 +15,10 @@ import type {
 } from '@ash/domain'
 import type { CompanyLedgerRepo, CompanyLedgerSource, FinancialLocks } from './company-ledger.ts'
 import type { CompanyFinanceRepo } from './company-finance.ts'
+import type { ExistingAssetRepo } from './existing-assets.ts'
+import type { CompanyRestorationReviewRepo } from './company-restoration-review.ts'
+import type { CompanyMovementReviewRepo } from './company-movement-review.ts'
+import type { CompanyHistoricalDraftRepo } from './company-historical-draft.ts'
 
 /**
  * The ports. Everything the application needs from the outside world, expressed as interfaces
@@ -74,7 +78,7 @@ export interface BlobStore {
 }
 
 /** Which screen is being read. Each one parses differently; none of them is a generic "document". */
-export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
+export type OcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms' | 'daily_summary'
 
 /**
  * Why a read produced nothing. Distinct states, because each wants a different response.
@@ -184,6 +188,8 @@ export type OcrResult =
        * token ceiling from a screen that genuinely had nothing on it: both are `no_fields`.
        */
       detail?: string
+      /** Optional failed transcripts for deterministic diagnosis; never an authoritative value. */
+      raw?: unknown
     }
 
 /**
@@ -501,6 +507,7 @@ export interface ShiftRecord {
    * snapshot exists. It is frozen into the settlement at approval like every other close figure.
    */
   managerCharge: Minor
+  managerChargeBps?: number | null
   /** Audited reason for the pending charge. Required by the database whenever the amount is non-zero. */
   managerChargeReason: string | null
   keptAsReceivable: Minor
@@ -1286,10 +1293,14 @@ export interface LedgerRepo {
        * independent from the client UUID/occurrence key used for retry idempotency.
        */
       externalReference?: string | null
+      /** Explicit audited HQ-only addition to a sealed prior period; never reopens it. */
+      priorPeriodReason?: string
     },
   ): Promise<JournalEntryRecord[]>
   listByShift(shiftId: string): Promise<JournalEntryRecord[]>
   listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]>
+  /** Whole immutable journal evidence in one statement-snapshot for a branch business-date range. */
+  listByRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<JournalEntryRecord[]>
   /** Signed movements touching either office box, newest first and cursor-paged. */
   listTreasuryMovements(branchId: string, filter: TreasuryMovementFilter): Promise<TreasuryMovementPage>
   /**
@@ -1311,6 +1322,10 @@ export interface LedgerRepo {
    * reference is unique per branch in PostgreSQL, so this returns at most one row.
    */
   findByExternalReference(branchId: string, externalReference: string): Promise<JournalEntryRecord | null>
+  /** Immutable receipt lookup. Callers must validate its ledger and economic lines before linking. */
+  findEntryById(id: number): Promise<JournalEntryRecord | null>
+  /** One snapshot for exact immutable source IDs; missing IDs are omitted, no inferred matches. */
+  findEntriesByIds(ids: readonly number[]): Promise<JournalEntryRecord[]>
   fundBalance(branchId: string, fundCode: string): Promise<Minor>
   /**
    * Every fund whose code starts with `prefix`, and its balance.
@@ -1491,6 +1506,9 @@ export interface RestorationRecord {
 }
 
 export interface RestorationRepo {
+  /** Immutable executed run, identified by its actual database identity, never an amount guess. */
+  getById(id: number): Promise<(RestorationRecord & { id: number }) | null>
+  list(branchId: string): Promise<Array<RestorationRecord & { id: number }>>
   /**
    * Throws `{ code: 'DUPLICATE_RESTORATION' }` when that run number is already taken. Returns the
    * row's id — the company mirror of each of the run's journals names it (C2).
@@ -1630,6 +1648,8 @@ export interface CloseDraftReadRecord {
   field: OcrField
   failure: OcrFailure | null
   attempts: number
+  /** Optional evidence scalars, bound to this immutable attachment generation. */
+  fields?: Readonly<Record<string, string | null>>
   /** Orders-page diagnostics: source rows and the accounting rows they produced. */
   rowCount?: number
   ordersCount?: number
@@ -1779,6 +1799,7 @@ export interface CloseDraftMovement {
 }
 
 export interface CloseDraftFigures {
+  dailySummaryDate?: string | null
   odometerKm: number | null
   odometerKmOcr: number | null
   odometerAnomalyConfirmed: boolean
@@ -2162,12 +2183,37 @@ export interface AdvanceRepo {
   listEvents(advanceId: string): Promise<AdvanceEventRecord[]>
 }
 
+/** Branch expense reads are SYP_NEW; a funding origin is not inferred from the paying box. */
+export interface ExpenseReadFilter {
+  from?: CalendarDate
+  to: CalendarDate
+  categoryId?: string
+  costCenterKind?: 'vehicle' | 'branch' | 'general' | 'operating'
+  vehicleId?: string
+  channel?: 'office_cash' | 'office_wallet'
+  query?: string
+  receipt?: 'with' | 'without'
+  minAmount?: Minor
+  maxAmount?: Minor
+}
+
+export interface ExpenseReadResult {
+  expenses: ExpenseRecord[]
+  /** Whole filtered set, not this page. Exact minor-unit sum of recorded expense rows. */
+  total: Minor
+  count: number
+  /** First recorded expense at this branch, independent of the filters. */
+  earliestBusinessDate: CalendarDate | null
+}
+
 export interface ExpenseRepo {
-  listCategories(): Promise<ExpenseCategoryRecord[]>
+  listCategories(includeInactive?: boolean): Promise<ExpenseCategoryRecord[]>
   createCategory(category: ExpenseCategoryRecord): Promise<void>
   /** Lookup by the client-owned expense UUID, which is also its idempotency key. */
   get(id: string): Promise<ExpenseRecord | null>
   create(expense: ExpenseRecord): Promise<void>
+  /** One snapshot for records/count/total; omitted pagination means the complete filtered export. */
+  search(branchId: string, filter: ExpenseReadFilter, page?: { limit: number; offset: number }): Promise<ExpenseReadResult>
   listByBranchAndDate(branchId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
   /** Company/branch expenses explicitly attributed to one vehicle in the inclusive period. */
   listByVehicle(branchId: string, vehicleId: string, from: CalendarDate, to: CalendarDate): Promise<ExpenseRecord[]>
@@ -2195,7 +2241,7 @@ export interface RecurringExpenseTemplateRecord {
   vehicleId: string | null
   assetId?: string | null
   channel: 'office_cash' | 'office_wallet' | null
-  paidFrom?: 'pocket' | 'reserve' | 'owner_outside' | null
+  paidFrom?: 'pocket' | 'reserve' | 'owner_outside' | 'owner_custody' | null
   amount: Minor
   scheduleKind: RecurrenceKind
   weekday: number | null
@@ -2294,6 +2340,9 @@ export interface ReceivableEventRepo {
  * transaction abstraction.
  */
 export interface FinancialTransactionDeps {
+  /** Reads inside a financial lock must share its connection, including pooled readers. */
+  directory: DirectoryRepo
+  companyLedgerSource: CompanyLedgerSource
   ledger: LedgerRepo
   expenses: ExpenseRepo
   recurringExpenses: RecurringExpenseRepo
@@ -2309,11 +2358,17 @@ export interface FinancialTransactionDeps {
   companyLedger: CompanyLedgerRepo
   /** Company debts, fixed assets and depreciation facts (C3–C5). */
   companyFinance: CompanyFinanceRepo
+  existingAssets: ExistingAssetRepo
+  companyRestorationReviews: CompanyRestorationReviewRepo
+  companyMovementReview: CompanyMovementReviewRepo
+  companyHistoricalDrafts: CompanyHistoricalDraftRepo
   /** Further financial locks in the same namespace; see `lockBranchThenCompany`. */
   locks: FinancialLocks
 }
 
 export interface FinancialUnitOfWorkInput {
+  /** Consistent multi-query GET snapshot. PostgreSQL enforces READ ONLY; never use for commands. */
+  mode?: 'read_snapshot'
   /** Stable business-operation key; implementations serialize concurrent retries on it. */
   lockKey: string
   actorId: string | null
@@ -2854,6 +2909,8 @@ export interface GpsIdentifiedIngestResult {
 }
 
 export interface GpsTrackerHealth {
+  readinessClient?: 'android' | 'browser'
+  observedAtMs?: number | null
   shiftId: string
   readinessAtMs: number | null
   readinessCapturedAtMs: number | null
@@ -2885,6 +2942,7 @@ export interface GpsTrackerHealth {
 }
 
 export interface GpsTrackerReadiness {
+  client?: 'android' | 'browser'
   shiftId: string
   atMs: number
   capturedAtMs: number
@@ -2899,8 +2957,32 @@ export interface GpsTrackerReadiness {
   queueAvailable: boolean | null
 }
 
+/** A rejected preflight observation; contains timings only and never grants readiness. */
+export interface GpsReadinessTimingRejection {
+  shiftId: string
+  atMs: number
+  capturedAtMs: number
+  appBuild: number
+  reason: 'stale' | 'future'
+  /** Server receive time minus capture time. Negative means a future-dated fix. */
+  ageMs: number
+}
+
+export interface GpsPermissionEvent {
+  id: string
+  shiftId: string
+  permission: 'location' | 'location_enabled' | 'background' | 'notifications' | 'battery' | 'autostart'
+  openedAt: string
+  observedAt: string | null
+  recoveredAt: string | null
+  appBuild: number | null
+}
+
 export interface GpsTrackerHealthRepo {
+  recordBrowserClient(shiftId: string): Promise<void>
+  permissionEvents(shiftId: string): Promise<GpsPermissionEvent[]>
   recordReadiness(input: GpsTrackerReadiness): Promise<void>
+  recordReadinessTimingRejection(input: GpsReadinessTimingRejection): Promise<void>
   recordHeartbeat(input: GpsTrackerHealth): Promise<void>
   findByShift(shiftId: string): Promise<GpsTrackerHealth | null>
   listByShiftIds(shiftIds: readonly string[]): Promise<GpsTrackerHealth[]>
@@ -3005,6 +3087,8 @@ export interface TrackerDeviceRepo {
 export interface ShiftCloseTransactionDeps {
   shifts: ShiftRepo
   breaks: ShiftBreakRepo
+  /** Break policy reads must not acquire a second connection while holding the shift lock. */
+  settings: SettingsRepo
   preapprovedShiftRules: PreapprovedShiftRuleRepo
   orders: OrderRepo
   cashDeductions: CashDeductionRepo
@@ -3030,6 +3114,8 @@ export interface ShiftCloseUnitOfWorkInput {
   shiftId: string
   actorId: string | null
   requestId?: string | null
+  /** Evidence-only commits keep the shift CAS lock, but never reserve branch financial balances. */
+  scope?: 'financial' | 'evidence'
   /** Serialize approvals that contribute to the same driver's day-level tier true-up. */
   serializeDriverDay?: boolean
 }
@@ -3090,6 +3176,10 @@ export interface Deps {
   companyLedgerSource: CompanyLedgerSource
   /** Company debts, fixed assets and depreciation (C3–C5). */
   companyFinance: CompanyFinanceRepo
+  existingAssets: ExistingAssetRepo
+  companyRestorationReviews: CompanyRestorationReviewRepo
+  companyMovementReview: CompanyMovementReviewRepo
+  companyHistoricalDrafts: CompanyHistoricalDraftRepo
   tiers: TierRepo
   notifications: NotificationRepo
   settings: SettingsRepo

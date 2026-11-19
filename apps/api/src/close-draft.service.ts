@@ -226,6 +226,7 @@ const invalidateMissingEvidence = (data: CloseDraftData, slots: readonly Attache
     ...data,
     figures: {
       ...data.figures,
+      ...(generationChanged('daily_summary') ? {dailySummaryDate: null} : {}),
       // A replacement must never display a value read from the old thumbnail. Human-confirmed
       // declarations are separate fields and deliberately survive this generation change.
       walletDeclaredOcr: generationChanged('wallet') && hadSuccessfulRead('wallet', 'wallet')
@@ -402,6 +403,7 @@ function mergeHumanPatch(current: CloseDraftData, patch: PatchCloseDraftRequest,
     if (figures.odometerAnomalyConfirmed !== undefined) data.figures.odometerAnomalyConfirmed = figures.odometerAnomalyConfirmed
     if (figures.cashDeclared !== undefined) data.figures.cashDeclared = moneyText(figures.cashDeclared)
     if (figures.walletDeclared !== undefined) data.figures.walletDeclared = moneyText(figures.walletDeclared)
+    if (figures.dailySummaryDate !== undefined) data.figures.dailySummaryDate = figures.dailySummaryDate
   }
   const operations = patch.operations
   if (!operations) return data
@@ -687,6 +689,7 @@ function localMinuteKey(epochMs: number, timeZone: string): string {
 }
 
 function expectedFieldForSlot(slot: string): LinkedCloseDraftReadRequest['field'] | null {
+  if (slot === 'daily_summary') return 'daily_summary'
   if (/^dashboard(?:_[2-9]|_[1-9]\d+)?$/.test(slot)) return 'orders'
   if (/^payments_log(?:_[2-9]|_[1-9]\d+)?$/.test(slot)) return 'payments_log'
   if (slot === 'wallet') return 'wallet'
@@ -812,7 +815,12 @@ function linkedRows(
     if (field === 'orders' && row.cancelled && row.reviewRequired !== true) return
     const observation = observations[index]!
     const resolved = resolutions[index]!
-    const value = row.value === null ? null : parseMinor(row.value)
+    // Rows from non-monetary readers (odometer/BMS) are not money. Money is untrusted evidence,
+    // including old cached answers: the wire guard rejects malformed text and bigint overflow.
+    const parsed = (field === 'orders' || field === 'payments_log')
+      ? moneySchema.safeParse(row.value)
+      : null
+    const value = parsed?.success ? parsed.data : null
     const evidence = { mediaId, attachmentToken, slot }
     // Routes are enrichment and fluctuate across reads. The overlap identity deliberately uses
     // only printed accounting/time evidence; a one-to-one merge below preserves repeated equal
@@ -1250,7 +1258,10 @@ export async function readCloseDraftAttachment(
   // enforces the same rule under the shift row lock; this only spares the blob fetch and the
   // provider round-trip when the answer is already durable. `retryFailed` cannot reach a complete
   // read — the driver UI hides retry once a read succeeds — but honour the flag rather than assume.
-  if (current.data.reads[key]?.status === 'complete' && input.retryFailed !== true) {
+  const priorRead = current.data.reads[key]
+  const partialRead = input.field === 'payments_log' && priorRead?.status === 'failed' && (priorRead.rowCount ?? 0) > 0
+  if ((priorRead?.status === 'complete' && (input.field === 'daily_summary' || input.retryFailed !== true)) ||
+    (partialRead && (input.retryFailed !== true || priorRead.attempts >= 2))) {
     return { draft: await recordView(deps, current, true), rows: [], fields: {}, alreadyRead: true }
   }
   const { bytes } = await readEvidence(deps, attached.mediaId)
@@ -1290,6 +1301,11 @@ export async function readCloseDraftAttachment(
     if (!live || live.mediaId !== attached.mediaId || live.attachmentToken !== attached.attachmentToken) {
       throw new ServiceError(409, 'evidence_attachment_changed')
     }
+    const settledRead = latest.data.reads[key]
+    if (input.field === 'payments_log' && settledRead?.status === 'failed' && (settledRead.rowCount ?? 0) > 0 &&
+      (input.retryFailed !== true || settledRead.attempts >= 2)) {
+      return { draft: await recordView(deps, latest, true), rows: [], fields: {}, alreadyRead: true }
+    }
     const data = invalidateMissingEvidence(latest.data, slots)
     if (input.field === 'orders' && shouldReplaceRows) {
       data.operations.orders = mergeLinkedRows(data.operations.orders, linked.orders, attached.attachmentToken)
@@ -1320,13 +1336,16 @@ export async function readCloseDraftAttachment(
       else if (!output.result.ok && output.result.reason === 'wrong_screen') data.figures.batteryPercent = null
     }
     const priorAttempts = data.reads[key]?.attempts ?? 0
+    const partialArchive = input.field === 'payments_log' && output.result.ok &&
+      rows.some(row => !row.cancelled && (row.value === null || row.reviewRequired === true))
     const read = {
       readId,
-      status: output.result.ok ? ('complete' as const) : ('failed' as const),
+      status: output.result.ok && !partialArchive ? ('complete' as const) : ('failed' as const),
       field: input.field,
-      failure: output.result.ok ? null : output.result.reason,
+      failure: output.result.ok ? (partialArchive ? 'no_fields' as const : null) : output.result.reason,
       attempts: Math.max(priorAttempts + 1, output.result.attemptCount ?? 1),
-      ...(input.field === 'orders' ? {
+      ...(input.field === 'daily_summary' ? { fields } : {}),
+      ...(input.field === 'orders' || input.field === 'payments_log' ? {
         rowCount: rows.length,
         ordersCount: linked.orders.length,
         deductionsCount: linked.deductions.length,
@@ -1347,6 +1366,13 @@ export async function readCloseDraftAttachment(
       draftHash: closeDraftHash(data),
       updatedAtMs: deps.clock.nowMs(),
       updatedBy: actor.userId,
+    }).catch((error: unknown) => {
+      if (input.field !== 'daily_summary' || !output.result.ok) throw error
+      // The paid receipt already exists. A later retry reuses that receipt; no auto-retry or
+      // financial write is attempted here. Preserve the original cause for server diagnostics.
+      const failure = new ServiceError(503, 'daily_summary_save_failed')
+      failure.cause = error
+      throw failure
     })
     if (saved) return { draft: await recordView(deps, saved, true), rows, fields }
   }

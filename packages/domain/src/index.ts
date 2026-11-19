@@ -49,6 +49,8 @@ export * from './gps/offline-ingest.ts'
 
 // C4/C5 — fixed-asset schedules, book value and FIFO depreciation funding.
 export * from './assets/depreciation.ts'
+export * from './assets/existing.ts'
 
 // P4 — recurring («ثابتة») expenses: when one falls due. Computed on read; nothing posts itself.
 export * from './expenses/recurrence.ts'
+export { trackingPermissionStates } from './shift/tracking-permissions.ts'

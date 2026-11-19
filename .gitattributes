@@ -5,3 +5,5 @@
 *.jpeg binary
 *.pdf binary
 pnpm-lock.yaml -diff
+# Applied migration bytes are checksum-bound; retain their existing final blank lines.
+packages/db/migrations/*.sql whitespace=-blank-at-eof

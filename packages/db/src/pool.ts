@@ -86,21 +86,33 @@ export function bindPoolToTransaction(
 /** Neon connection strings carry `neon.tech` in the host; anything else is a plain Postgres. */
 const isNeon = (connectionString: string): boolean => /[.@]neon\.tech\b/i.test(connectionString)
 
-export function createPool(connectionString: string, max = 10): pg.Pool {
+export function createPool(connectionString: string, max = 10, tuning: {
+  connectionTimeoutMillis?: number; applicationName?: string
+} = {}): pg.Pool {
+  // Apply the same safeguards on Neon and TCP. An abandoned serverless invocation must not
+  // retain shift/branch locks, nor let its waiters consume the entire pool for 180 seconds.
+  const options = {
+    connectionString,
+    max,
+    connectionTimeoutMillis: tuning.connectionTimeoutMillis ?? 5_000,
+    idleTimeoutMillis: 30_000,
+    application_name: tuning.applicationName ?? 'ash-api',
+  }
+  const protectIdleConnections = (pool: pg.Pool): pg.Pool => {
+    // pg-pool already evicts an errored idle client; consume its error event so a network
+    // disconnect cannot become an uncaught exception that stops unrelated requests.
+    pool.on('error', (error) => {
+      console.warn('database_idle_connection_error', { code: (error as Error & { code?: string }).code ?? 'connection_error' })
+    })
+    return pool
+  }
   if (isNeon(connectionString)) {
     // Node 22+/24 (Vercel's runtime) has a global WebSocket, which the serverless driver needs.
     neonConfig.webSocketConstructor = globalThis.WebSocket as unknown as typeof neonConfig.webSocketConstructor
     // Structurally a pg Pool for the repos' purposes; the cast keeps one Pool type across drivers.
-    return new NeonPool({ connectionString, max }) as unknown as pg.Pool
+    return protectIdleConnections(new NeonPool(options) as unknown as pg.Pool)
   }
-  return new pg.Pool({
-    connectionString,
-    max,
-    // A stuck connection must not hold a shift approval open indefinitely.
-    connectionTimeoutMillis: 5_000,
-    idleTimeoutMillis: 30_000,
-    application_name: 'ash-api',
-  })
+  return protectIdleConnections(new pg.Pool(options))
 }
 
 /** Boot assertion: prove int8 really comes back as a bigint before a single row of money moves. */
@@ -125,7 +137,7 @@ export async function assertBigIntParser(pool: pg.Pool): Promise<void> {
  */
 export async function withTransaction<T>(
   pool: pg.Pool,
-  ctx: { actorId?: string | null; requestId?: string | null },
+  ctx: { actorId?: string | null; requestId?: string | null; readOnlySnapshot?: boolean },
   fn: (client: pg.PoolClient) => Promise<T>,
 ): Promise<T> {
   const bound = transactionBinding(pool)
@@ -140,18 +152,34 @@ export async function withTransaction<T>(
   }
 
   const client = await pool.connect()
+  let destroyConnection = false
+  let connectionError: Error | null = null
+  const onConnectionError = (error: Error): void => {
+    connectionError ??= error
+    destroyConnection = true
+  }
+  // A checked-out client has no pg-pool error listener. In particular a server-side idle
+  // transaction timeout can arrive while the callback awaits non-query work.
+  client.on('error', onConnectionError)
   try {
-    await client.query('BEGIN')
+    await client.query(ctx.readOnlySnapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN')
+    // Neon/PgBouncer rejects timeout GUCs in startup options. SET LOCAL is supported and
+    // confines the safeguards to this transaction without leaking settings across pool clients.
+    await client.query("SET LOCAL lock_timeout = '5s'")
+    await client.query("SET LOCAL statement_timeout = '30s'")
+    await client.query("SET LOCAL idle_in_transaction_session_timeout = '15s'")
     await client.query('SELECT set_config($1, $2, true)', ['app.actor_id', ctx.actorId ?? ''])
     await client.query('SELECT set_config($1, $2, true)', ['app.request_id', ctx.requestId ?? ''])
     const result = await fn(client)
+    if (connectionError) throw connectionError
     await client.query('COMMIT')
     return result
   } catch (err) {
-    await client.query('ROLLBACK').catch(() => undefined)
+    await client.query('ROLLBACK').catch(() => { destroyConnection = true })
     throw err
   } finally {
-    client.release()
+    client.release(destroyConnection)
+    client.removeListener('error', onConnectionError)
   }
 }
 

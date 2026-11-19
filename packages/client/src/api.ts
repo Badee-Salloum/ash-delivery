@@ -70,6 +70,7 @@ export type CloseDraftReadFailure =
 export type CloseDraftReadStatus = 'idle' | 'running' | 'complete' | 'failed'
 
 export interface CloseDraftAttachmentRead {
+  fields?: Readonly<Record<string, string | null>>
   readId: string
   status: CloseDraftReadStatus
   field: CloudOcrField
@@ -92,6 +93,7 @@ export interface CloseDraftAttachment {
 }
 
 export interface CloseDraftFigures {
+  dailySummaryDate?: string | null
   odometerKm: number | null
   odometerKmOcr: number | null
   odometerAnomalyConfirmed: boolean
@@ -224,6 +226,7 @@ export interface CloseDraftPatch {
   expectedRevision: number
   /** Human-editable declarations only. OCR baselines and battery fields are server-owned. */
   figures?: {
+    dailySummaryDate?: string | null
     odometerKm?: number | null
     odometerAnomalyConfirmed?: boolean
     cashDeclared?: string | null
@@ -740,6 +743,49 @@ export interface ExpenseView {
   receiptMediaId: string | null
   journalEntryId: number | null
   createdBy: string
+  categoryNameAr?: string
+  vehicleCode?: string | null
+  advanceId?: string | null
+}
+
+export interface ExpenseFilter {
+  from?: string
+  to?: string
+  all?: true
+  categoryId?: string
+  costCenterKind?: 'vehicle' | 'branch' | 'general' | 'operating'
+  vehicleId?: string
+  channel?: 'office_cash' | 'office_wallet'
+  q?: string
+  receipt?: 'with' | 'without'
+  minAmount?: string
+  maxAmount?: string
+  limit?: number
+  offset?: number
+}
+
+export interface ExpensePage {
+  branchId: string
+  from: string
+  to: string
+  earliestBusinessDate: string | null
+  currency: 'SYP_NEW'
+  /** Recorded cost, not cash outflow or the net of later reversals. */
+  totalBasis: 'recorded_expense_rows'
+  expenses: ExpenseView[]
+  total: string
+  count: number
+  limit: number | null
+  offset: number
+  generatedAt: string
+}
+
+function expenseFilterQuery(filter: ExpenseFilter): string {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(filter)) {
+    if (value !== undefined && value !== '') query.set(key, String(value))
+  }
+  return query.toString()
 }
 
 export interface RecurringExpenseTemplateView {
@@ -794,6 +840,7 @@ export interface RecurringExpenseOccurrenceView {
  * they are accounting facts in the explanatory breakdown.
  */
 export interface ShiftSettlementView {
+  managerChargeBps?: number | null
   policyCode: 'fixed_40_cash_close_v1' | 'fixed_40_cash_close_v2_receivable'
   driverRateBps: 4000
   deliveryFeeTotal: string
@@ -1154,6 +1201,9 @@ export class ApiClient {
    * where creating the wrong thing in the wrong branch is not one forgotten query param away.
    */
   private scoped(path: string): string {
+    // Company reads address the central HQ ledger, never the branch selected in the rail.
+    // In particular its strict report contract must not receive an unrelated branchId.
+    if (path.startsWith('/company/')) return path
     if (!this.branchId) return path
     const sep = path.includes('?') ? '&' : '?'
     return `${path}${sep}branchId=${encodeURIComponent(this.branchId)}`
@@ -1164,7 +1214,7 @@ export class ApiClient {
     path: string,
     body?: unknown,
     headers: Record<string, string> = {},
-    options: { cache?: RequestCache; signal?: AbortSignal } = {},
+    options: { cache?: RequestCache; signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<T> {
     const init: RequestInit = {
       method,
@@ -1176,9 +1226,29 @@ export class ApiClient {
     if (body !== undefined) {
       init.body = body instanceof Uint8Array ? (body as BodyInit) : JSON.stringify(body)
     }
-    const res = await fetch(`${this.baseUrl}${path}`, init)
-
-    const text = await res.text()
+    // Auth reads/writes are bounded, but money/evidence commands keep their existing retry
+    // semantics. Never automatically replay a write after an ambiguous network timeout.
+    const timeout = options.timeoutMs ? new AbortController() : null
+    let timedOut = false
+    const timer = timeout ? setTimeout(() => { timedOut = true; timeout.abort() }, options.timeoutMs) : null
+    const cancel = (): void => timeout?.abort()
+    if (timeout && options.signal) {
+      if (options.signal.aborted) cancel()
+      else options.signal.addEventListener('abort', cancel, { once: true })
+    }
+    if (timeout) init.signal = timeout.signal
+    let res: Response
+    let text: string
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, init)
+      text = await res.text()
+    } catch (error) {
+      if (timedOut) throw { status: 408, error: 'request_timeout' } satisfies ApiError
+      throw error
+    } finally {
+      if (timer !== null) clearTimeout(timer)
+      options.signal?.removeEventListener('abort', cancel)
+    }
     /*
      * Parse DEFENSIVELY, and never before the status has been read.
      *
@@ -1221,7 +1291,7 @@ export class ApiClient {
     return json as T
   }
 
-  get<T>(path: string, options: { cache?: RequestCache; signal?: AbortSignal } = {}): Promise<T> {
+  get<T>(path: string, options: { cache?: RequestCache; signal?: AbortSignal; timeoutMs?: number } = {}): Promise<T> {
     return this.request<T>('GET', this.scoped(path), undefined, {}, options)
   }
   post<T>(path: string, body?: unknown): Promise<T> {
@@ -1256,14 +1326,14 @@ export class ApiClient {
 
   // ── Auth ──────────────────────────────────────────────────────────────────────────────────
   login(username: string, password: string) {
-    return this.post<{
+    return this.request<{
       userId: string
       roleKey: string
       branchId: string | null
       fullNameAr: string
       secondFactorRequired: boolean
       enrollmentRequired: boolean
-    }>('/auth/login', { username, password })
+    }>('POST', '/auth/login', { username, password }, {}, { timeoutMs: 20_000 })
   }
   verify2fa(code: string) {
     return this.post<{ ok: true }>('/auth/2fa/verify', { code })
@@ -1278,7 +1348,7 @@ export class ApiClient {
     return this.post<{ ok: true }>('/auth/logout')
   }
   me() {
-    return this.get<{ userId: string; roleKey: string; branchId: string | null; driverId: string | null; businessDate: string }>('/me')
+    return this.request<{ userId: string; roleKey: string; branchId: string | null; driverId: string | null; businessDate: string }>('GET', '/me', undefined, {}, { timeoutMs: 20_000 })
   }
   registrationBranches() {
     return this.get<{ branches: Array<{ id: string; code: string; nameAr: string; nameEn: string }> }>(
@@ -1656,7 +1726,7 @@ export class ApiClient {
   /** Manager-only review, including current branch+driver shift funding from the locked read path. */
   shiftReview<T extends object>(
     id: string,
-    options: { cache?: RequestCache; signal?: AbortSignal } = {},
+    options: { cache?: RequestCache; signal?: AbortSignal; timeoutMs?: number } = {},
   ) {
     return this.get<T & { shiftFunding: ShiftFundingPreviewView }>(`/shifts/${id}/review`, options)
   }
@@ -1667,6 +1737,14 @@ export class ApiClient {
   }
 
   /** The durable, revisioned draft used by the driver's end-shift flow. */
+  closeReference(id: string, driver = false) {
+    return this.get<{
+      summary: {mediaId: string; read: CloseDraftAttachmentRead | null; date: string | null} | null
+      shiftMetrics?: {periodStart: string | null; periodEnd: string; durationMinutes: number | null; distanceKm: number | null}
+      permissionEvents: Array<{id: string; shiftId: string; permission: 'location' | 'location_enabled' | 'background' | 'notifications' | 'battery' | 'autostart'; openedAt: string; observedAt: string | null; recoveredAt: string | null; appBuild: number | null}>
+    }>(`/shifts/${id}/close-reference${driver ? "/driver" : ""}`)
+  }
+
   closeDraft(id: string) {
     return this.get<CloseDraftView>(`/shifts/${id}/close-draft`)
   }
@@ -1881,15 +1959,21 @@ export class ApiClient {
     )
   }
 
-  expenseCategories() {
-    return this.get<{ categories: ExpenseCategoryView[] }>('/expense-categories')
+  expenseCategories(includeInactive = false) {
+    return this.get<{ categories: ExpenseCategoryView[] }>(`/expense-categories${includeInactive ? '?includeInactive=true' : ''}`)
   }
   createExpenseCategory(body: { code: string; nameAr: string }) {
     return this.post<ExpenseCategoryView>('/expense-categories', body)
   }
-  expenses(from?: string, to?: string) {
-    const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
-    return this.get<{ from: string; to: string; expenses: ExpenseView[]; total: string }>(`/expenses${q ? `?${q}` : ''}`)
+  expenses(filterOrFrom?: ExpenseFilter | string, to?: string, options: { signal?: AbortSignal } = {}) {
+    const filter = typeof filterOrFrom === 'string' ? { from: filterOrFrom, ...(to === undefined ? {} : { to }) } : filterOrFrom ?? (to === undefined ? {} : { to })
+    const query = expenseFilterQuery(filter)
+    return this.get<ExpensePage>(`/expenses${query ? `?${query}` : ''}`, options)
+  }
+  exportExpenses(filter: ExpenseFilter, options: { signal?: AbortSignal } = {}) {
+    const { limit: _limit, offset: _offset, ...completeFilter } = filter
+    const query = expenseFilterQuery(completeFilter)
+    return this.get<ExpensePage>(`/expenses/export${query ? `?${query}` : ''}`, options)
   }
   expensesByCostCenter(from?: string, to?: string) {
     const q = [from && `from=${from}`, to && `to=${to}`].filter(Boolean).join('&')
@@ -2034,6 +2118,7 @@ export class ApiClient {
       walletReceivableDeferred: string
       cashShortageReceivable?: string
     },
+    options: { cache?: RequestCache; signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<ShiftSettlementView> {
     const params = new URLSearchParams()
     if (actual) {
@@ -2049,7 +2134,7 @@ export class ApiClient {
     }
     const encoded = params.toString()
     const query = encoded === '' ? '' : `?${encoded}`
-    const view = await this.get<ShiftSettlementWireView>(`/shifts/${shiftId}/settlement${query}`)
+    const view = await this.get<ShiftSettlementWireView>(`/shifts/${shiftId}/settlement${query}`, options)
     return normalizeShiftSettlementView(view)
   }
 
@@ -2079,7 +2164,7 @@ export class ApiClient {
    *
    * A REPLACEMENT: the request carries the shift's whole charge, so a retry is idempotent.
    */
-  setManagerCharge(shiftId: string, body: { amount: string; reason: string | null }) {
+  setManagerCharge(shiftId: string, body: { amount: string; reason: string | null; percentBps?: number }) {
     return this.put<{ id: string; managerCharge: string; managerChargeReason: string | null }>(
       `/shifts/${shiftId}/manager-charge`,
       body,
@@ -2228,11 +2313,12 @@ export class ApiClient {
     })
   }
   /** Performs it. The plan is re-derived server-side from the ledger — nothing here is trusted. */
-  async restore(reason: string): Promise<RestorationView & { postings: number; reconciliationPostings?: number }> {
+  async restore(reason: string, idempotencyKey?: string): Promise<RestorationView & { postings: number; reconciliationPostings?: number }> {
     const result = await this.post<RestorationWireView & { postings: number; reconciliationPostings?: number }>(
       '/treasury/restoration',
       {
         reason,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         ...(this.branchId ? { branchId: this.branchId } : {}),
       },
     )
@@ -2328,6 +2414,23 @@ export class ApiClient {
     return this.post<{ id: string; kind: string; replayed: boolean }>(`/shifts/${shiftId}/tranche`, body)
   }
 
+  adjustCashFloat(shiftId: string, body: {
+    expectedCurrentTotal: string
+    targetTotal: string
+    occurrenceKey: string
+    reason: string
+  }) {
+    return this.post<{
+      id: string
+      from: string
+      to: string
+      reduction: string
+      currentTotal: string
+      correctionEntryId: number
+      replayed: boolean
+    }>(`/shifts/${shiftId}/cash-float-adjustments`, body)
+  }
+
   // ── Upper-level shift override (stuck shift) ────────────────────────────────────────────────
   /** Void a stuck shift: reverse the float/top-up, discard orders, mark it cancelled. */
   voidShift(shiftId: string, reason: string) {
@@ -2380,16 +2483,17 @@ export class ApiClient {
     return this.get<{ drivers: GpsLiveDriver[]; silent: GpsSilentShift[]; health?: GpsLiveHealth[] }>('/gps/live')
   }
   confirmGpsReadiness(shiftId: string, body: {
+    client?: 'android' | 'browser'
     appBuild: number
     capturedAtMs: number
     accuracyM: number
     precise: boolean
     locationEnabled: boolean
-    backgroundPermission: boolean
-    notificationPermission: boolean
-    batteryOptimizationExempt: boolean
-    autostartAcknowledged: boolean
-    queueAvailable: boolean
+    backgroundPermission?: boolean
+    notificationPermission?: boolean
+    batteryOptimizationExempt?: boolean
+    autostartAcknowledged?: boolean
+    queueAvailable?: boolean
   }) {
     return this.post<{ ready: true; expiresAt: string }>(`/shifts/${shiftId}/gps/readiness`, body)
   }
@@ -2492,7 +2596,7 @@ export function closeDraftThumbnailPath(shiftId: string, mediaId: string): strin
 }
 
 /** Which screen the cloud reader is being asked about. Mirrors `OcrField` on the server. */
-export type CloudOcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms'
+export type CloudOcrField = 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms' | 'daily_summary'
 
 export interface CloudOcrResponse {
   ok: boolean

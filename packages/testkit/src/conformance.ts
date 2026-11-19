@@ -2264,6 +2264,30 @@ export function runConformanceSuite(ctx: ConformanceContext): void {
           await ctx.cleanup?.(deps)
         }
       })
+      it('filters and pages expense history with whole-set exact totals and complete export parity', async () => {
+        const deps = await fresh()
+        try {
+          const category = { id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', code: 'OLD', nameAr: 'فئة قديمة', active: false }
+          await deps.expenses.createCategory(category)
+          const old = { ...expenseRecord(), businessDate: '2026-06-01', amount: minor(9_007_199_254_740_993n), description: 'خصم 50%_قطع', channel: 'office_wallet' as const }
+          const recent = { ...expenseRecord(), id: 'dddddddd-dddd-4ddd-8ddd-ddddddddddde', amount: minor(2n) }
+          const general = { ...expenseRecord(), id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddf', costCenterKind: 'general' as const, vehicleId: null, amount: minor(3n) }
+          await deps.expenses.create(old); await deps.expenses.create(recent); await deps.expenses.create(general)
+          const filter = { to: '2026-07-21', categoryId: category.id, costCenterKind: 'vehicle' as const, vehicleId: VEHICLE }
+          const first = await deps.expenses.search(BRANCH, filter, { limit: 1, offset: 0 })
+          const second = await deps.expenses.search(BRANCH, filter, { limit: 1, offset: 1 })
+          expect(first.expenses).toEqual([recent]); expect(second.expenses).toEqual([old])
+          expect(first.total).toBe(9_007_199_254_740_995n); expect(second.total).toBe(first.total)
+          expect(first.count).toBe(2); expect(first.earliestBusinessDate).toBe('2026-06-01')
+          expect((await deps.expenses.search(BRANCH, filter)).expenses).toEqual([recent, old])
+          const combined = await deps.expenses.search(BRANCH, { ...filter, channel: 'office_wallet', query: '50%_', receipt: 'without', minAmount: minor(9_007_199_254_740_993n), maxAmount: minor(9_007_199_254_740_993n) })
+          expect(combined.expenses).toEqual([old]); expect(combined.total).toBe(old.amount)
+          expect((await deps.expenses.search(BRANCH, { to: '2026-07-21', costCenterKind: 'operating' })).expenses).toEqual([general])
+          expect((await deps.expenses.search(COMPANY_BRANCH, { to: '2026-07-21' })).expenses).toEqual([])
+          expect(await deps.expenses.listCategories()).toEqual([])
+          expect(await deps.expenses.listCategories(true)).toEqual([category])
+        } finally { await ctx.cleanup?.(deps) }
+      })
     })
 
     describe('recurring expenses', () => {

@@ -193,6 +193,9 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
         [input.shiftId, input.expectedRevision, input.slot, input.mediaId, input.attachmentToken],
       )
       if (!current.rows[0]) return null
+      const priorArchive = toDraft(current.rows[0]).data.reads[`${input.attachmentToken}|${input.read.field}`]
+      if (input.read.field === 'payments_log' && priorArchive?.status === 'failed' && (priorArchive.rowCount ?? 0) > 0 &&
+        (input.replacesCompletedRead !== true || priorArchive.attempts >= 2)) return toDraft(current.rows[0])
 
       // At most one COMPLETE read per (shift, media, attachment generation, field). The OCR layer
       // already refuses to pay twice for identical bytes, so a repeat call arrives here carrying a
@@ -256,27 +259,36 @@ export class PgCloseDraftRepo implements CloseDraftRepo {
         ],
       )
 
-      for (const observation of input.observations) {
+      // A page may contain dozens of rows. One WebSocket round trip per row kept the shift
+      // locked for seconds, blocking GPS and close approval. One parameterised set retains
+      // the exact immutable provenance and all constraints, inside the same CAS transaction.
+      if (input.observations.length > 0) {
         await client.query(
           `INSERT INTO shift_close_draft_observations
              (id, read_id, shift_id, media_id, attachment_token, slot, row_index, row_count,
               date_section, y_top, y_bottom, row_data, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,
-                   to_timestamp($13::double precision / 1000))`,
+           SELECT o.id,$1,$2,$3,$4,$5,o.row_index,o.row_count,
+                  o.date_section,o.y_top,o.y_bottom,o.row_data,
+                  to_timestamp($6::double precision / 1000)
+             FROM jsonb_to_recordset($7::jsonb) AS o(
+               id uuid, row_index integer, row_count integer, date_section text,
+               y_top numeric, y_bottom numeric, row_data jsonb)`,
           [
-            observation.id,
             input.read.readId,
             input.shiftId,
             input.mediaId,
             input.attachmentToken,
             input.slot,
-            observation.rowIndex,
-            observation.rowCount,
-            observation.dateSection,
-            observation.yTop,
-            observation.yBottom,
-            JSON.stringify(observation.row satisfies OcrRow),
             input.updatedAtMs,
+            JSON.stringify(input.observations.map(observation => ({
+              id: observation.id,
+              row_index: observation.rowIndex,
+              row_count: observation.rowCount,
+              date_section: observation.dateSection,
+              y_top: observation.yTop,
+              y_bottom: observation.yBottom,
+              row_data: observation.row satisfies OcrRow,
+            }))),
           ],
         )
       }

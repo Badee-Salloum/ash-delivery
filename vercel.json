@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
+  "regions": ["fra1"],
   "installCommand": "pnpm install --frozen-lockfile --prod=false",
   "buildCommand": "node scripts/build-api.mjs",
   "functions": { "api/index.mjs": { "memory": 1024, "maxDuration": 60 } },

@@ -2,7 +2,11 @@
 /**
  * A logical backup of the whole database, over the one connection method that works from here.
  *
- *   DATABASE_URL=postgres://… node scripts/backup-db.mjs [--out backups]
+ *   DATABASE_URL=postgres://… node scripts/backup-db.mjs [--out backups] [--concurrency 1..4] [--quiescent]
+ *
+ * --quiescent is for an EXTERNALLY WRITE-PAUSED release only. It verifies exact starting/written/
+ * ending row counts and skips data SELECTs for initially empty tables. Equal counts cannot prove
+ * that no in-place update occurred; this is not an MVCC snapshot or a replacement for the pause.
  *
  * WHY THIS EXISTS. There was no backup at all — not of the ledger, not of the evidence photos.
  * The restic sidecar in `infra/` belongs to a docker-compose stack that is not deployed;
@@ -27,13 +31,17 @@
  * superuser rights to switch triggers off (Neon's owner role does not reliably have them).
  */
 import { createWriteStream } from 'node:fs'
+import { once } from 'node:events'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createGzip } from 'node:zlib'
-import { Readable } from 'node:stream'
+import {
+  BACKUP_COLUMNS_SQL, assertQuiescentCounts, backupColumnsByTable, backupCountQuery, backupIdent,
+  exactBackupCounts, parseBackupOptions, runBackupBounded,
+} from './backup-db-plan.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const req = createRequire(join(root, 'packages/db/package.json'))
@@ -45,8 +53,7 @@ if (!url) {
   console.error('DATABASE_URL is required. Use the DIRECT endpoint (drop "-pooler" from the host).')
   process.exit(1)
 }
-const outArg = process.argv.indexOf('--out')
-const outRoot = outArg === -1 ? join(root, 'backups') : process.argv[outArg + 1]
+const { outRoot, concurrency, quiescent } = parseBackupOptions(process.argv.slice(2), join(root, 'backups'))
 
 const sql = neon(url)
 
@@ -57,7 +64,8 @@ async function main() {
   const startedMs = Date.now()
   const stamp = new Date(startedMs).toISOString().replace(/[:.]/g, '-')
   const dir = join(outRoot, stamp)
-  await mkdir(dir, { recursive: true })
+  await mkdir(outRoot, { recursive: true })
+  await mkdir(dir) // Never overwrite a backup if two launches share the same timestamp.
 
   // Only ordinary tables in `public`, and never a view or a partition parent.
   const tables = (
@@ -69,16 +77,7 @@ async function main() {
        ORDER BY c.relname`
   ).map((r) => r.name)
 
-  const columns = {}
-  for (const t of tables) {
-    columns[t] = (
-      await sql`
-        SELECT column_name, udt_name, is_nullable, ordinal_position
-          FROM information_schema.columns
-         WHERE table_schema = 'public' AND table_name = ${t}
-         ORDER BY ordinal_position`
-    ).map((r) => ({ name: r.column_name, type: r.udt_name, nullable: r.is_nullable === 'YES' }))
-  }
+  const columns = backupColumnsByTable(tables, await sql.query(BACKUP_COLUMNS_SQL))
 
   // Parent → child edges, so a restore can topologically sort instead of disabling triggers.
   const fks = (
@@ -98,41 +97,57 @@ async function main() {
     console.warn('!! schema_migrations is unreadable — recording none')
   }
 
-  const counts = {}
-  let totalRows = 0
-  for (const t of tables) {
+  const readCounts = async () => exactBackupCounts(tables, await sql.query(backupCountQuery(tables)))
+  const startingCounts = quiescent ? await readCounts() : null
+  const completedCounts = new Map()
+  await runBackupBounded(tables, concurrency, async t => {
     const cols = columns[t]
-    if (cols.length === 0) continue
     // Every column cast to text, assembled server-side. See the header: this is what keeps a
     // bigint amount exact through JSON.
-    const pairs = cols.map((c) => `'${c.name}', "${c.name}"::text`).join(', ')
+    const pairs = cols.map((c) => `'${c.name.replaceAll("'", "''")}', ${backupIdent(c.name)}::text`).join(', ')
     const file = join(dir, `${t}.jsonl.gz`)
 
     let offset = 0
     let n = 0
     const gzip = createGzip()
     const written = pipeline(gzip, createWriteStream(file))
-    for (;;) {
-      // A stable order is what makes two consecutive pages disjoint; ctid is always present.
-      // `sql.query` rather than the tagged template: the column list and the table name are
-      // identifiers, which no placeholder can carry. Both come from pg_catalog, never from input.
-      const page = await sql.query(
-        `SELECT json_build_object(${pairs}) AS row FROM "${t}" ORDER BY ctid LIMIT ${PAGE} OFFSET ${offset}`,
-      )
-      if (page.length === 0) break
-      for (const r of page) {
-        if (!gzip.write(`${JSON.stringify(r.row)}\n`)) await new Promise((res) => gzip.once('drain', res))
+    // Register rejection immediately while independent HTTPS page reads are in flight.
+    let streamFailure = null
+    void written.catch(error => { streamFailure = error })
+    try {
+      for (; !quiescent || startingCounts[t] !== 0;) {
+        // A stable order is what makes two consecutive pages disjoint; ctid is always present.
+        // `sql.query` rather than the tagged template: the column list and the table name are
+        // identifiers, which no placeholder can carry. Both come from pg_catalog, never from input.
+        const page = await sql.query(
+          `SELECT json_build_object(${pairs}) AS row FROM public.${backupIdent(t)} ORDER BY ctid LIMIT ${PAGE} OFFSET ${offset}`,
+        )
+        if (page.length === 0) break
+        for (const r of page) {
+          if (streamFailure || gzip.destroyed) throw streamFailure ?? new Error('backup output stream closed before table completion')
+          if (!gzip.write(`${JSON.stringify(r.row)}\n`)) await once(gzip, 'drain')
+        }
+        n += page.length
+        if (!Number.isSafeInteger(n)) throw new Error(`backup row count exceeds exact manifest integer range: ${t}`)
+        offset += PAGE
+        if (page.length < PAGE) break
       }
-      n += page.length
-      offset += PAGE
-      if (page.length < PAGE) break
+      gzip.end()
+      await written
+    } catch (error) {
+      gzip.destroy(error)
+      await written.catch(() => {})
+      throw error
     }
-    gzip.end()
-    await written
-    counts[t] = n
-    totalRows += n
+    completedCounts.set(t, n)
     console.log(`  ${t.padEnd(28)} ${String(n).padStart(8)} rows`)
-  }
+  })
+  // Preserve deterministic manifest ordering despite independent table completion order.
+  const counts = Object.fromEntries(tables.map(table => [table, completedCounts.get(table)]))
+  const endingCounts = quiescent ? await readCounts() : null
+  if (quiescent) assertQuiescentCounts(tables, startingCounts, counts, endingCounts)
+  const totalRows = Object.values(counts).reduce((sum, count) => sum + count, 0)
+  if (!Number.isSafeInteger(totalRows)) throw new Error('backup total rows exceeds exact manifest integer range')
 
   const manifest = {
     takenAt: new Date(startedMs).toISOString(),
@@ -146,6 +161,8 @@ async function main() {
     fks,
     counts,
     totalRows,
+    tableConcurrency: concurrency,
+    ...(quiescent ? { consistency: { mode: 'externally_quiescent_count_checked', startingCounts, endingCounts } } : {}),
   }
   await writeFile(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
 

@@ -1,9 +1,12 @@
 import type {
   BranchRecord,
   CompanyCommandRecord,
+  CompanyHistoricalBranchLink,
   CompanyCutoverRecord,
   CompanyLedgerRepo,
   CompanyLedgerSource,
+  CompanyHistoricalImportReceiptRecord,
+  CompanyHistoricalRestorationSettlement,
   CompanyMirrorRecord,
   CompanyMovementRecord,
   CompanyOverviewRecord,
@@ -27,8 +30,10 @@ const duplicate = (code: string, message: string): Error & { code: string } =>
 
 export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
   readonly commands = new Map<string, CompanyCommandRecord>()
+  readonly historicalBranchLinks = new Map<string, CompanyHistoricalBranchLink>()
   readonly cutovers = new Map<string, CompanyCutoverRecord>()
   readonly mirrors = new Map<string, CompanyMirrorRecord>()
+  readonly historicalSettlements = new Map<string, CompanyHistoricalRestorationSettlement>()
   private readonly latest: () => number
 
   constructor(latestEntryId: () => number) {
@@ -37,21 +42,27 @@ export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
 
   snapshot(): {
     commands: Map<string, CompanyCommandRecord>
+    historicalBranchLinks: Map<string, CompanyHistoricalBranchLink>
     cutovers: Map<string, CompanyCutoverRecord>
     mirrors: Map<string, CompanyMirrorRecord>
+    historicalSettlements: Map<string, CompanyHistoricalRestorationSettlement>
   } {
     return {
       commands: new Map([...this.commands].map(([id, row]) => [id, structuredClone(row)])),
+      historicalBranchLinks: new Map([...this.historicalBranchLinks].map(([id, row]) => [id, structuredClone(row)])),
       cutovers: new Map([...this.cutovers].map(([id, row]) => [id, structuredClone(row)])),
       mirrors: new Map([...this.mirrors].map(([id, row]) => [id, structuredClone(row)])),
+      historicalSettlements: new Map([...this.historicalSettlements].map(([id, row]) => [id, structuredClone(row)])),
     }
   }
 
   restore(snapshot: ReturnType<MemoryCompanyLedgerRepo['snapshot']>): void {
     for (const [target, source] of [
       [this.commands, snapshot.commands],
+      [this.historicalBranchLinks, snapshot.historicalBranchLinks],
       [this.cutovers, snapshot.cutovers],
       [this.mirrors, snapshot.mirrors],
+      [this.historicalSettlements, snapshot.historicalSettlements],
     ] as const) {
       ;(target as Map<string, unknown>).clear()
       for (const [id, row] of source as Map<string, unknown>) (target as Map<string, unknown>).set(id, structuredClone(row))
@@ -59,6 +70,7 @@ export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
   }
 
   async createCommand(row: CompanyCommandRecord): Promise<void> {
+    if (this.historicalBranchLinks.has(row.id)) throw duplicate('DUPLICATE_COMPANY_COMMAND', row.id)
     const key = row.id.toLowerCase()
     if (this.commands.has(key)) {
       throw duplicate('DUPLICATE_COMPANY_COMMAND', `company command ${row.id} already exists`)
@@ -69,6 +81,17 @@ export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
       throw duplicate('DUPLICATE_REVERSAL', `entry ${row.targetEntryId} is already reversed`)
     }
     this.commands.set(key, structuredClone(row))
+  }
+
+  async createHistoricalBranchLink(row: CompanyHistoricalBranchLink): Promise<void> {
+    if (this.commands.has(row.id) || this.historicalBranchLinks.has(row.id) || [...this.historicalBranchLinks.values()].some(link => link.sourceEntryId === row.sourceEntryId || link.companyEntryId === row.companyEntryId)) throw duplicate('DUPLICATE_COMPANY_COMMAND', row.id)
+    this.historicalBranchLinks.set(row.id, structuredClone(row))
+  }
+  async findHistoricalBranchLink(id: string): Promise<CompanyHistoricalBranchLink | null> {
+    return structuredClone(this.historicalBranchLinks.get(id) ?? null)
+  }
+  async listHistoricalBranchLinks(companyBranchId: string): Promise<CompanyHistoricalBranchLink[]> {
+    return structuredClone([...this.historicalBranchLinks.values()].filter(row => row.companyBranchId === companyBranchId))
   }
 
   async findCommand(id: string): Promise<CompanyCommandRecord | null> {
@@ -117,7 +140,7 @@ export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
     if (this.cutovers.has(row.branchId)) {
       throw duplicate('DUPLICATE_CUTOVER', `branch ${row.branchId} is already cut over`)
     }
-    if ((row.openingAmount === 0n) !== (row.openingEntryId === null)) {
+    if (row.mode === 'link_only' ? row.openingEntryId !== null : (row.openingAmount === 0n) !== (row.openingEntryId === null)) {
       throw new Error('a cutover has an opening entry exactly when its opening amount is positive')
     }
     this.cutovers.set(row.branchId, structuredClone(row))
@@ -145,6 +168,47 @@ export class MemoryCompanyLedgerRepo implements CompanyLedgerRepo {
       .filter((m) => m.sourceBranchId === sourceBranchId)
       .sort((a, b) => a.sourceEntryId - b.sourceEntryId)
       .map((m) => structuredClone(m))
+  }
+
+  async createHistoricalSettlement(row: CompanyHistoricalRestorationSettlement, expectedVersion: number): Promise<void> {
+    const key = row.id.toLowerCase()
+    const stored = [...this.historicalSettlements.values()]
+    if (this.historicalSettlements.has(key) || stored.some(previous =>
+      previous.legs.some(leg => row.legs.some(next => next.historicalJournalEntryId === leg.historicalJournalEntryId ||
+        next.journalEntryId === leg.journalEntryId || next.sourceReference === leg.sourceReference)) ||
+      previous.groups.some(group => row.groups.some(next => next.restorationId === group.restorationId)))) {
+      throw duplicate('DUPLICATE_HISTORICAL_SETTLEMENT', 'historical source or restoration is already settled')
+    }
+    const currentVersion = stored.filter(previous => previous.sourceBranchId === row.sourceBranchId)
+      .reduce((version, previous) => Math.max(version, previous.version), 0)
+    if (expectedVersion !== currentVersion || row.version !== expectedVersion + 1) {
+      throw duplicate('HISTORICAL_SETTLEMENT_VERSION_CONFLICT', 'historical settlement version changed')
+    }
+    if (row.groups.length === 0 || row.legs.length === 0 ||
+      new Set(row.groups.map(group => group.restorationId)).size !== row.groups.length ||
+      new Set(row.legs.map(leg => leg.historicalJournalEntryId)).size !== row.legs.length ||
+      new Set(row.legs.map(leg => leg.journalEntryId)).size !== row.legs.length ||
+      new Set(row.legs.map(leg => leg.sourceReference)).size !== row.legs.length) {
+      throw new Error('historical settlement requires distinct whole groups and source legs')
+    }
+    this.historicalSettlements.set(key, structuredClone(row))
+  }
+
+  async findHistoricalSettlement(id: string): Promise<CompanyHistoricalRestorationSettlement | null> {
+    const row = this.historicalSettlements.get(id.toLowerCase())
+    return row ? structuredClone(row) : null
+  }
+
+  async listHistoricalSettlements(companyBranchId: string, sourceBranchId?: string): Promise<CompanyHistoricalRestorationSettlement[]> {
+    return [...this.historicalSettlements.values()]
+      .filter(row => row.companyBranchId === companyBranchId && (sourceBranchId === undefined || row.sourceBranchId === sourceBranchId))
+      .sort((a, b) => a.version - b.version || a.createdAtMs - b.createdAtMs)
+      .map(row => structuredClone(row))
+  }
+
+  async findHistoricalSettlementBySource(historicalJournalEntryId: number): Promise<CompanyHistoricalRestorationSettlement | null> {
+    const row = [...this.historicalSettlements.values()].find(batch => batch.legs.some(leg => leg.historicalJournalEntryId === historicalJournalEntryId))
+    return row ? structuredClone(row) : null
   }
 }
 
@@ -240,7 +304,7 @@ export class MemoryCompanyLedgerSource implements CompanyLedgerSource {
     const out: CompanyMovementRecord[] = []
     const ordered = this.entries()
       .filter((e) => e.branchId === companyBranchId)
-      .sort((a, b) => a.id - b.id)
+      .sort((a, b) => a.businessDate.localeCompare(b.businessDate) || a.id - b.id)
     for (const entry of ordered) {
       const pocketAfter: Partial<Record<Currency, Minor>> = {}
       for (const line of entry.lines) {
@@ -252,6 +316,11 @@ export class MemoryCompanyLedgerSource implements CompanyLedgerSource {
       out.push({ entry: structuredClone(entry), pocketAfter })
     }
     return out
+  }
+
+  async listHistoricalImportReceipts(_companyBranchId: string,
+    _range: { from: CalendarDate; to: CalendarDate }): Promise<CompanyHistoricalImportReceiptRecord[]> {
+    return []
   }
 }
 

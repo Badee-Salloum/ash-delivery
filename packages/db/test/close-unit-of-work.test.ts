@@ -25,6 +25,8 @@ function fakeDatabase(identity: { driver_id: string; business_date: string } | n
         : { rows: [], rowCount: 0 }
     }),
     release,
+    on: vi.fn(),
+    removeListener: vi.fn(),
   } as unknown as PoolClient
   const connect = vi.fn(async () => client)
   const poolQuery = vi.fn(async () => {
@@ -55,6 +57,9 @@ describe('transaction-bound pool', () => {
     expect(db.release).toHaveBeenCalledTimes(1)
     expect(db.queries.map((query) => query.text)).toEqual([
       'BEGIN',
+      "SET LOCAL lock_timeout = '5s'",
+      "SET LOCAL statement_timeout = '30s'",
+      "SET LOCAL idle_in_transaction_session_timeout = '15s'",
       'SELECT set_config($1, $2, true)',
       'SELECT set_config($1, $2, true)',
       'SELECT direct',
@@ -65,6 +70,29 @@ describe('transaction-bound pool', () => {
 })
 
 describe('PgShiftCloseUnitOfWork', () => {
+  it('evidence commits retain the shift lock without blocking the whole branch or financial children', async () => {
+    const db = fakeDatabase()
+    await new PgShiftCloseUnitOfWork(db.pool).run(
+      { shiftId: 'shift-1', actorId: 'actor-1', scope: 'evidence' },
+      async repos => { await repos.media.listSlots('shift-1') },
+    )
+    const sql = db.queries.map(q => q.text.replace(/\s+/g, ' ').trim())
+    expect(sql.some(q => q.includes('FROM shifts') && q.includes('FOR UPDATE'))).toBe(true)
+    expect(sql.some(q => q.includes('pg_advisory_xact_lock'))).toBe(false)
+    expect(sql.some(q => q.startsWith('SELECT id FROM shift_orders'))).toBe(false)
+    expect(sql.some(q => q.startsWith('SELECT id FROM cash_deductions'))).toBe(false)
+    expect(db.poolQuery).not.toHaveBeenCalled()
+    expect(sql.at(-1)).toBe('COMMIT')
+  })
+
+  it('does not allow an evidence commit to masquerade as a day-level approval', async () => {
+    const db = fakeDatabase()
+    await expect(new PgShiftCloseUnitOfWork(db.pool).run(
+      { shiftId: 'shift-1', actorId: null, scope: 'evidence', serializeDriverDay: true },
+      async () => {},
+    )).rejects.toThrow('evidence commits cannot serialize financial driver/day approvals')
+    expect(db.connect).not.toHaveBeenCalled()
+  })
   it('locks driver/day before the target and keeps all repositories on one transaction', async () => {
     const db = fakeDatabase()
     const unit = new PgShiftCloseUnitOfWork(db.pool)

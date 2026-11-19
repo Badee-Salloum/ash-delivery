@@ -18,6 +18,8 @@ const fakeDatabase = (): {
       return { rows: [], rowCount: 0 }
     }),
     release,
+    on: vi.fn(),
+    removeListener: vi.fn(),
   } as unknown as PoolClient
   const poolQuery = vi.fn(async () => {
     throw new Error('a financial transaction repository escaped to pool.query')
@@ -27,6 +29,21 @@ const fakeDatabase = (): {
 }
 
 describe('PgFinancialUnitOfWork', () => {
+  it('reads a consistent database-enforced read-only snapshot without taking a writer advisory lock', async () => {
+    const db = fakeDatabase(), unit = new PgFinancialUnitOfWork(db.pool)
+    await unit.run({ mode: 'read_snapshot', lockKey: 'receivables:hq', actorId: 'actor-1' }, async repos => {
+      await repos.companyLedger.listCommands('hq')
+      await repos.companyMovementReview.listCorrections('hq')
+      await repos.ledger.fundBalance('hq', 'company_cash:SYP_NEW')
+    })
+    const sql = db.queries.map(query => query.text)
+    expect(sql[0]).toBe('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    expect(sql.some(text => text.includes('pg_advisory_xact_lock'))).toBe(false)
+    expect(sql.at(-1)).toBe('COMMIT')
+    expect(db.pool.connect).toHaveBeenCalledTimes(1)
+    expect(db.poolQuery).not.toHaveBeenCalled()
+    expect(db.release).toHaveBeenCalledTimes(1)
+  })
   it('binds all financial repositories to one transaction after taking the retry lock', async () => {
     const db = fakeDatabase()
     const unit = new PgFinancialUnitOfWork(db.pool)
@@ -34,6 +51,10 @@ describe('PgFinancialUnitOfWork', () => {
     const result = await unit.run(
       { lockKey: 'expense:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', actorId: 'actor-1', requestId: 'request-1' },
       async (repos) => {
+        expect(await repos.directory.companyBranch()).toBeNull()
+        expect(await repos.directory.listBranches()).toEqual([])
+        expect(await repos.companyLedgerSource.listMovements('branch-1', { from: '2000-01-01', to: '2026-08-23' })).toEqual([])
+        expect(await repos.companyLedgerSource.listHistoricalImportReceipts('branch-1', { from: '2000-01-01', to: '2026-08-23' })).toEqual([])
         expect(await repos.expenses.get('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBeNull()
         expect(await repos.receivableEvents.findByIdempotencyKey('branch-1', 'receivable-1')).toBeNull()
         expect(await repos.cashCounts.find('branch-1', '2026-08-23')).toBeNull()

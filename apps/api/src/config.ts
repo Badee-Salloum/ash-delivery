@@ -29,6 +29,12 @@ const schema = z.object({
   HOST: z.string().default('0.0.0.0'),
 
   DATABASE_URL: z.string().min(1).optional(),
+  /** Review-mode restoration replaces the immediate HQ mirror; opt in only after schema/cutover QA. */
+  COMPANY_RESTORATION_REVIEW_ENABLED: z.union([z.boolean(), z.enum(['true', 'false'])])
+    .default(false).transform((value) => value === true || value === 'true'),
+  /** Review first by default: historical posting requires an explicit reconciled opt-in. */
+  COMPANY_HISTORICAL_POSTING_ENABLED: z.union([z.boolean(), z.enum(['true', 'false'])])
+    .default(false).transform((value) => value === true || value === 'true'),
 
   /** Emergency kill switch for the one public account-creation path. */
   DRIVER_SELF_REGISTRATION_ENABLED: explicitBoolean,
@@ -44,7 +50,7 @@ const schema = z.object({
     .transform((value) => value === true || value === 'true'),
   TRACKER_GATEWAY_TOKEN: z.string().min(16).optional(),
   /** Minimum Android build for new shift starts; deploy the chosen gate even during APK rollout. */
-  MIN_DRIVER_ANDROID_TRACKER_BUILD: z.coerce.number().int().min(0).default(0),
+  MIN_DRIVER_ANDROID_TRACKER_BUILD: z.coerce.number().int().min(0).default(6),
 
   /** bcrypt cost. SRS §7 mandates bcrypt; 12 is the current sane floor. */
   BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
@@ -66,6 +72,9 @@ const schema = z.object({
   DAY_START_MINUTES: z.coerce.number().int().min(0).max(1439).default(240),
 
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  /** Enable only after 0111 has been applied; raw platform-log retention is unchanged. */
+  OPERATIONAL_HISTORY_ENABLED: z.union([z.boolean(), z.enum(['true', 'false'])])
+    .default(false).transform(value => value === true || value === 'true'),
 
   /**
    * Pool size. Serverless (Vercel) opens a pool PER INSTANCE, so a large value multiplied by the

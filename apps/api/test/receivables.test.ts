@@ -62,6 +62,20 @@ async function seedOffice(manager: string, cash = 500_000, wallet = 500_000): Pr
   expect(response.statusCode, response.body).toBe(201)
 }
 
+/** Existing carry remains supported even though new close-time deferral is retired. */
+async function seedLegacyCarry(manager: string, cash: number, wallet: number): Promise<void> {
+  const lines = []
+  for (const [channel, amount] of [['cash', cash], ['wallet', wallet]] as const) {
+    if (amount === 0) continue
+    lines.push(
+      { fundCode: `office_${channel}`, side: 'C', amount: sypStr(amount) },
+      { fundCode: `driver_shift_funding_${channel}:${DRIVER_ID}`, side: 'D', amount: sypStr(amount) },
+    )
+  }
+  const response = await post(manager, '/journal/manual', { reason: 'legacy carry fixture', lines })
+  expect(response.statusCode, response.body).toBe(201)
+}
+
 function receivableBody(over: Partial<Payload> = {}): Payload {
   return {
     driverId: DRIVER_ID,
@@ -241,39 +255,12 @@ describe('ordinary and shift-funding receivable commands', () => {
    * 3,000 + 5,000 = 8,000 cash and 1,000 − 1,000 = 0 wallet. `submitBalancedShift` asserts BR1's
    * difference is zero, which is the whole point: the carried money must be EXPECTED, not a windfall.
    */
-  it('carries a deferred collection into the next shift instead of paying it back as a surplus', async () => {
+  it('consumes existing legacy funding at the next shift instead of paying it back as a surplus', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')
     await seedOffice(manager)
 
-    const first = await awaitingEmptyShift(driver)
-    expect((await post(manager, `/shifts/${first}/approve-open`, {
-      floatTranches: [sypStr(10_000)],
-      topupTranches: [sypStr(5_000)],
-    })).statusCode).toBe(200)
-    const firstHash = await submitBalancedShift(driver, manager, first, 15_000, 4_000)
-
-    // Claims are cash 13,000 (15,000 held less the 2,000 fixed share) and wallet 4,000.
-    const deferredPreview = await get(
-      manager,
-      `/shifts/${first}/settlement?cashReceivableDeferred=${sypStr(3_000)}`
-        + `&walletReceivableDeferred=${sypStr(1_000)}`,
-    )
-    expect(deferredPreview.statusCode, deferredPreview.body).toBe(200)
-    const deferred = deferredPreview.json() as {
-      settlementHash: string
-      cashReceivableDeferred: string
-      walletReceivableDeferred: string
-    }
-    const closed = await post(manager, `/shifts/${first}/approve-close`, {
-      reviewedOrdersHash: firstHash,
-      reviewedSettlementHash: deferred.settlementHash,
-      walletTransferConfirmed: true,
-      cashSettlementConfirmed: true,
-      cashReceivableDeferred: deferred.cashReceivableDeferred,
-      walletReceivableDeferred: deferred.walletReceivableDeferred,
-    })
-    expect(closed.statusCode, closed.body).toBe(200)
+    await seedLegacyCarry(manager, 3_000, 1_000)
 
     // The deferral is SHIFT FUNDING, so the next open can see it. The ordinary debt funds — which
     // are cleared only by an explicit collection command — must stay untouched by a close.
@@ -708,11 +695,11 @@ describe('correcting a recorded receivable', () => {
   /**
    * THE TEST THAT DECIDED THE DESIGN.
    *
-   * This `shift_funding` carry is created entirely by a shift close. There is no `receivable_events`
+   * This legacy `shift_funding` carry was created entirely by a historical shift close. There is no `receivable_events`
    * row for it and there never will be — the close posts the fund line directly. An "edit this
    * event" correction would have nothing to edit, which is why the correction names the BALANCE.
    *
-   * The number is the same one the deferral test above produces: 3,000 cash carried, held in the
+   * The number is the same one the legacy-carry test above uses: 3,000 cash carried, held in the
    * driver's own pocket. Say the manager meant 2,000.
    */
   it('corrects a shift-funding carry, which has no event row to point at', async () => {
@@ -720,30 +707,7 @@ describe('correcting a recorded receivable', () => {
     const manager = await h.loginAs('manager')
     await seedOffice(manager)
 
-    const first = await awaitingEmptyShift(driver)
-    expect((await post(manager, `/shifts/${first}/approve-open`, {
-      floatTranches: [sypStr(10_000)],
-      topupTranches: [sypStr(5_000)],
-    })).statusCode).toBe(200)
-    const firstHash = await submitBalancedShift(driver, manager, first, 15_000, 4_000)
-    const preview = await get(
-      manager,
-      `/shifts/${first}/settlement?cashReceivableDeferred=${sypStr(3_000)}&walletReceivableDeferred=${sypStr(0)}`,
-    )
-    expect(preview.statusCode, preview.body).toBe(200)
-    const deferred = preview.json() as {
-      settlementHash: string
-      cashReceivableDeferred: string
-      walletReceivableDeferred: string
-    }
-    expect((await post(manager, `/shifts/${first}/approve-close`, {
-      reviewedOrdersHash: firstHash,
-      reviewedSettlementHash: deferred.settlementHash,
-      walletTransferConfirmed: true,
-      cashSettlementConfirmed: true,
-      cashReceivableDeferred: deferred.cashReceivableDeferred,
-      walletReceivableDeferred: deferred.walletReceivableDeferred,
-    })).statusCode).toBe(200)
+    await seedLegacyCarry(manager, 3_000, 0)
 
     expect(await h.deps.ledger.fundBalance(BRANCH, `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(300_000n)
     // Not one command row exists for that 3,000 — the premise of the whole design.

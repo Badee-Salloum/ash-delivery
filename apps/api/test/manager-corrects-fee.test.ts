@@ -56,6 +56,26 @@ async function pendingReview(driver: string, manager: string): Promise<string> {
 }
 
 describe('a manager corrects a fee', () => {
+  it('clears a reader conflict when confirming an already included row without changing its money', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await pendingReview(driver, manager)
+    const row = (await h.deps.orders.findByProviderNo('A-1'))!
+    await h.deps.orders.update({ ...row, closeDraftReviewReasons: ['reader_conflict'] }, 'u-bm')
+    const before = (await get(manager, `/shifts/${id}/review`)).json()
+    expect(before.orders[0].closeDraftReviewReasons).toContain('reader_conflict')
+    const saved = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'A-1', included: true, reason: 'راجعت الصورة وأكدت القراءة الحالية' }],
+    })
+    expect(saved.statusCode, saved.body).toBe(200)
+    const after = (await get(manager, `/shifts/${id}/review`)).json()
+    expect(after.orders[0]).toMatchObject({ included: true, fee: before.orders[0].fee, closeDraftReviewReasons: [], windowBasis: 'manager', decisionReason: 'راجعت الصورة وأكدت القراءة الحالية' })
+    expect(after.br1.ordersHash).not.toBe(before.br1.ordersHash)
+    expect(before.br1.balanced).toBe(false)
+    expect(after.br1.balanced).toBe(true)
+    expect(after.state).toBe('pending_review')
+  })
+
   it('changes the money — the equation moves with it', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

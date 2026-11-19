@@ -541,6 +541,7 @@ describe('correcting an overstated cash float', () => {
     const again = await post(manager, `/shifts/${id}/cash-float-adjustments`, body)
     expect(again.statusCode, again.body).toBe(200)
     expect(again.json().replayed).toBe(true)
+    expect(again.json().currentTotal).toBe(sypStr(90_000))
     expect(
       h.deps.ledger.entries.filter((e) => e.occurrenceKey === 'cash-float-adjustment:float-once'),
     ).toHaveLength(1)

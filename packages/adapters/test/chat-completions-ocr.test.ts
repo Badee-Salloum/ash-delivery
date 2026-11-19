@@ -32,7 +32,36 @@ const walletRow = (
   ...overrides,
 })
 
-const screen = (row: ParsedRow): ParsedScreen => ({ rows: [row], fields: [], notes: null })
+const screen = (row: ParsedRow): ParsedScreen => ({ screenKind: 'wallet', rows: [row], fields: [], notes: null })
+
+describe('payments-log exact signed amounts', () => {
+  it('uses a compact money/time schema without route or scalar enrichment', async () => {
+    const fetch = vi.fn().mockResolvedValue(completion({ rows: [walletRow('+25.50', '25.50')] }))
+    vi.stubGlobal('fetch', fetch)
+    const result = await reader().read({ field: 'payments_log', bytes: new Uint8Array([1]), mimeType: 'image/jpeg' })
+    expect(result.result).toMatchObject({ ok: true, rows: [{ value: '25.50' }] })
+    const body = JSON.parse(fetch.mock.calls[0]![1].body)
+    expect(body.response_format.json_schema.name).toBe('payments_log')
+    expect(body.response_format.json_schema.schema.properties.rows.items.properties).not.toHaveProperty('pointA')
+    expect(body.response_format.json_schema.schema.properties).not.toHaveProperty('fields')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+  it('validates Arabic decimal/grouping evidence and keeps a clipped row separate', () => {
+    const result = parsedResult('payments_log', { rows: [
+      walletRow('−١٬١٥٥٫٦٥', '-1155.65', { hasThousands: true }),
+      walletRow('+674,30', '674.30'),
+      walletRow('١٢?', '120', { hasDecimal: false }),
+    ] })
+    expect(result).toMatchObject({ ok: true, retryable: true, rows: [
+      { value: '-1155.65' }, { value: '674.30' }, { value: null, reviewRequired: true },
+    ] })
+  })
+
+  it('refuses a dropped decimal or wrong sign instead of manufacturing money', () => {
+    expect(parsedResult('payments_log', { rows: [walletRow('−٦٧٤٫٣٠', '67430')] }))
+      .toMatchObject({ ok: true, rows: [{ value: null, reviewRequired: true }] })
+  })
+})
 const screenKind = (kind: 'orders' | 'payments_log' | 'unknown' = 'orders'): ParsedScreen => ({
   screenKind: kind,
 })
@@ -50,7 +79,7 @@ function completion(parsed: ParsedScreen, tokensIn = 10, tokensOut = 5): Respons
 const reader = (timeoutMs = 1_000): ChatCompletionsOcrReader =>
   new ChatCompletionsOcrReader({
     provider: 'openai',
-    apiKey: 'test-only',
+    apiKey: 'test-provider-key',
     model: 'gpt-test',
     effort: 'medium',
     verbosity: 'medium',
@@ -65,7 +94,7 @@ const providerReader = (
 ): ChatCompletionsOcrReader =>
   new ChatCompletionsOcrReader({
     provider,
-    apiKey: 'sk-or-v1-testkeytestkeytestkey',
+    apiKey: 'test-provider-key',
     model: 'model-under-test',
     effort: 'medium',
     verbosity: 'medium',
@@ -129,7 +158,7 @@ describe('wallet AI consensus', () => {
         pointB: null,
       },
     ])
-    expect(reading.result.raw).toMatchObject({ reader: 'wallet-ai-consensus-v1', agreeingPasses: 2 })
+    expect(reading.result.raw).toMatchObject({ reader: 'wallet-ai-consensus-v2', agreeingPasses: 2 })
     expect(reading.usage).toMatchObject({ tokensIn: 33, tokensOut: 21 })
   })
 
@@ -360,7 +389,7 @@ describe('printed order time normalization', () => {
 describe('orders fast financial pass', () => {
   it('versions the cache by model configuration and all orders pass versions and budgets', () => {
     expect(reader().cacheSignature('orders')).toBe(
-      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v2:time-validation-v3:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:kind-retry-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
+      'openai@ocr.test:gpt-test:medium:medium:orders-screen-kind-v1:orders-money-v5:orders-money-2-v1:orders-time-v3:orders-route-v4:money-consensus-v1:money-validation-v3:time-validation-v3:edge-row-alignment-v2:position-evidence-v1:cancellation-consensus-v1:kind-timeout-1000:kind-retry-1000:money-timeout-1000:time-timeout-1000:route-timeout-1000:route-grace-12000:kind-max-512:money-max-8192:time-max-4096:route-max-8192',
     )
     expect(reader(2_000).cacheSignature('orders')).not.toBe(reader().cacheSignature('orders'))
     expect(reader(2_000).cacheSignature('wallet')).not.toBe(reader().cacheSignature('wallet'))

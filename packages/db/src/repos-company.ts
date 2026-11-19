@@ -1,8 +1,11 @@
 import type {
   CompanyCommandRecord,
+  CompanyHistoricalBranchLink,
   CompanyCutoverRecord,
   CompanyLedgerRepo,
   CompanyLedgerSource,
+  CompanyHistoricalImportReceiptRecord,
+  CompanyHistoricalRestorationSettlement,
   CompanyMirrorRecord,
   CompanyMovementRecord,
   CompanyOverviewRecord,
@@ -10,7 +13,7 @@ import type {
   CompanyReversalRecord,
   FinancialLocks,
 } from '@ash/contracts'
-import { type CalendarDate, type Currency, CURRENCIES, type Minor, minor } from '@ash/domain'
+import { type CalendarDate, type Currency, CURRENCIES, type Minor, minor, parseMinor } from '@ash/domain'
 import { PG, type Pool, isPgError } from './pool.ts'
 import { JOURNAL_LINES_JSON, isoDate, journalEntryFromRow } from './repos.ts'
 
@@ -26,6 +29,12 @@ const toMs = (value: unknown): number => (value instanceof Date ? value.getTime(
 const big = (value: unknown): bigint => BigInt(String(value))
 const bigOrNull = (value: unknown): bigint | null => (value === null || value === undefined ? null : big(value))
 const money = (value: unknown): Minor => minor(big(value))
+const settlementEncode = (row: CompanyHistoricalRestorationSettlement): string =>
+  JSON.stringify(row, (_key, value: unknown) => typeof value === 'bigint' ? { minor: value.toString() } : value)
+const settlementDecode = (payload: unknown): CompanyHistoricalRestorationSettlement =>
+  JSON.parse(JSON.stringify(payload), (_key, value: unknown) =>
+    value !== null && typeof value === 'object' && Object.keys(value).length === 1 && 'minor' in value &&
+      typeof value.minor === 'string' ? minor(BigInt(value.minor)) : value) as CompanyHistoricalRestorationSettlement
 
 const duplicate = (code: string, message: string): Error & { code: string } =>
   Object.assign(new Error(message), { code })
@@ -105,7 +114,7 @@ function commandFromRow(r: Record<string, unknown>): CompanyCommandRecord {
         costCenterKind: String(r.cost_center_kind) as 'general' | 'vehicle' | 'asset',
         vehicleId: r.vehicle_id === null ? null : String(r.vehicle_id),
         assetId: r.asset_id === null ? null : String(r.asset_id),
-        paidFrom: String(r.paid_from) as 'pocket' | 'reserve' | 'owner_outside',
+        paidFrom: String(r.paid_from) as 'pocket' | 'reserve' | 'owner_outside' | 'owner_custody',
         receiptMediaId: r.receipt_media_id === null ? null : String(r.receipt_media_id),
         description: String(r.text_value),
       }
@@ -150,6 +159,8 @@ const cutoverFromRow = (r: Record<string, unknown>): CompanyCutoverRecord => ({
   companyBranchId: String(r.company_branch_id),
   openingAmount: money(r.opening_amount_minor),
   openingEntryId: r.opening_entry_id === null ? null : Number(r.opening_entry_id),
+  mode: r.mode === 'link_only' ? 'link_only' : 'cash_opening',
+  baselineDifference: money(r.baseline_difference_minor ?? '0'),
   watermarkEntryId: Number(r.watermark_entry_id),
   businessDate: isoDate(r.business_date),
   reason: String(r.reason),
@@ -170,6 +181,27 @@ const mirrorFromRow = (r: Record<string, unknown>): CompanyMirrorRecord => ({
 })
 
 export class PgCompanyLedgerRepo implements CompanyLedgerRepo {
+  async createHistoricalBranchLink(row: CompanyHistoricalBranchLink): Promise<void> {
+    await this.pool.query(`INSERT INTO company_historical_branch_links
+      (id,company_branch_id,source_branch_id,source_entry_id,company_entry_id,created_entry,amount_minor,direction,occurred_on,reason,request_hash,created_by,created_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [row.id,row.companyBranchId,row.sourceBranchId,row.sourceEntryId,row.companyEntryId,row.createdEntry,row.amount.toString(),row.direction,row.occurredOn,row.reason,row.requestHash,row.createdBy,new Date(row.createdAtMs)])
+  }
+  async findHistoricalBranchLink(id: string): Promise<CompanyHistoricalBranchLink | null> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM company_historical_branch_links WHERE id=$1',[id])
+    return rows[0] ? this.historicalBranchLink(rows[0]) : null
+  }
+  async listHistoricalBranchLinks(companyBranchId: string): Promise<CompanyHistoricalBranchLink[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM company_historical_branch_links WHERE company_branch_id=$1 ORDER BY created_at,id',[companyBranchId])
+    return rows.map(row => this.historicalBranchLink(row))
+  }
+  private historicalBranchLink(row: Record<string, unknown>): CompanyHistoricalBranchLink {
+    return { id:String(row.id),companyBranchId:String(row.company_branch_id),sourceBranchId:String(row.source_branch_id),
+      sourceEntryId:Number(row.source_entry_id),companyEntryId:Number(row.company_entry_id),createdEntry:Boolean(row.created_entry),
+      amount:minor(BigInt(String(row.amount_minor))),direction:row.direction as CompanyHistoricalBranchLink['direction'],
+      occurredOn:isoDate(row.occurred_on),reason:String(row.reason),requestHash:String(row.request_hash),createdBy:String(row.created_by),
+      createdAtMs:row.created_at instanceof Date ? row.created_at.getTime() : new Date(String(row.created_at)).getTime() }
+  }
   private readonly pool: Pool
   constructor(pool: Pool) {
     this.pool = pool
@@ -178,7 +210,7 @@ export class PgCompanyLedgerRepo implements CompanyLedgerRepo {
   async createCommand(row: CompanyCommandRecord): Promise<void> {
     // One key, one command, across every table — checked here as well as by the route, so a key
     // spent on a deposit can never become an expense through a racing request.
-    if ((await this.findCommand(row.id)) !== null) {
+    if ((await this.findCommand(row.id)) !== null || await this.findHistoricalBranchLink(row.id)) {
       throw duplicate('DUPLICATE_COMPANY_COMMAND', `company command ${row.id} already exists`)
     }
     try {
@@ -326,11 +358,12 @@ export class PgCompanyLedgerRepo implements CompanyLedgerRepo {
       await this.pool.query(
         `INSERT INTO company_ledger_cutovers
            (branch_id, company_branch_id, opening_amount_minor, opening_entry_id, watermark_entry_id,
-            business_date, reason, performed_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            business_date, reason, performed_by, mode, baseline_difference_minor)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [
           row.branchId, row.companyBranchId, row.openingAmount.toString(), row.openingEntryId,
           row.watermarkEntryId, row.businessDate, row.reason, row.performedBy,
+          row.mode ?? 'cash_opening', (row.baselineDifference ?? 0n).toString(),
         ],
       )
     } catch (error) {
@@ -383,6 +416,58 @@ export class PgCompanyLedgerRepo implements CompanyLedgerRepo {
       [sourceBranchId],
     )
     return rows.map(mirrorFromRow)
+  }
+
+  async createHistoricalSettlement(row: CompanyHistoricalRestorationSettlement, expectedVersion: number): Promise<void> {
+    if (row.version !== expectedVersion + 1) throw duplicate('HISTORICAL_SETTLEMENT_VERSION_CONFLICT', 'invalid historical settlement version')
+    try {
+      await this.pool.query(`INSERT INTO company_historical_restoration_settlements
+        (id,company_branch_id,source_branch_id,version,cutover_watermark_entry_id,evidence_hash,request_hash,business_date,reason,payload,created_by,created_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12)`,
+      [row.id,row.companyBranchId,row.sourceBranchId,row.version,row.cutoverWatermarkEntryId,row.evidenceHash,row.requestHash,
+        row.businessDate,row.reason,settlementEncode(row),row.createdBy,new Date(row.createdAtMs)])
+      // Three set-based evidence inserts, not one network round trip per source. Database guards
+      // still inspect every row and prove the complete immutable batch at commit.
+      const payload = settlementEncode(row)
+      await this.pool.query(`INSERT INTO company_historical_restoration_settlement_groups
+        (settlement_id,restoration_id,business_date,branch_net_minor,company_net_minor,variance_minor)
+        SELECT $1,(g->>'restorationId')::bigint,(g->>'businessDate')::date,
+          (g->'branchNet'->>'minor')::bigint,(g->'companyNet'->>'minor')::bigint,(g->'variance'->>'minor')::bigint
+        FROM jsonb_array_elements($2::jsonb->'groups') g`, [row.id,payload])
+      await this.pool.query(`INSERT INTO company_historical_restoration_settlement_sources
+        (settlement_id,restoration_id,source_entry_id,direction,amount_minor)
+        SELECT $1,(g->>'restorationId')::bigint,(s->>'sourceEntryId')::bigint,s->>'direction',(s->'amount'->>'minor')::bigint
+        FROM jsonb_array_elements($2::jsonb->'groups') g CROSS JOIN LATERAL jsonb_array_elements(g->'branchSourceEntries') s`, [row.id,payload])
+      await this.pool.query(`INSERT INTO company_historical_restoration_settlement_legs
+        (settlement_id,restoration_id,source_reference,historical_journal_entry_id,direction,amount_minor,journal_entry_id)
+        SELECT $1,(l->>'restorationId')::bigint,l->>'sourceReference',(l->>'historicalJournalEntryId')::bigint,
+          l->>'direction',(l->'amount'->>'minor')::bigint,(l->>'journalEntryId')::bigint
+        FROM jsonb_array_elements($2::jsonb->'legs') l`, [row.id,payload])
+    } catch (error) {
+      if (isPgError(error, PG.UNIQUE_VIOLATION)) throw duplicate('DUPLICATE_HISTORICAL_SETTLEMENT', 'historical source or restoration is already settled')
+      if (typeof error === 'object' && error !== null && 'constraint' in error && error.constraint === 'company_historical_settlement_version_guard') {
+        throw duplicate('HISTORICAL_SETTLEMENT_VERSION_CONFLICT', 'historical settlement version changed')
+      }
+      throw error
+    }
+  }
+
+  async findHistoricalSettlement(id: string): Promise<CompanyHistoricalRestorationSettlement | null> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return null
+    const { rows } = await this.pool.query<{ payload: unknown }>('SELECT payload FROM company_historical_restoration_settlements WHERE id=$1', [id])
+    return rows[0] ? settlementDecode(rows[0].payload) : null
+  }
+
+  async listHistoricalSettlements(companyBranchId: string, sourceBranchId?: string): Promise<CompanyHistoricalRestorationSettlement[]> {
+    const { rows } = await this.pool.query<{ payload: unknown }>(`SELECT payload FROM company_historical_restoration_settlements
+      WHERE company_branch_id=$1 AND ($2::uuid IS NULL OR source_branch_id=$2) ORDER BY version,created_at,id`, [companyBranchId,sourceBranchId ?? null])
+    return rows.map(row => settlementDecode(row.payload))
+  }
+
+  async findHistoricalSettlementBySource(historicalJournalEntryId: number): Promise<CompanyHistoricalRestorationSettlement | null> {
+    const { rows } = await this.pool.query<{ payload: unknown }>(`SELECT s.payload FROM company_historical_restoration_settlements s
+      JOIN company_historical_restoration_settlement_legs l ON l.settlement_id=s.id WHERE l.historical_journal_entry_id=$1`, [historicalJournalEntryId])
+    return rows[0] ? settlementDecode(rows[0].payload) : null
   }
 }
 
@@ -492,17 +577,18 @@ export class PgCompanyLedgerSource implements CompanyLedgerSource {
   ): Promise<CompanyMovementRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `WITH pocket AS (
-         SELECT jl.entry_id, f.currency,
+         SELECT jl.entry_id, je.business_date, f.currency,
                 SUM(CASE jl.side WHEN 'D' THEN jl.amount_minor ELSE -jl.amount_minor END) AS delta
            FROM journal_lines jl
+           JOIN journal_entries je ON je.id = jl.entry_id
            JOIN funds f ON f.id = jl.fund_id
           WHERE f.branch_id = $1::uuid
             AND f.type::text = 'company_cash'
-          GROUP BY jl.entry_id, f.currency
+          GROUP BY jl.entry_id, je.business_date, f.currency
        ),
        running AS (
          SELECT entry_id, currency,
-                SUM(delta) OVER (PARTITION BY currency ORDER BY entry_id) AS after
+                SUM(delta) OVER (PARTITION BY currency ORDER BY business_date, entry_id) AS after
            FROM pocket
        )
        SELECT je.*, ${JOURNAL_LINES_JSON} AS lines,
@@ -513,7 +599,7 @@ export class PgCompanyLedgerSource implements CompanyLedgerSource {
         WHERE je.branch_id = $1::uuid
           AND je.business_date BETWEEN $2::date AND $3::date
         GROUP BY je.id
-        ORDER BY je.id`,
+        ORDER BY je.business_date, je.id`,
       [companyBranchId, range.from, range.to],
     )
     return rows.map((r) => {
@@ -523,6 +609,51 @@ export class PgCompanyLedgerSource implements CompanyLedgerSource {
         if (after[currency] !== undefined) pocketAfter[currency] = minor(BigInt(after[currency]))
       }
       return { entry: journalEntryFromRow(r), pocketAfter }
+    })
+  }
+
+  async listHistoricalImportReceipts(companyBranchId: string,
+    range: { from: CalendarDate; to: CalendarDate }): Promise<CompanyHistoricalImportReceiptRecord[]> {
+    const { rows } = await this.pool.query<Record<string, unknown>>(
+      `SELECT r.source_reference,r.source_position,r.occurred_on,r.movement_type,r.paid_from,r.source_branch_id,
+              r.journal_entry_id,r.branch_journal_entry_id,r.restoration_id,
+              r.original_evidence AS evidence,r.original_evidence->'payload' AS payload,
+              j.syp_minor_per_usd::text AS journal_rate
+         FROM company_historical_import_receipts r
+         JOIN company_historical_import_batches b ON b.id=r.batch_id
+         LEFT JOIN journal_entries j ON j.id=r.journal_entry_id
+        WHERE b.branch_id=$1::uuid AND r.occurred_on BETWEEN $2::date AND $3::date
+        ORDER BY r.occurred_on,r.source_position`, [companyBranchId, range.from, range.to])
+    return rows.map(row => {
+      const payload = row.payload as Record<string, unknown>
+      const evidence = row.evidence as Record<string, unknown>
+      const deltas = evidence.originalDeltas as number[]
+      if (!Array.isArray(deltas) || deltas.length !== 4 || deltas.some(value => !Number.isSafeInteger(value))) {
+        throw new Error(`invalid historical source deltas for ${String(row.source_reference)}`)
+      }
+      const currency = payload.currency === 'SYP_NEW' || payload.currency === 'USD' ? payload.currency : null
+      const amount = currency === null ? null : parseMinor(String(payload.amount))
+      const historicalRate = typeof payload.historicalRate === 'string' ? parseMinor(payload.historicalRate) : null
+      return {
+        sourceReference: String(row.source_reference), sourcePosition: Number(row.source_position), occurredOn: isoDate(row.occurred_on),
+        movementType: row.movement_type as CompanyHistoricalImportReceiptRecord['movementType'],
+        paidFrom: row.paid_from as CompanyHistoricalImportReceiptRecord['paidFrom'],
+        currency, amount, description: String(payload.description ?? ''),
+        originalAmount: String(evidence.originalAmount ?? ''), originalDescription: String(evidence.originalDescription ?? ''),
+        sourceFunding: String(evidence.sourceFunding ?? ''), originalDeltas: deltas as [number,number,number,number],
+        fromCurrency: payload.fromCurrency === 'SYP_NEW' || payload.fromCurrency === 'USD' ? payload.fromCurrency : null,
+        fromAmount: typeof payload.fromAmount === 'string' ? parseMinor(payload.fromAmount) : null,
+        toCurrency: payload.toCurrency === 'SYP_NEW' || payload.toCurrency === 'USD' ? payload.toCurrency : null,
+        toAmount: typeof payload.toAmount === 'string' ? parseMinor(payload.toAmount) : null,
+        rateBasis: payload.rateBasis === 'documented' || payload.rateBasis === 'estimated' ? payload.rateBasis : null,
+        sypMinorPerUsd: row.journal_rate === null ? historicalRate : BigInt(String(row.journal_rate)),
+        sourceBranchId: row.source_branch_id === null ? null : String(row.source_branch_id),
+        journalEntryId: row.journal_entry_id === null ? null : Number(row.journal_entry_id),
+        branchJournalEntryId: row.branch_journal_entry_id === null ? null : Number(row.branch_journal_entry_id),
+        restorationId: row.restoration_id === null ? null : Number(row.restoration_id),
+        linkStatus: typeof evidence.linkStatus === 'string' ? evidence.linkStatus : null,
+        linkNote: typeof evidence.linkNote === 'string' ? evidence.linkNote : null,
+      }
     })
   }
 }

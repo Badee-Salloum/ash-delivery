@@ -19,6 +19,7 @@ afterEach(async () => {
 
 type Payload = Record<string, unknown>
 type Settlement = {
+  managerCharge: string
   policyCode: 'fixed_40_cash_close_v2_receivable'
   driverRateBps: 4000
   deliveryFeeTotal: string
@@ -591,219 +592,41 @@ describe('fixed 40% approval', () => {
     expect(closed.finalEmployeeCash).toBe(settlement.finalEmployeeCash)
   })
 
-  it('converts a reviewed close shortage to ordinary debt without charging office cash twice', async () => {
-    // A 5,000 total shortage consumes the 4,000 share; the remaining 1,000 is the only amount that
-    // may be left unpaid. The 15,000 already in custody must be the complete physical cash receipt.
-    const { manager, shiftId, reviewHash } = await pendingShift({ actualCash: 15_000, actualWallet: 3_000 })
-    const immediate = await preview(manager, shiftId)
-    expect(immediate).toMatchObject({
-      finalEmployeeCash: '-1000.00',
-      maximumCashShortageReceivable: '1000.00',
-      cashShortageReceivable: '0.00',
-      cashToOffice: '16000.00',
-    })
+  it('rejects ordinary debt creation from an obsolete close client', async () => {
+ const {manager,shiftId,reviewHash}=await pendingShift()
+ const plan=await preview(manager,shiftId)
+ const entries=structuredClone(h.deps.ledger.entries)
+ const rejected=await post(manager,`/shifts/${shiftId}/approve-close`,{reviewedOrdersHash:reviewHash,reviewedSettlementHash:plan.settlementHash,walletTransferConfirmed:true,cashSettlementConfirmed:true,cashShortageReceivable:'1000.00'})
+ expect(rejected.statusCode,rejected.body).toBe(422)
+ expect(rejected.json().error).toBe('close_deferral_disabled')
+ expect(h.deps.ledger.entries).toEqual(entries)
+ expect(await h.deps.settlements.findByShift(shiftId)).toBeNull()
+ expect((await h.deps.shifts.findById(shiftId))?.state).toBe('pending_review')
+})
 
-    const partialResponse = await get(
-      manager,
-      `/shifts/${shiftId}/settlement?cashShortageReceivable=400.00`,
-    )
-    expect(partialResponse.statusCode, partialResponse.body).toBe(200)
-    expect(partialResponse.json()).toMatchObject({
-      maximumCashShortageReceivable: '1000.00',
-      cashShortageReceivable: '400.00',
-      cashToOffice: '15600.00',
-    })
+  it('does not create a new shortage debt when a deduction exceeds the share', async () => {
+ const {manager,shiftId,reviewHash}=await pendingShift({deduction:5000})
+ const plan=await preview(manager,shiftId)
+ const entries=structuredClone(h.deps.ledger.entries)
+ const rejected=await post(manager,`/shifts/${shiftId}/approve-close`,{reviewedOrdersHash:reviewHash,reviewedSettlementHash:plan.settlementHash,walletTransferConfirmed:true,cashSettlementConfirmed:true,cashShortageReceivable:'1000.00'})
+ expect(rejected.statusCode,rejected.body).toBe(422)
+ expect(rejected.json().error).toBe('close_deferral_disabled')
+ expect(h.deps.ledger.entries).toEqual(entries)
+ expect(await h.deps.settlements.findByShift(shiftId)).toBeNull()
+ expect((await h.deps.shifts.findById(shiftId))?.state).toBe('pending_review')
+})
 
-    const over = await get(manager, `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.01`)
-    expect(over.statusCode, over.body).toBe(422)
-    expect(over.json()).toMatchObject({
-      error: 'invalid_shortage_receivable_amount',
-      detail: { maximumCashShortageReceivable: '1000.00' },
-    })
-
-    const fullResponse = await get(manager, `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.00`)
-    expect(fullResponse.statusCode, fullResponse.body).toBe(200)
-    const full = fullResponse.json() as Settlement
-    expect(full).toMatchObject({
-      maximumCashShortageReceivable: '1000.00',
-      cashShortageReceivable: '1000.00',
-      cashToOffice: '15000.00',
-      cashAction: 'collect',
-      cashAmount: '15000.00',
-    })
-    expect(full.settlementHash).not.toBe(immediate.settlementHash)
-
-    const stale = await post(manager, `/shifts/${shiftId}/approve-close`, {
-      reviewedOrdersHash: reviewHash,
-      reviewedSettlementHash: immediate.settlementHash,
-      walletTransferConfirmed: true,
-      cashSettlementConfirmed: true,
-      cashShortageReceivable: full.cashShortageReceivable,
-      varianceReason: 'driver will pay the remaining shortage later',
-    })
-    expect(stale.statusCode, stale.body).toBe(409)
-    expect(stale.json().error).toBe('settlement_changed_since_review')
-
-    const officeBeforeClose = await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')
-    const approved = await approve(
-      manager,
-      shiftId,
-      reviewHash,
-      full,
-      'driver will pay the remaining shortage later',
-    )
-    expect(approved.statusCode, approved.body).toBe(200)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')).toBe(
-      officeBeforeClose + minor(1_500_000n),
-    )
-    expect(await h.deps.ledger.fundBalance(
-      'branch-damascus',
-      `driver_receivable_cash:${DRIVER_ID}`,
-    )).toBe(minor(100_000n))
-    expect(await h.deps.ledger.fundBalance(
-      'branch-damascus',
-      `driver_shift_funding_cash:${DRIVER_ID}`,
-    )).toBe(0n)
-    expect(await h.deps.settlements.findByShift(shiftId)).toMatchObject({
-      maximumCashShortageReceivable: minor(100_000n),
-      cashShortageReceivable: minor(100_000n),
-      cashToOffice: minor(1_500_000n),
-      varianceReason: 'driver will pay the remaining shortage later',
-      settlementHash: full.settlementHash,
-    })
-    const closeEntries = await h.deps.ledger.listByShift(shiftId)
-    expect(closeEntries.flatMap((entry) => entry.lines)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        fundCode: `driver_receivable_cash:${DRIVER_ID}`,
-        side: 'D',
-        amount: minor(100_000n),
-        role: 'cash_shortage_receivable',
-      }),
-    ]))
-
-    const replay = await approve(
-      manager,
-      shiftId,
-      reviewHash,
-      full,
-      'driver will pay the remaining shortage later',
-    )
-    expect(replay.statusCode, replay.body).toBe(200)
-    expect(replay.json().postings).toBe(0)
-    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(closeEntries)
-
-    const officeBeforeCollection = await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')
-    const collected = await post(manager, '/receivables/events', {
-      driverId: DRIVER_ID,
-      receivableKind: 'ordinary',
-      channel: 'cash',
-      direction: 'collect',
-      amount: '1000.00',
-      reason: 'driver paid the shortage recorded by the completed shift',
-      idempotencyKey: '00000000-0000-4000-8000-000000000901',
-    })
-    expect(collected.statusCode, collected.body).toBe(201)
-    expect(await h.deps.ledger.fundBalance(
-      'branch-damascus',
-      `driver_receivable_cash:${DRIVER_ID}`,
-    )).toBe(0n)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', 'office_cash')).toBe(
-      officeBeforeCollection + minor(100_000n),
-    )
-  })
-
-  it('replaces the settled deduction debt with one shortage debt and audits a blank reason', async () => {
-    // The 5,000 deduction first creates a 1,000 ordinary receivable beyond the 4,000 share. Close
-    // settles that pre-existing balance, then preserves exactly one new 1,000 shortage receivable.
-    const { manager, shiftId, reviewHash } = await pendingShift({ deduction: 5_000 })
-    const base = await preview(manager, shiftId)
-    expect(base).toMatchObject({
-      variance: '0.00',
-      baseDriverShare: '-1000.00',
-      finalEmployeeCash: '-1000.00',
-      maximumCashShortageReceivable: '1000.00',
-    })
-
-    const selectedResponse = await get(
-      manager,
-      `/shifts/${shiftId}/settlement?cashShortageReceivable=1000.00`,
-    )
-    expect(selectedResponse.statusCode, selectedResponse.body).toBe(200)
-    const selected = selectedResponse.json() as Settlement
-    const approved = await approve(manager, shiftId, reviewHash, selected, null)
-    expect(approved.statusCode, approved.body).toBe(200)
-
-    expect(await h.deps.ledger.fundBalance(
-      'branch-damascus',
-      `driver_receivable_cash:${DRIVER_ID}`,
-    )).toBe(minor(100_000n))
-    expect(await h.deps.settlements.findByShift(shiftId)).toMatchObject({
-      cashShortageReceivable: minor(100_000n),
-      varianceReason: SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
-    })
-    expect((await h.deps.ledger.listByShift(shiftId)).some(
-      (entry) => entry.reason === SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
-    )).toBe(true)
-    expect(await h.deps.decisions.listByShift(shiftId)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        decision: 'approved',
-        notes: SYSTEM_SHORTAGE_RECEIVABLE_REASON_NOT_PROVIDED,
-      }),
-    ]))
-  })
-
-  it('supports combined partial cash/wallet deferral, exact replay, and immutable hash binding', async () => {
-    const { manager, shiftId, reviewHash } = await pendingShift()
-    const noDeferral = await preview(manager, shiftId)
-    const deferredResponse = await get(
-      manager,
-      `/shifts/${shiftId}/settlement?cashReceivableDeferred=6000.00&walletReceivableDeferred=1000.00`,
-    )
-    expect(deferredResponse.statusCode, deferredResponse.body).toBe(200)
-    const deferred = deferredResponse.json() as Settlement
-    expect(deferred).toMatchObject({
-      cashClaimToOffice: '16000.00',
-      walletClaimToOffice: '3000.00',
-      cashReceivableDeferred: '6000.00',
-      walletReceivableDeferred: '1000.00',
-      cashToOffice: '10000.00',
-      walletToOffice: '2000.00',
-      cashAction: 'collect',
-      cashAmount: '10000.00',
-      walletAction: 'collect',
-      walletAmount: '2000.00',
-    })
-    expect(deferred.settlementHash).not.toBe(noDeferral.settlementHash)
-
-    const stale = await post(manager, `/shifts/${shiftId}/approve-close`, {
-      reviewedOrdersHash: reviewHash,
-      reviewedSettlementHash: noDeferral.settlementHash,
-      walletTransferConfirmed: true,
-      cashSettlementConfirmed: true,
-      cashReceivableDeferred: deferred.cashReceivableDeferred,
-      walletReceivableDeferred: deferred.walletReceivableDeferred,
-    })
-    expect(stale.statusCode, stale.body).toBe(409)
-    expect(stale.json().error).toBe('settlement_changed_since_review')
-
-    const approved = await approve(manager, shiftId, reviewHash, deferred)
-    expect(approved.statusCode, approved.body).toBe(200)
-    // A deferral is money the driver still HOLDS and will spend on his next shift, so it lands in
-    // the shift-funding funds the next open consumes — not in the ordinary debt funds, which are
-    // cleared only by an explicit later collection and would leave the carried money invisible to
-    // BR1. See `cashSettledReturnPostings` and the cross-shift test below.
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_shift_funding_cash:${DRIVER_ID}`)).toBe(600_000n)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_shift_funding_wallet:${DRIVER_ID}`)).toBe(100_000n)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_cash:${DRIVER_ID}`)).toBe(0n)
-    expect(await h.deps.ledger.fundBalance('branch-damascus', `driver_receivable_wallet:${DRIVER_ID}`)).toBe(0n)
-    expect(await h.deps.shifts.findById(shiftId)).toMatchObject({ keptAsReceivable: 600_000n })
-
-    const entries = await h.deps.ledger.listByShift(shiftId)
-    const replay = await approve(manager, shiftId, reviewHash, deferred)
-    expect(replay.statusCode, replay.body).toBe(200)
-    expect(replay.json().postings).toBe(0)
-    expect(await h.deps.ledger.listByShift(shiftId)).toEqual(entries)
-  })
+  it('rejects next-shift cash and wallet funding from an obsolete close client', async () => {
+ const {manager,shiftId,reviewHash}=await pendingShift()
+ const plan=await preview(manager,shiftId)
+ const entries=structuredClone(h.deps.ledger.entries)
+ const rejected=await post(manager,`/shifts/${shiftId}/approve-close`,{reviewedOrdersHash:reviewHash,reviewedSettlementHash:plan.settlementHash,walletTransferConfirmed:true,cashSettlementConfirmed:true,cashReceivableDeferred:'6000.00',walletReceivableDeferred:'1000.00'})
+ expect(rejected.statusCode,rejected.body).toBe(422)
+ expect(rejected.json().error).toBe('close_deferral_disabled')
+ expect(h.deps.ledger.entries).toEqual(entries)
+ expect(await h.deps.settlements.findByShift(shiftId)).toBeNull()
+ expect((await h.deps.shifts.findById(shiftId))?.state).toBe('pending_review')
+})
 
   it('rejects deferral above either collectible claim and keeps deferred employee payout retired', async () => {
     const { manager, shiftId, reviewHash } = await pendingShift()
@@ -835,5 +658,36 @@ describe('fixed 40% approval', () => {
     expect(response.statusCode, response.body).toBe(200)
     expect(h.deps.ledger.entries.some((entry) => entry.eventType === 'wallet_adjustment')).toBe(false)
     expect(await h.deps.ledger.fundBalance('branch-damascus', 'cost_center:wallet_adjustment:branch-damascus')).toBe(0n)
+  })
+})
+
+
+describe('percentage manager charges on gross driver share', () => {
+  it('calculates on the share before deductions and variance, without moving money', async () => {
+    const {manager, shiftId} = await pendingShift({deduction: 100})
+    const journals = structuredClone(h.deps.ledger.entries)
+    const response = await put(manager, `/shifts/${shiftId}/manager-charge`, {amount:'0.00', percentBps:1000, reason:'percentage policy test'})
+    expect(response.statusCode, response.body).toBe(200)
+    const result = await preview(manager, shiftId)
+    expect(result.grossDriverShare).toBe(sypStr(4000))
+    expect(result.managerCharge).toBe(sypStr(400))
+    expect(h.deps.shifts.rows.get(shiftId)?.managerChargeBps).toBe(1000)
+    const ambiguous = await put(manager, `/shifts/${shiftId}/manager-charge`, {amount:'5.00', percentBps:1000, reason:'ambiguous charge'})
+    expect(ambiguous.statusCode).toBe(422)
+    expect(h.deps.shifts.rows.get(shiftId)?.managerChargeBps).toBe(1000)
+    expect(h.deps.ledger.entries).toEqual(journals)
+  })
+
+  it('recomputes the percentage when a reviewed order fee changes', async () => {
+    const {manager, shiftId} = await pendingShift()
+    expect((await put(manager, `/shifts/${shiftId}/manager-charge`, {amount:'0.00', percentBps:1000, reason:'percentage test'})).statusCode).toBe(200)
+    const before = await preview(manager, shiftId)
+    const revised = await post(manager, `/shifts/${shiftId}/operations/revise`, {orders:[{providerOrderNo:'YAL-1', fee:sypStr(20000), reason:'corrected fee from evidence'}]})
+    expect(revised.statusCode, revised.body).toBe(200)
+    const after = await preview(manager, shiftId)
+    expect(after.managerCharge).toBe(sypStr(800))
+    expect(after.settlementHash).not.toBe(before.settlementHash)
+    expect((await put(manager, `/shifts/${shiftId}/manager-charge`, {amount:'0.00', reason:null})).statusCode).toBe(200)
+    expect(h.deps.shifts.rows.get(shiftId)?.managerChargeBps).toBeNull()
   })
 })

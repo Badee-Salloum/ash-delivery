@@ -92,9 +92,11 @@ export function fundTypeOf(fund: FundRef): string {
     // The company ledger (0065). Each is its own enum value — none may hide under cost_center,
     // because 0066's partition and pocket guards read the TYPE.
     case 'company_cash':
+    case 'company_custody':
     case 'depreciation_reserve':
     case 'company_fx_position':
     case 'branch_clearing':
+    case 'historical_branch_transit':
     case 'company_payable':
     case 'company_receivable':
     case 'fixed_asset':
@@ -131,40 +133,43 @@ export class FundCurrencyMismatchError extends Error {
  * lazily is simpler and less error-prone than a trigger on `drivers` that has to be kept in
  * step with every future fund type.
  */
-async function ensureFund(client: PoolClient, branchId: string, fund: FundRef): Promise<string> {
-  const code = fundCode(fund)
-  const currency = currencyOf(fund)
-  // A cost centre owned by a VEHICLE carries that vehicle's uuid; a NAMED contra account
-  // ("opening_balance", "owner_funding", "adjustments") has no owner and is owner_kind='none'.
-  // Getting this wrong trips funds_owner_ck: CHECK ((owner_kind='none') = (owner_id IS NULL)).
-  // Every company account is owner_kind='none' with its identity in the code, as an advance is.
-  const costUuid = 'costCenterId' in fund ? toUuidOrNull(fund.costCenterId) : null
-  const ownerId = 'driverId' in fund ? fund.driverId : costUuid
-  const ownerKind = 'driverId' in fund ? 'driver' : costUuid !== null ? 'vehicle' : 'none'
-
-  const found = await client.query<{ id: string; currency: string }>(
-    'SELECT id, currency FROM funds WHERE branch_id = $1 AND code = $2',
-    [branchId, code],
+/** Resolve a posting batch's distinct funds once, keeping exact currency checks on both paths. */
+async function ensurePostingFunds(
+  client: PoolClient, branchId: string, postings: readonly Posting[],
+): Promise<Map<string, string>> {
+  const refs = new Map(postings.flatMap(posting => posting.lines.map(line => [fundCode(line.fund), line.fund] as const)))
+  if (refs.size === 0) return new Map()
+  const found = await client.query<{ id: string; code: string; currency: string }>(
+    'SELECT id, code, currency FROM funds WHERE branch_id = $1 AND code = ANY($2::text[])',
+    [branchId, [...refs.keys()]],
   )
-  const existing = found.rows[0]
-  if (existing) {
-    // The fund's currency is its lines' currency. A row that disagrees with the reference would
-    // silently post dollars into a lira account, or the reverse — refuse by name instead.
-    if (existing.currency !== currency) throw new FundCurrencyMismatchError(code, existing.currency, currency)
-    return existing.id
+  const ids = new Map<string, string>()
+  const accept = (row: { id: string; code: string; currency: string }): void => {
+    const expected = currencyOf(refs.get(row.code)!)
+    if (row.currency !== expected) throw new FundCurrencyMismatchError(row.code, row.currency, expected)
+    ids.set(row.code, row.id)
   }
-
-  const inserted = await client.query<{ id: string; currency: string }>(
-    `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
-     VALUES ($1, $2::fund_type, $3, $4, $5, $5, $6)
-     ON CONFLICT (branch_id, code) DO UPDATE SET code = EXCLUDED.code
-     RETURNING id, currency`,
-    [branchId, fundTypeOf(fund), ownerKind, ownerId, code, currency],
-  )
-  const row = inserted.rows[0]!
-  // A concurrent writer may have created the row first; the conflict path returns ITS currency.
-  if (row.currency !== currency) throw new FundCurrencyMismatchError(code, row.currency, currency)
-  return row.id
+  found.rows.forEach(accept)
+  const missing = [...refs].filter(([code]) => !ids.has(code)).map(([code, fund]) => {
+    const costUuid = 'costCenterId' in fund ? toUuidOrNull(fund.costCenterId) : null
+    return { code, type: fundTypeOf(fund), currency: currencyOf(fund),
+      owner_id: 'driverId' in fund ? fund.driverId : costUuid,
+      owner_kind: 'driverId' in fund ? 'driver' : costUuid === null ? 'none' : 'vehicle' }
+  })
+  if (missing.length > 0) {
+    const created = await client.query<{ id: string; code: string; currency: string }>(
+      `INSERT INTO funds (branch_id, type, owner_kind, owner_id, code, name_ar, currency)
+       SELECT $1, f.type::fund_type, f.owner_kind, f.owner_id, f.code, f.code, f.currency
+       FROM jsonb_to_recordset($2::jsonb) AS f(code text, type text, currency text, owner_kind text, owner_id uuid)
+       ORDER BY f.code
+       ON CONFLICT (branch_id, code) DO UPDATE SET code = EXCLUDED.code
+       RETURNING id, code, currency`,
+      [branchId, JSON.stringify(missing)],
+    )
+    created.rows.forEach(accept)
+  }
+  if (ids.size !== refs.size) throw new Error('posting funds were not fully resolved')
+  return ids
 }
 
 /**
@@ -259,6 +264,9 @@ export class PgLedgerRepo implements LedgerRepo {
     postings: readonly Posting[],
     meta: Parameters<LedgerRepo['post']>[2],
   ): Promise<JournalEntryRecord[]> {
+    // Validate the entire request before acquiring the financial lock or staging any row.
+    postings.forEach(posting => assertPostingBalances(posting, meta.sypMinorPerUsd))
+    if (postings.length === 0) return []
     return withTransaction(this.pool, { actorId: meta.createdBy }, async (client) => {
       // One branch-money lock covers every ledger writer. Restoration takes this same lock before
       // comparing the sealed count's frozen balance with the live ledger, so a manual entry or
@@ -269,73 +277,59 @@ export class PgLedgerRepo implements LedgerRepo {
         `ash:financial:receivables:${branchId}`,
       ])
       const written: JournalEntryRecord[] = []
-
+      const res = await client.query<{ id: string; created_at: Date; event_type: string; occurrence_key: string }>(
+        `INSERT INTO journal_entries
+           (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
+            week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd, external_reference, prior_period_reason)
+         SELECT $1, p.event_type::ledger_event, $2, p.occurrence_key, $3, $4, $5, $6, $7, $8, $9, $10, $11
+         FROM jsonb_to_recordset($12::jsonb) AS p(event_type text, occurrence_key text, ordinal integer)
+         ORDER BY p.ordinal
+         ON CONFLICT DO NOTHING
+         RETURNING id, created_at, event_type, occurrence_key`,
+        [branchId, meta.shiftId, meta.businessDate, meta.postingDate, meta.weekStartDate, meta.fxDayId,
+          meta.reason ?? null, meta.createdBy, meta.sypMinorPerUsd?.toString() ?? null,
+          meta.externalReference ?? null, meta.priorPeriodReason ?? null,
+          JSON.stringify(postings.map((posting, ordinal) => ({ event_type: posting.eventType,
+            occurrence_key: posting.occurrenceKey, ordinal })))],
+      )
+      // RETURNING has no ordering guarantee. Match by the actual idempotency identity, never index.
+      const identity = (eventType: string, key: string): string => JSON.stringify([eventType, key])
+      const inserted = new Map<string, typeof res.rows>()
+      for (const row of res.rows) {
+        const key = identity(row.event_type, row.occurrence_key)
+        const group = inserted.get(key) ?? []
+        group.push(row)
+        inserted.set(key, group)
+      }
+      // NULL-shift entries can legitimately share an occurrence key (there is no shift
+      // idempotency index for them). Keep every inserted row, in identity allocation order.
+      for (const group of inserted.values()) group.sort((a, b) => BigInt(a.id) < BigInt(b.id) ? -1 : 1)
+      const fresh: Array<{ posting: Posting; row: typeof res.rows[number] }> = []
       for (const posting of postings) {
-        // Balance is ALSO enforced by a deferred constraint trigger at COMMIT. Checking here
-        // first turns it into a clear application error instead of a transaction that fails at
-        // the very end with every other posting already staged. Per currency, with the one
-        // two-currency exception, exactly as 0066's trigger — through the domain's single rule.
-        assertPostingBalances(posting, meta.sypMinorPerUsd)
-
-        /*
-         * ON CONFLICT DO NOTHING, not a caught unique violation.
-         *
-         * This used to `try { INSERT } catch (23505) { continue }`. In PostgreSQL a statement
-         * error ABORTS THE WHOLE TRANSACTION: every later statement fails with 25P02, and — the
-         * part that made it dangerous — `COMMIT` on an aborted block silently performs a ROLLBACK
-         * and reports success. Catching the error does not recover the transaction; only
-         * `ROLLBACK TO SAVEPOINT` would, and `withTransaction` opens none.
-         *
-         * So a replayed approval had two failure modes, both real. If the duplicate came first,
-         * the NEXT posting raised 25P02, which is not a unique violation, so it was rethrown and
-         * the manager got a 500 on a shift that could then never be approved. If the duplicate
-         * came later, everything before it was rolled back while this function still RETURNED the
-         * rows it believed it had written — money reported as posted that was not.
-         *
-         * Neither was visible in tests: `MemoryLedgerRepo` implements the `continue` correctly
-         * because an array has no transaction to poison, and the Postgres conformance suite only
-         * ever posted one posting per call — precisely the case where the difference cannot show.
-         *
-         * An empty `rows` is now the replay signal, no exception is raised, and the transaction
-         * stays healthy. `DO NOTHING` with no conflict target covers the idempotency index.
-         */
-        const res = await client.query<{ id: string; created_at: Date }>(
-          `INSERT INTO journal_entries
-             (branch_id, event_type, shift_id, occurrence_key, business_date, posting_date,
-              week_start_date, fx_day_id, reason, created_by, syp_minor_per_usd, external_reference)
-           VALUES ($1, $2::ledger_event, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           ON CONFLICT DO NOTHING
-           RETURNING id, created_at`,
-          [
-            branchId,
-            posting.eventType,
-            meta.shiftId,
-            posting.occurrenceKey,
-            meta.businessDate,
-            meta.postingDate,
-            meta.weekStartDate,
-            meta.fxDayId,
-            meta.reason ?? null,
-            meta.createdBy,
-            meta.sypMinorPerUsd === null ? null : meta.sypMinorPerUsd.toString(),
-            meta.externalReference ?? null,
-          ],
+        const key = identity(posting.eventType, posting.occurrenceKey)
+        const row = inserted.get(key)?.shift()
+        if (!row) continue
+        fresh.push({ posting, row })
+      }
+      const funds = await ensurePostingFunds(client, branchId, fresh.map(item => item.posting))
+      const lines = fresh.flatMap(({ posting, row }) => posting.lines.map((line, ordinal) => ({
+        entry_id: String(row.id), fund_id: funds.get(fundCode(line.fund))!, side: line.side,
+        amount_minor: line.amount.toString(), line_role: line.role ?? null, ordinal,
+      })))
+      if (lines.length > 0) {
+        await client.query(
+          `INSERT INTO journal_lines (entry_id, fund_id, side, amount_minor, line_role)
+           SELECT l.entry_id, l.fund_id, l.side, l.amount_minor, l.line_role
+           FROM jsonb_to_recordset($1::jsonb) AS l(entry_id bigint, fund_id uuid, side text,
+             amount_minor bigint, line_role text, ordinal integer)
+           ORDER BY l.entry_id, l.ordinal`,
+          [JSON.stringify(lines)],
         )
-        // Already posted. Writing nothing and carrying on is the whole point — a retried
-        // approval must not double-post — and now the rest of the batch still posts.
-        if (res.rows.length === 0) continue
-        const entryId = Number(res.rows[0]!.id)
+      }
 
-        for (const line of posting.lines) {
-          const fundId = await ensureFund(client, branchId, line.fund)
-          await client.query(
-            'INSERT INTO journal_lines (entry_id, fund_id, side, amount_minor, line_role) VALUES ($1, $2, $3, $4, $5)',
-            [entryId, fundId, line.side, line.amount.toString(), line.role ?? null],
-          )
-        }
-
+      for (const { posting, row } of fresh) {
         written.push({
-          id: entryId,
+          id: Number(row.id),
           branchId,
           eventType: posting.eventType,
           shiftId: meta.shiftId,
@@ -349,7 +343,7 @@ export class PgLedgerRepo implements LedgerRepo {
           weekLockId: null,
           reason: meta.reason ?? null,
           createdBy: meta.createdBy,
-          createdAtMs: res.rows[0]!.created_at.getTime(),
+          createdAtMs: row.created_at.getTime(),
           lines: posting.lines.map((l) => ({
             fundCode: fundCode(l.fund),
             side: l.side,
@@ -369,6 +363,10 @@ export class PgLedgerRepo implements LedgerRepo {
 
   async listByWeek(branchId: string, weekStartDate: CalendarDate): Promise<JournalEntryRecord[]> {
     return this.load('je.branch_id = $1 AND je.week_start_date = $2', [branchId, weekStartDate])
+  }
+
+  async listByRange(branchId: string, from: CalendarDate, to: CalendarDate): Promise<JournalEntryRecord[]> {
+    return this.load('je.branch_id = $1 AND je.business_date BETWEEN $2::date AND $3::date', [branchId, from, to])
   }
 
   async listTreasuryMovements(
@@ -485,6 +483,17 @@ export class PgLedgerRepo implements LedgerRepo {
     return rows[0] ?? null
   }
 
+  async findEntryById(id: number): Promise<JournalEntryRecord | null> {
+    const rows = await this.load('je.id = $1', [id])
+    return rows[0] ?? null
+  }
+
+  async findEntriesByIds(ids: readonly number[]): Promise<JournalEntryRecord[]> {
+    if (ids.length === 0) return []
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) throw new RangeError('journal source IDs must be positive safe integers')
+    return this.load('je.id = ANY($1::bigint[])', [[...new Set(ids)]])
+  }
+
   private async load(where: string, params: unknown[]): Promise<JournalEntryRecord[]> {
     const { rows } = await this.pool.query<Record<string, unknown>>(
       `SELECT je.*, ${JOURNAL_LINES_JSON} AS lines
@@ -586,6 +595,23 @@ export class PgRestorationRepo {
   private readonly pool: Pool
   constructor(pool: Pool) {
     this.pool = pool
+  }
+
+  private present(r: Record<string, unknown>) {
+    return { id: Number(r.id), branchId: String(r.branch_id), businessDate: isoDate(r.business_date),
+      cashCountId: r.cash_count_id === null ? null : String(r.cash_count_id), plan: r.plan,
+      netToCompany: minor(BigInt(String(r.net_to_company_minor))), reason: String(r.reason),
+      performedBy: String(r.performed_by), runNo: Number(r.run_no ?? 1) }
+  }
+
+  async getById(id: number) {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM restorations WHERE id=$1', [id])
+    return rows[0] ? this.present(rows[0]) : null
+  }
+
+  async list(branchId: string) {
+    const { rows } = await this.pool.query<Record<string, unknown>>('SELECT * FROM restorations WHERE branch_id=$1 ORDER BY id', [branchId])
+    return rows.map((row) => this.present(row))
   }
 
   async create(row: {

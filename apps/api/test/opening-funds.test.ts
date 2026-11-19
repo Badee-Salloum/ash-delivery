@@ -28,6 +28,42 @@ async function awaitingOpen(driver: string): Promise<string> {
 }
 
 describe('opening fund tranches', () => {
+  it.each(['2026-07-21T04:30:00.000Z', '2026-07-21T08:30:00.000Z'])(
+    'preserves the recorded administrative operation boundary %s without rewriting signatures', async (windowOpensAt) => {
+      const driver = await h.loginAs('driver1')
+      const manager = await h.loginAs('manager')
+      const id = await awaitingOpen(driver)
+      const original = (await h.deps.shifts.findById(id))!
+      const beforeLedger = [...h.deps.ledger.entries]
+      await h.deps.shifts.update({ ...original, windowOpensAt }, 'u-admin')
+      expect((await h.deps.shifts.findById(id))?.state).toBe('awaiting_open_approval')
+      expect(h.deps.ledger.entries).toEqual(beforeLedger)
+
+      const response = await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [], topupTranches: [] })
+      expect(response.statusCode, response.body).toBe(200)
+      const opened = (await h.deps.shifts.findById(id))!
+      expect(opened.windowOpensAt).toBe(windowOpensAt)
+      expect(opened.driverConfirmedAt).toBe(original.driverConfirmedAt)
+      expect(opened.openApprovedAt).toBe(new Date(h.deps.clock.nowMs()).toISOString())
+      expect(opened.openApprovedBy).toBe('u-bm')
+      expect(opened.businessDate).toBe(original.businessDate)
+      expect(h.deps.ledger.entries).toEqual(beforeLedger)
+    },
+  )
+
+  it('still uses the real driver confirmation when no administrative boundary exists', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await awaitingOpen(driver)
+    const original = (await h.deps.shifts.findById(id))!
+    expect(original.windowOpensAt).toBeNull()
+    const response = await post(manager, `/shifts/${id}/approve-open`, { floatTranches: [], topupTranches: [] })
+    expect(response.statusCode, response.body).toBe(200)
+    const opened = (await h.deps.shifts.findById(id))!
+    expect(opened.windowOpensAt).toBe(original.driverConfirmedAt)
+    expect(opened.driverConfirmedAt).toBe(original.driverConfirmedAt)
+  })
+
   it('opens with both zero-value inputs represented by empty arrays', async () => {
     const driver = await h.loginAs('driver1')
     const manager = await h.loginAs('manager')

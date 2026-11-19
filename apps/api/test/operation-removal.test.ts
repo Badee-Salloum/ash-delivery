@@ -67,6 +67,31 @@ async function pendingReview(driver: string, manager: string): Promise<string> {
 const REASON = 'قراءة مقصوصة لصفّ آخر — سجلّ المدفوعات يُظهر حسماً واحداً'
 
 describe('a manager removes a row that is not a delivery', () => {
+  it('removes an unread zero-value row and resolves its review flags without inventing a clock', async () => {
+    const driver = await h.loginAs('driver1')
+    const manager = await h.loginAs('manager')
+    const id = await pendingReview(driver, manager)
+    const phantom = (await h.deps.orders.listByShift(id)).find(row => row.providerOrderNo === 'PHANTOM-1')!
+    await h.deps.orders.update({ ...phantom, fee: 0n as typeof phantom.fee, included: false,
+      occurredMinute: null, windowStatus: 'unknown', windowBasis: null,
+      closeDraftReviewReasons: ['reader_conflict', 'missing_time', 'human_money_edit'] }, null)
+    const response = await post(manager, `/shifts/${id}/operations/revise`, {
+      orders: [{ providerOrderNo: 'PHANTOM-1', removed: true, reason: REASON }],
+    })
+    expect(response.statusCode, response.body).toBe(200)
+    const removed = (await h.deps.orders.listByShift(id)).find(row => row.id === phantom.id)!
+    expect(removed.removedAt).not.toBeNull()
+    expect(removed.included).toBe(false)
+    expect(removed.fee).toBe(0n)
+    expect(removed.occurredMinute).toBeNull()
+    expect(removed.closeDraftReviewReasons).toEqual([])
+    const register = await h.deps.operationRemovals.list({ limit: 10 })
+    expect(register).toHaveLength(1)
+    expect(register[0]!.amount).toBe(0n)
+    // The database reference must accept a DRIVER identity, not silently replace it with a user.
+    expect(register[0]!.driverId).toBe(DRIVER_ID)
+  })
+
   it('takes it out of the money exactly as excluding it would', async () => {
     // The whole safety argument for this feature. Removal adds MEANING and a report; it must add no
     // second way for money to move. If these two ever disagree, some path learned about removal

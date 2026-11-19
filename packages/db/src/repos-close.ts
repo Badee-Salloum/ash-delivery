@@ -22,6 +22,7 @@ import {
   PgOperationRemovalRepo,
   PgShiftDecisionRepo,
   PgShiftRepo,
+  PgSettingsRepo,
   PgTierRepo,
   PgWeekLockRepo,
 } from './repos-shift.ts'
@@ -44,6 +45,7 @@ function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
   return {
     shifts: new PgShiftRepo(pool),
     breaks: new PgShiftBreakRepo(pool),
+    settings: new PgSettingsRepo(pool),
     preapprovedShiftRules: new PgPreapprovedShiftRuleRepo(pool),
     orders: new PgOrderRepo(pool),
     cashDeductions: new PgCashDeductionRepo(pool),
@@ -69,9 +71,12 @@ function transactionDeps(pool: Pool): ShiftCloseTransactionDeps {
  * One transaction for claiming a close boundary or approving the resulting review.
  *
  * Lock order is intentional:
- *   1. optional driver/day advisory lock (before any row lock),
- *   2. target shift,
- *   3. operation children, each in stable primary-key order.
+ *   1. branch receivables advisory lock,
+ *   2. optional driver/day advisory lock (before any row lock),
+ *   3. target shift,
+ *   4. operation children, each in stable primary-key order.
+ * Evidence-only commits take only the target shift lock and are reserved for commands that
+ * do not post money or make a final decision. Routes select that scope server-side, never from input.
  *
  * `PgOperationBatchRepo` locks the same shift row, so a batch either commits before this snapshot or
  * waits and is rejected after it. Child locks also serialize manager corrections, whose UPDATEs do
@@ -88,6 +93,9 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
     input: ShiftCloseUnitOfWorkInput,
     work: (deps: ShiftCloseTransactionDeps) => Promise<T>,
   ): Promise<T> {
+    if (input.scope === 'evidence' && input.serializeDriverDay) {
+      throw new Error('evidence commits cannot serialize financial driver/day approvals')
+    }
     const ctx = { actorId: input.actorId, requestId: input.requestId ?? null }
     return withTransaction(this.pool, ctx, async (client) => {
       const boundPool = bindPoolToTransaction(this.pool, client, ctx)
@@ -110,9 +118,11 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
       // Opening consumes the driver's shift-funding receivables, while closing may create ordinary
       // receivables. Direct create/collect commands take this exact branch key before reading their
       // balance, so the two paths cannot both spend or consume the same outstanding amount.
-      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-        `ash:financial:receivables:${identity.branch_id}`,
-      ])
+      if (input.scope !== 'evidence') {
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+          `ash:financial:receivables:${identity.branch_id}`,
+        ])
+      }
 
       if (input.serializeDriverDay) {
         // A collision only serializes unrelated approvals; it cannot weaken correctness. The prefix
@@ -143,12 +153,14 @@ export class PgShiftCloseUnitOfWork implements ShiftCloseUnitOfWork {
 
       // Separate statements keep lock acquisition obvious and make deadlock diagnostics name the
       // precise child relation. READ COMMITTED takes a fresh snapshot after any waiter wakes.
-      await client.query('SELECT id FROM shift_orders WHERE shift_id = $1 ORDER BY id FOR UPDATE', [input.shiftId])
-      await client.query('SELECT id FROM cash_deductions WHERE shift_id = $1 ORDER BY id FOR UPDATE', [input.shiftId])
-      await client.query(
-        'SELECT id FROM shift_wallet_movements WHERE shift_id = $1 ORDER BY id FOR UPDATE',
-        [input.shiftId],
-      )
+      if (input.scope !== 'evidence') {
+        await client.query('SELECT id FROM shift_orders WHERE shift_id = $1 ORDER BY id FOR UPDATE', [input.shiftId])
+        await client.query('SELECT id FROM cash_deductions WHERE shift_id = $1 ORDER BY id FOR UPDATE', [input.shiftId])
+        await client.query(
+          'SELECT id FROM shift_wallet_movements WHERE shift_id = $1 ORDER BY id FOR UPDATE',
+          [input.shiftId],
+        )
+      }
 
       return work(deps)
     })

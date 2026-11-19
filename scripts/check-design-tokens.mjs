@@ -78,7 +78,7 @@ const BASELINE = {
   'apps/admin/src/feedback.tsx': 0,
   'apps/admin/src/NotificationBell.tsx': 10,
   'apps/admin/src/screens/Accounts.tsx': 1,
-  'apps/admin/src/screens/Approval.tsx': 272,
+  'apps/admin/src/screens/Approval.tsx': 253,
   'apps/admin/src/screens/Audit.tsx': 1,
   'apps/admin/src/screens/CheckIn.tsx': 9,
   'apps/admin/src/screens/Dashboard.tsx': 0,
@@ -111,7 +111,7 @@ const BASELINE = {
   'apps/driver/src/screens/PhotoSlot.tsx': 38,
   'apps/driver/src/screens/ReadingLock.tsx': 6,
   'apps/driver/src/screens/ReadingSource.tsx': 1,
-  'apps/driver/src/screens/Shift.tsx': 55,
+  'apps/driver/src/screens/Shift.tsx': 54,
   'apps/driver/src/ui.tsx': 0,
   'apps/driver/src/UpdateBar.tsx': 1,
 }

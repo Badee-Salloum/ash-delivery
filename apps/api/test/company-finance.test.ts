@@ -19,6 +19,29 @@ beforeEach(async () => {
 afterEach(async () => h.app.close())
 
 describe('company ledger commands', () => {
+  it('deletes a USD expense using its frozen original lines, restoring only USD and never either branch cash channel', async () => {
+    const categoryId = crypto.randomUUID()
+    await h.deps.expenses.createCategory({ id: categoryId, code: 'USD-DELETE', nameAr: 'اختبار حذف', active: true })
+    await post('/company/deposits', { idempotencyKey: crypto.randomUUID(), currency: 'USD', amount: '50.00', reason: 'seed USD' })
+    const key = crypto.randomUUID()
+    const expense = await post('/company/expenses', { idempotencyKey: key, currency: 'USD', amount: '10.00',
+      categoryId, paidFrom: 'pocket', description: 'Delete this USD expense' })
+    expect(expense.statusCode, expense.body).toBe(201)
+    const originalEntries = structuredClone(h.deps.ledger.entries)
+    h.deps.clock.advance(24 * 60 * 60 * 1000)
+    await h.deps.fx.upsert({ businessDate: '2026-07-22', sypMinorPerUsd: 19500n, provisional: false })
+    gm = await h.loginAs('gm')
+    const body = { idempotencyKey: crypto.randomUUID(), targetId: key, reason: 'Expense deleted after explicit user confirmation' }
+    const deleted = await post('/company/reversals', body)
+    expect(deleted.statusCode, deleted.body).toBe(201)
+    expect(deleted.json().command).toMatchObject({ targetKind: 'expense', sypMinorPerUsd: '13000' })
+    expect((await post('/company/reversals', body)).statusCode).toBe(200)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:USD')).toBe(5000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_cash')).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(BRANCH, 'office_wallet')).toBe(0n)
+    expect(h.deps.ledger.entries.slice(0, originalEntries.length)).toEqual(originalEntries)
+  })
   it('is company-manager only, dual-currency, idempotent, and exposes its movement receipt', async () => {
     const manager = await h.loginAs('manager')
     const denied = await post('/company/deposits', {
@@ -158,7 +181,8 @@ describe('company debts, assets, and depreciation', () => {
     })
     expect(asset.statusCode, asset.body).toBe(201)
     expect(asset.json().asset.schedule).toHaveLength(36)
-    expect(asset.json().asset).toMatchObject({ bookValue: sypStr(3_400), depreciationDue: sypStr(200) })
+    expect(asset.json().asset).toMatchObject({ bookValue: sypStr(3_600), scheduledBookValue:sypStr(3_400),
+      bookValueBasis:'recognized_ledger',scheduleIsPostedDepreciation:false,depreciationDue: sypStr(200) })
 
     const preview = await h.app.inject({
       method: 'GET', url: '/company/depreciation?asOfMonth=2026-07-01', headers: { cookie: h.cookie(gm) },
@@ -179,7 +203,8 @@ describe('company debts, assets, and depreciation', () => {
       method: 'GET', url: `/company/assets/${assetId}`, headers: { cookie: h.cookie(gm) },
     })
     expect(after.json().depreciationDue).toBe(sypStr(0))
-    expect(after.json().bookValue).toBe(sypStr(3_400))
+    expect(after.json().bookValue).toBe(sypStr(3_600))
+    expect(after.json().scheduledBookValue).toBe(sypStr(3_400))
   })
 
   it('creates one linked payable for a financed asset', async () => {
@@ -377,7 +402,7 @@ describe('company debts, assets, and depreciation', () => {
 })
 
 describe('company cutover', () => {
-  it('moves the branch company-box opening under branch then company locks', async () => {
+  it('links the branch company-box history under branch then company locks without another cash opening', async () => {
     const admin = await h.loginAs('sysadmin')
     const legacy = await post('/company-fund/legacy-deposit', {
       idempotencyKey: crypto.randomUUID(), branchId: BRANCH, amount: sypStr(790), reason: 'legacy opening',
@@ -392,8 +417,8 @@ describe('company cutover', () => {
       `receivables:${BRANCH}`,
       `receivables:${COMPANY_BRANCH}`,
     ])
-    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(79_000n)
-    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-79_000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(0n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(0n)
 
     const funded = await post('/treasury/deposit', {
       idempotencyKey: crypto.randomUUID(), branchId: BRANCH, target: 'cash', amount: sypStr(100),
@@ -409,8 +434,8 @@ describe('company cutover', () => {
     })
     expect(swept.statusCode, swept.body).toBe(201)
     expect(await h.deps.ledger.fundBalance(BRANCH, 'company_box')).toBe(83_000n)
-    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(83_000n)
-    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-83_000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, 'company_cash:SYP_NEW')).toBe(4_000n)
+    expect(await h.deps.ledger.fundBalance(COMPANY_BRANCH, `branch_clearing:${BRANCH}`)).toBe(-4_000n)
     expect(await h.deps.companyLedger.listMirrors(BRANCH)).toHaveLength(1)
   })
 })

@@ -16,13 +16,16 @@ async function main(): Promise<void> {
     console.warn('[ash] no DATABASE_URL — running against the IN-MEMORY store. Data will not persist.')
   }
 
-  const { deps, dispose } = await buildDeps(config)
+  const { deps, dispose, operationalDiagnostics } = await buildDeps(config)
   const app = await buildApp({
     deps,
+    ...(operationalDiagnostics ? { operationalDiagnostics } : {}),
     logger: true,
     splitGate: config.BR1_SPLIT_GATE,
     maxOcrReadsPerShift: config.OCR_MAX_READS_PER_SHIFT,
     driverSelfRegistrationEnabled: config.DRIVER_SELF_REGISTRATION_ENABLED,
+    companyRestorationReviewEnabled: config.COMPANY_RESTORATION_REVIEW_ENABLED,
+    companyHistoricalPostingEnabled: config.COMPANY_HISTORICAL_POSTING_ENABLED,
     trackerIngestEnabled: config.TRACKER_INGEST_ENABLED,
     minDriverAndroidTrackerBuild: config.MIN_DRIVER_ANDROID_TRACKER_BUILD,
     trackerGatewayToken: config.TRACKER_GATEWAY_TOKEN,

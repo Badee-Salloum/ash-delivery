@@ -112,6 +112,7 @@ export function requiredEndSlots(batterySlots: number, chargeReadingSource: 'bms
  * balance screenshot instead. Uploadable, never blocking.
  */
 export const PAYMENTS_LOG_SLOT = 'payments_log'
+export const DAILY_SUMMARY_SLOT = 'daily_summary'
 
 /**
  * How many images ONE scrollable screen may be photographed in.
@@ -146,6 +147,7 @@ export const ALL_START_SLOTS: readonly string[] = requiredStartSlots(MAX_BATTERY
 export const ALL_END_SLOTS: readonly string[] = [
   ...requiredEndSlots(MAX_BATTERY_SLOTS),
   PAYMENTS_LOG_SLOT,
+  DAILY_SUMMARY_SLOT,
   // Extra pages are acceptance vocabulary only. `requiredEndSlots` is untouched, so no extra page
   // can ever become a `missing_photo` — one dashboard image stays the requirement.
   ...extraPages(DASHBOARD_SLOT),

@@ -540,7 +540,7 @@ describe('total profit is General-Manager-only (BR8, AC #12)', () => {
     })).statusCode).toBe(201)
     expect((await companyPost('/company/expenses', {
       idempotencyKey: crypto.randomUUID(), currency: 'SYP_NEW', amount: sypStr(100),
-      categoryId: expenseCategory.json().id, paidFrom: 'owner_outside', description: 'HQ cost',
+      categoryId: expenseCategory.json().id, paidFrom: 'pocket', description: 'HQ cost',
     })).statusCode).toBe(201)
 
     const res = await get(gm, `/dashboard/profit?from=${today}&to=${today}&branchId=${BRANCH}`)

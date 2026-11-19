@@ -21,6 +21,10 @@ import {
   PgCompanyLedgerRepo,
   PgCompanyLedgerSource,
   PgCompanyFinanceRepo,
+  PgExistingAssetRepo,
+  PgCompanyRestorationReviewRepo,
+  PgCompanyMovementReviewRepo,
+  PgCompanyHistoricalDraftRepo,
   PgReceivableEventRepo,
   PgLedgerRepo,
   PgTreasuryPositionSource,
@@ -56,7 +60,9 @@ import {
   PgWeekLockRepo,
   assertBigIntParser,
   createPool,
+  createOperationalDiagnosticsStore,
 } from '@ash/db'
+import { BufferedOperationalDiagnostics, type OperationalDiagnostics } from './operational-diagnostics.ts'
 import type { Config } from './config.ts'
 import { BcryptHasher, CryptoIdGen, SystemClock } from './runtime.ts'
 
@@ -71,6 +77,7 @@ import { BcryptHasher, CryptoIdGen, SystemClock } from './runtime.ts'
 
 export interface BuiltDeps {
   deps: Deps
+  operationalDiagnostics?: OperationalDiagnostics
   /** Call on shutdown. Closes the pool so in-flight queries finish before the process exits. */
   dispose(): Promise<void>
 }
@@ -163,8 +170,13 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
   const pool = createPool(config.DATABASE_URL, config.DB_POOL_MAX)
   // Prove int8 comes back as a bigint before a single row of money is read.
   await assertBigIntParser(pool)
+  const diagnosticStore = config.OPERATIONAL_HISTORY_ENABLED
+    ? createOperationalDiagnosticsStore(config.DATABASE_URL) : null
+  const operationalDiagnostics = diagnosticStore
+    ? new BufferedOperationalDiagnostics(buckets => diagnosticStore.write(buckets)) : null
 
   return {
+    ...(operationalDiagnostics ? { operationalDiagnostics } : {}),
     deps: {
       clock,
       ids,
@@ -200,6 +212,10 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       companyLedger: new PgCompanyLedgerRepo(pool),
       companyLedgerSource: new PgCompanyLedgerSource(pool),
       companyFinance: new PgCompanyFinanceRepo(pool),
+      existingAssets: new PgExistingAssetRepo(pool),
+      companyRestorationReviews: new PgCompanyRestorationReviewRepo(pool),
+      companyMovementReview: new PgCompanyMovementReviewRepo(pool),
+      companyHistoricalDrafts: new PgCompanyHistoricalDraftRepo(pool),
       cashCounts: new PgCashCountRepo(pool),
       capitalTargets: new PgOfficeCapitalTargetRepo(pool),
       restorations: new PgRestorationRepo(pool),
@@ -222,6 +238,10 @@ export async function buildDeps(config: Config): Promise<BuiltDeps> {
       trackerDevices: new PgTrackerDeviceRepo(pool),
       closeUnitOfWork: new PgShiftCloseUnitOfWork(pool),
     },
-    dispose: () => pool.end(),
+    dispose: async () => {
+      await operationalDiagnostics?.flush(true)
+      await diagnosticStore?.dispose()
+      await pool.end()
+    },
   }
 }
