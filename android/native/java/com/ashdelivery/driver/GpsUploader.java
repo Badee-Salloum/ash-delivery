@@ -156,6 +156,7 @@ final class GpsUploader {
             SharedPreferences prefs = context.getSharedPreferences(TrackerService.PREFS, Context.MODE_PRIVATE);
             JSONObject body = new JSONObject();
             body.put("appBuild", AshTrackerPlugin.appBuild(context));
+            body.put("observedAtMs", System.currentTimeMillis());
             body.put("service", serviceState);
             body.put("permission", AshTrackerPlugin.permissionLabel(context));
             body.put("locationEnabled", AshTrackerPlugin.locationEnabled(context));
