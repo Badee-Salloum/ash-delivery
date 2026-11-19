@@ -1,5 +1,659 @@
 # PROGRESS
 
+## 2026-11-19 — source checkpoint for macOS handoff
+
+- Saved the accumulated backend/shared-library, web interface, Android, and selected-branch
+  registration changes on `codex/mac-handoff` using separate conventional commits. This is
+  a development checkpoint, not a reconstruction of historical release commits. Pending
+  source changes remain distinguishable from the narrowly published production artifacts.
+- Added `docs/MAC-HANDOFF.md` with pinned Node 24/pnpm 11.3.0 setup, safe development startup,
+  private-file transfer boundaries, migration precautions, and the pending-intake caveat.
+- Excluded local operational evidence, temporary directories, and release signing credentials.
+  Removed driver identities and original photo hashes from new daily-summary test fixtures;
+  the regression values are unchanged. Private originals remain in ignored local evidence.
+- Updated stale tests to tolerate checkout line endings and the intentionally retired
+  close-time debt/deferral UI. Existing carry consumption and correction tests now seed
+  legacy funding directly rather than invoking the disabled close-time creation route.
+  No application financial rule was changed for these test repairs.
+- `pnpm check` passed: type checking and all repository guards, local OCR regressions, and
+  3,935 passing tests. Forty database integration cases were skipped without an isolated
+  database; no PostgreSQL integration result is claimed for this handoff.
+- `pnpm build:apps` passed for Driver and Admin. All 111 committed SQL migration files match
+  their local source bytes; no deployed migration was reformatted to satisfy whitespace checks.
+- No push, deployment, migration, production database connection, or financial mutation was
+  performed. Private credentials, financial reports, source photos, and release evidence stay
+  outside Git. See the handoff guide before working on the Mac or preparing a future release.
+
+**See it in two minutes:** follow the clone/install commands in `docs/MAC-HANDOFF.md`, then
+run `pnpm typecheck`. Full test and build commands are documented there. Native APK compilation
+and physical-device tests were not run during this source handoff.
+
+## 2026-10-27 — stabilization API/Driver release VERIFIED +30-day diagnostics ACTIVE
+
+- Owner explicitly authorized publishing the stability fixes and enabling30-day diagnostics,
+  without changing approved shifts or financial operations. Published API
+  dpl_3g3hWuwLAGGHsmtxJybw6Sdop1qZ to ash-api-xi.vercel.app and Driver
+  dpl_DM5jJJHUsD5CLivPx1hKNTYpM3XJ to ash-driver.vercel.app. Admin remains
+  dpl_7MBgB5zhmC5sUhDjyw2xScPqryLf. Production API region isfra1;1024MB/180s retained.
+- Narrow API built from exact published22Oct parent (source-file SHA1 independently matched
+  Vercel tree). Replaced12 authorized module chunks plus2 diagnostic modules;872 unrelated chunks,
+  including pending shifts.service work, preserved byte-for-byte. Driver is exact published7Oct
+  assets with only the GPS hook/policy, partial-payment label and matching entry/precache changed.
+  No whole dirty-worktree deployment. Local/source and platform artifact hashes verified.
+- Applied ONLY additive0111 through checksum-tracked migration runner, on the direct production
+  owner connection. Runtime SELECT/INSERT verified and UPDATE denied. Set project production
+  OPERATIONAL_HISTORY_ENABLED=true and explicitly inherited all prior application env keys into
+  the API deployment. No credential/DB/blob/OCR setting replaced, and no secret file uploaded.
+- Found and fixed a release-blocking lifecycle issue before promotion: Fastify.inject resolves
+  before async onResponse storage. Serverless bridge now awaits only already-started diagnostic
+  writes; it does not force a new batch per request.10 focused diagnostic tests and actual compiled
+  bridge gate test pass. Observed real committed diagnostic batches on the published function;
+  data is sanitized aggregate history,30-day cleanup, not raw/full historical Vercel logs.
+- An initial unpromoted candidate inheritediad1. Created a new candidate with explicitfra1 override,
+  verified it and only then promoted. Source/environment/region proofs and real health/auth401
+  smoke passed on candidate and stable API/Driver aliases; Admin proxy health200/me401 passed.
+  Unauthenticated401 probes are intentional checks, not employee login failures.
+- Exact compiled API probe verifies65 journals in4 SQL calls with existing funds, exact amounts,
+  partial-archive guard and waiting for diagnostic commit. Compiled Driver tests verify backoff,
+  retained points/session recovery, partial/completed/wrong-screen labels. Real published assets
+  render at390/1440px without JavaScript errors; browser API responses synthetic, public proxy
+  smoke real. No real photo/model call, approval, cash receipt, expense or shift mutation test.
+- Independent before/after READ ONLY fingerprints matched567 approved shifts,5741 orders,
+ 33 deductions,567 settlements,14190 journals,31205 lines,122 expenses,12 incomes and69
+  receivable events. Existing protected facts unchanged; naturally appended user records would
+  be outside that anchored comparison. All release application mutation requests:0.
+- Evidence: outputs/stability-20261027/{release-manifest,release-result,published-verification,
+  migration-applied,live-diagnostics,protected-before,protected-after,compiled-probe,
+  driver-compiled-probe,driver-published-browser-probe}.json and «نتيجة النشر والتحقق.html».
+  Deployment token used only in hidden stdin/process memory; session33852 exited and cleared it.
+
+## 2026-10-27 — stability fixes LOCAL, verified, NOT DEPLOYED
+
+- Owner authorized implementation of the stabilization proposals. No production writes, approved
+  shift edits, financial postings, load tests or paid OCR calls. Existing unrelated worktree edits
+  remain intact. This is not a release authorization or a ready-to-promote whole-worktree bundle.
+- PgLedgerRepo.post now validates the batch before taking the existing branch-money lock, inserts
+  headers together, resolves distinct funds once and inserts exact bigint lines together. Keeps
+  ON CONFLICT idempotency, currency checks, atomic rollback and deferred database guards. Matches
+  RETURNING by identity rather than row order, including legitimate repeated NULL-shift keys.
+  A 65-entry/130-line fixture uses4–5 ledger SQL round trips under the lock, not hundreds; this is
+  a query-count result, not a production latency guarantee or the entire close command's count.
+- Payment-log reader now verifies printed signs/digits/separators, uses a compact money/time schema,
+  retains clear archival rows plus unreadable observations and marks partial pages failed/reviewable.
+  Unknown values stay null, never0. Same-page/cache replays do not append duplicate observations;
+  an explicit bounded retry can replace a partial answer. Driver copy explains partial archive and
+  clears after a completed read. Wallet/time safety rules remain; no new real-model accuracy claim.
+- Foreground web GPS upload backs off transient failures and pauses401/403/404/409 loops while
+  retaining captured/outbox points. Successful re-entry resumes receipt-based delivery. This does
+  not change native APKs, phone settings, or prove the cause of the four missing trackers.
+- Added optional sanitized operational request aggregates, additive migration0111 and independent
+  one-connection short-budget writer with error-storm throttling and30-day expiry. OFF in production
+  until schema/application activation. No bodies, tokens, users or coordinates. Cold-instance tails,
+  platform kills and storage failures can be missing; raw Vercel retention is unchanged. Read-only
+  operator tool: .release/ops/stability-history-read-20261027.mjs; no automatic production execution.
+- Local Vercel region configuration targetsfra1 beside Neon. No regional release/latency/provider
+  reachability test performed. A later narrow release must preserve other live production settings.
+-337 unique targeted tests passed: API133, readers131, Driver26, DB unit/guards25, isolated actual
+  PostgreSQL9, full-schema ledger conformance13. Later partial-read20 and diagnostic9 regressions
+  also passed, not counted twice. Workspace TypeScript, SQL/strip/wire/i18n/boundary/token checks and
+  API compilation passed. Full schema applied ONLY on the identity-checked disposable test DB.
+- Hardened test schema isolation after exposing pooled session search_path contamination. Destructive
+  tests now refuse transaction-pooler URLs and require a direct allowlisted disposable endpoint plus
+  explicit remote opt-in. Fixture connections reset their scope and reassert it inside transactions.
+- Evidence/review: outputs/stability-20261027/verification.json, tests/*.json and
+  «نتيجة إصلاحات الاستقرار.html». Report verified in a local browser at1440/390px with no horizontal
+  overflow or external requests. No authenticated production browser test was performed.
+
+## 2026-10-23 — Laith20 removal and ordinary financial approval VERIFIED
+
+- Owner requested approval of Laith Hasan after removing the only unread/review-required order.
+  Unique matching driver: Laith Basem Hasan519c5143..., shift00059be8... business_date20October.
+  Pending close contained31 included orders/5985.00 and one already-excluded0.00 unread row
+  be2b6e69... / YAL-c41547ae3118f592b4bb128ab2b3ff73. Cash5170.00/wallet549.31 preserved.
+- Reproduced failed deletion23503 under rollback:0060 operation_removals.driver_id wrongly FK'd
+  users.id, while the contract/service supply drivers.id. Table had zero historical removal rows.
+  Forward-only0110 changes ONLY that FK to drivers, validates existing identities and refuses
+  ambiguous history. No row rewrites or disabled guards. Applied ONLY0110 through canonical
+  checksum-tracked migration runner; append-only/audit triggers unchanged. No app/API deployment.
+- Isolated actual PostgreSQL tests cover original failure, migration refusal on ambiguous history,
+  real repository zero-fee insert, user-ID rejection and restricted driver deletion. Fixtures rolled
+  back. API removal/settlement tests34 passed, TypeScript passed. New zero-fee review regression
+  added to apps/api/test/operation-removal.test.ts.
+- Canonical reviseOperations COMMITTED exactly one removal, register21; remaining rows/media/
+  draft/funds/journals unchanged. Retained original zero fee and unknown clock, no invented evidence.
+- Canonical approveClose (NOT forceClose) then COMMITTED under owner-requested admin and exact
+  reviewed settlement/order hashes. Ordinary gates passed; one immutable settlement created,
+  65 balanced journals13501–13565, initial opening13161 retained. Variance-1068.69 explicitly
+  retained with reason, final employee cash1325.31, office cash3844.69+wallet549.31. No deferred
+  receivable/shortage debt introduced. Original cash/wallet/order/photo values unchanged.
+- Independent SELECT verifies approved state, exactly1 receipt,1 removal,31 included orders,
+  every journal balanced, validated drivers FK and actual completed-screen classifier inclusion.
+  Evidence in outputs/shift-split-review-20261021/: laith-removal-rehearsal-20261023.json,
+  removal-driver-fk-{tests,applied}-20261023.json, laith-{remove,approve}-applied-20261023.json,
+  laith-approval-verification-20261023.json. Do NOT approve or post these receipts again.
+
+## 2026-10-23 — uploaded evidence fit-to-screen ADMIN release VERIFIED
+
+- Published Admin-only dpl_7MBgB5zhmC5sUhDjyw2xScPqryLf to ash-admin-eta.vercel.app.
+  Parent dpl_EPuZ2pf6gFG9yYCPuECVqF3YzB8h; API dpl_BMa4ttjgMMniLZfV4ZqL2tpbUXSe and
+  Driver dpl_HemgNntAr5R6DdFWqYBpXGnMXLso remained unchanged. No database commands or migrations.
+- Approval Lightbox now fits the entire image to its measured available height/width below the
+  wrapping toolbar and above navigation. Aspect ratio preserved, explicit zoom remains scrollable,
+  switching photos resets zoom/scroll, ResizeObserver handles phone rotation/resizing.
+- Baseline reconstruction application JS SHA256 exactly matches prior deployed bytes. CSS inverse
+  proof is exact: five fit utility rules added and unused origin-top rule removed. Other assets
+  unchanged. Narrow stage: outputs/evidence-viewer-20261023/stage/admin.
+- 476 Admin tests passed, TypeScript check passed; RTL/design-token checks passed previously.
+  Compiled staged bundle and live published bundle each passed two real-browser desktop/mobile
+  tests for tall-photo fit, deliberate zoom/scroll, wide-photo reset, rotation and Escape.
+  Browser tests used synthetic API/media responses only; no real shift, receipt or funds changed.
+- Candidate and live HTML/JS/CSS/theme-boot hashes verified; API health200/me401 smoke passed.
+  A transient immediately-after-promotion asset mismatch cleared on independent re-fetch; final
+  exact-hash verification and published browser tests passed. Evidence: release-manifest.json,
+  published-verification.json, compiled-browser-tests.json and published-browser-tests.json under
+  outputs/evidence-viewer-20261023/. Release credentials retained only in memory, never reports.
+
+## 2026-10-23 — Amjad21 cash correction VERIFIED (no closing approval)
+
+- Current Amjad Abdullah shift d4a07c2b-bf7e-4990-a97f-e3bd27ea9da1 was pending_review, not settled.
+  First owner request corrected end cash9500→5000 without journal/receipt. Subsequent explicit
+  owner instruction superseded that figure: restored end cash9500 and corrected opening cash
+ 2000→5000. Canonical floatOut recipe and PgLedger/PgShift repositories posted only the missing
+ 3000 newSYP, journal13295, under one audited locked transaction. Original opening journal13158
+  remains unchanged. Cash float tranches2000+3000 total5000, wallet84.55 unchanged.
+- Office cash decreased3000 and driver cash increased3000 at commit; other funds, orders, wallet
+  operations, submitted draft, evidence, real upload/open approval times and pending state unchanged.
+  No close approval or settlement receipt. Independent SELECT readback confirmed both cash values
+  and original/correction entries. Evidence: amjad-opening5000-{preview,applied}-20261023.json in
+  outputs/shift-split-review-20261021/. Do not replay the earlier superseded cash5000 correction.
+
+## 2026-10-22 — subsequent Laith20 date correction VERIFIED (supersedes his21 boundary only)
+
+- Owner requested Laith Basem Hasan's start on20 October. Verified exact driver519c5143... and
+  empty pending shift00059be8...: no other19+ shift, no20 duplicate, zero journals/receipts/orders/
+  deductions/wallet movements/close drafts/tranches/consumed preapproval. Existing real upload
+  confirmation21Oct17:14:23.576Z, vehicle and one source photo were preserved.
+- Corrected ONLY that pending request's business_date21→20 October and inclusion window to
+  20Oct11:30 Asia/Damascus, retaining the already chosen clock time. Financial week remains18Oct.
+  Attributed exact-column UPDATE under branch/driver-day/target row locks, audit reason recorded,
+  all other shift columns and branch fund balances asserted unchanged before COMMIT.
+- Still awaiting_open_approval: NO opening approval, money, receipt or deployment. Independent
+  SELECT verified date/window, actual signature, vehicle/evidence and correction audit. Evidence:
+  outputs/shift-opening-window-20261022/laith-{start-preflight,date-applied,date-verification}.json.
+  Earlier nine-boundary verification is historical evidence, not current expected state for Laith.
+
+## 2026-10-22 — 21 October operation boundaries fixed and narrow API release VERIFIED
+
+- Owner explicitly confirmed 11:30 Asia/Damascus as the operation inclusion boundary for the nine
+  21 October opening requests, NOT a driver-upload signature, manager approval timestamp or a new
+  recurring schedule. Dates remain 20/21 October despite the follow-up arriving on 22 October.
+- Published API-only dpl_BMa4ttjgMMniLZfV4ZqL2tpbUXSe, parent dpl_FepFuqidUVFVza1ofAXG3Fv3zr8F.
+  Exact prior deployed bundle plus ONE expression: approveOpenLocked preserves an already recorded
+  windowOpensAt before falling back to driverConfirmedAt. PgShiftRepo already preserves that bound.
+  No migrations, Admin release, Driver release or unrelated local edits were deployed.
+- 95 API tests passed (opening funds/window/settlement/overrides/preapproved opening); two isolated
+  staged-bundle tests passed. Candidate and live source hashes verified, application environment
+  key inheritance checked, health200/auth401 public smoke passed. No real opening was tested.
+- COMMITTED nine exact pending shift boundaries at 2026-10-21T08:30Z (11:30 Damascus). Used one
+  attributed conditional nonfinancial column UPDATE under branch-money and target row locks,
+  retaining every other shift column, signatures and branch fund balances. Added explicit owner
+  correction audit reasons. No approvals, journals, receipts or financial movements were created.
+- Independent HTTPS SELECT readback verified all nine and their correction audits. Evidence:
+  outputs/shift-opening-window-20261022/{release-manifest,published-verification,boundary-applied,boundary-verification}.json.
+- Amjad20 remains CANCELLED with no settlement; his21 request remains awaiting approval with the
+  corrected inclusion boundary only. Historical20 intake remains pending a safe independent path;
+  do not cancel today's request, disable the one-live-shift guard or revive the cancelled record.
+- Earlier owner-authorized Balah ordinary cash debt also VERIFIED: +2000.00 newSYP receivable,
+  -2000.00 branch office_cash, journal13155, event ed41b63f-18a9-437c-9cef-619f033d216f.
+  At commit debt5566.60 / office_cash54561.66. No shifts changed. Evidence in
+  outputs/shift-split-review-20261021/balah-debt-{applied,verification}.json. Do not re-add it.
+
+## 2026-10-21 — administrative daily intake (15 VERIFIED; AMJAD PENDING)
+
+- Owner now explicitly authorizes financial approval, placement in completed shifts, administrative
+  entry on behalf of drivers, and confirms each day's money was delivered on its normal day.
+  Prior zero-default/computed-cash authorization remains explicit; no driver signature is fabricated.
+- Additional existing 19 October shifts COMMITTED under admin: Abdullah 104cdf0d..., 12 orders /
+  3115.00, cash1613.37 wallet878.63; Ahmad 0c584b18..., 15 preserved draft orders /2770.00,
+  cash747.35 wallet1468.65. Ahmad's original23:26/175 remains; no duplicate23:36 is created.
+  Evidence: outputs/shift-split-review-20261021/additional-existing-applied.json.
+- Seven missing 20 October days were imported atomically with original private photo attachments:
+  Halla e73bea46..., Taha b1d80667..., Balah613c0c0b..., Yusuf a983363e..., Ahmad770e57dd...,
+  Abdullahfd20bbe3..., Qahwaji79a78e4d.... Individual imported-<id>.json files exist only after commit. The operator
+  uses canonical submitOperations/forceClose/settlement/ledger services with admin-attributed
+  transactions, bounded locks, source fingerprints and no normal opening route/clock spoofing.
+- Historical import has no invented driver signature, opening approval instant, odometer or battery.
+  Its written04:00 window is an explicitly audited GROUPING boundary, not attendance. Created/received/
+  approved times are real current times. Missing monetary values default0 and cash is balancing-
+  computed. No old approval or journal is rewritten, and no code deployment is performed.
+- Small LOCAL-only service option administrativeOnBehalf on submitOperations prevents claiming driver
+  confirmation on administrator-entered rows; guarded to system-admin approvers and not exposed on
+  the HTTP wire. Existing behavior unchanged. Memory-only historical integration passes; ordinary
+  settlement25 and override11 tests pass (36 total). No production load test or test shift created.
+- RESOLVED IDENTITY: initial name-only lookup chose the older mhd k Qahwaji account. Independent
+  inspection found username «محمد القهوجي», driver2804d798..., whose full name has a ح/ج typo;
+  all13 priced19 draft rows exactly match the supplied photo rows. Its existing shift2b9d67b2...
+  was therefore closed under the correct photo-matched account, with13 orders/3725.00,
+  cash1555.17 wallet1424.83. No account merge, user rename or unrelated shift closure occurred.
+  Qahwaji20 target79a78e4d... uses that same confirmed vehicle/account. First attempt rolled back
+  fully on the500-character settlement-reason limit; reason shortened, limit guard added, preview
+  refreshed, and retry committed Qahwaji20 with11 orders/3580.00, cash2864.00 wallet0. No constraint
+  was disabled. The two near-name identities remain distinct; only the photo-matched one was used.
+- BLOCKED EXCLUSION: Amjad photo newly supplied is explicitly his: two visible
+  20 October fees295+150=445; first printed time obscured. Existing20 cancelled96136c3f..., live
+ 21 opening requestd4a07c2b... remain untouched. Supplemental original bytes/SHA saved locally.
+- Independent SELECT-only verify-final-intake.mjs PASSED:15 approved under admin, exactly one
+  immutable settlement each, zero scalar variance, balanced journals per currency, original5 hashes
+  unchanged, and all15 pass the actual completed-screen classifier. All7 new shifts have original
+  private source photos, administrator-created/unconfirmed-by-driver orders and no claimed start
+  signature, opening instant, odometer or battery. See final-intake-verification.json.
+- Final Arabic result: outputs/shift-split-review-20261021/نتيجة إدخال واعتماد النوبات.html.
+  Offline desktop/mobile QA passes:15 rows, no page overflow/errors/network calls. No deployment
+  or authenticated visual production-browser test performed. Operator processes have finished.
+- Remaining: Amjad20 is NOT approved; preserve cancelled20/current21 opening request. A proper
+  historical intake path supporting an already-live driver requires a scoped design/authority
+  decision rather than bypassing the live uniqueness guard. Omar19 has no evidence and no
+  invented empty shift. See amjad-supplement.json and the exact original PNG/SHA.
+- See it in two minutes: open completedShifts in production, filter19–20 October and the correct
+  branch, then open any approved row to inspect orders/photos. Current processing/approval dates
+  are real21 October instants; historical work dates remain19/20. No existing approval was rewritten.
+
+## 2026-10-21 — 19/20 October shift separation review (READ-ONLY COMPLETE)
+
+- Owner requests an evidence-only split before any approval changes; explicitly defines the workday
+  as 04:00 Asia/Damascus through just before 04:00 the next day. This boundary applies to this
+  local report only: no application settings, approved shifts, operations, money or deployments changed.
+- Visually reviewed and SHA-256 inventoried 54 original photos in eight driver folders, including
+  newly supplied Ahmad, Abdullah and Qahwaji folders. Preserved printed dates/minutes and source
+  links; removed scroll overlaps without deleting genuine same-minute occurrence multiplicity.
+- Read-only Neon HTTPS snapshot includes 18–21 October shifts, included/excluded orders, deductions,
+  movements and sanitized draft figures/orders. Taha2 is the previously closed Taha identity;
+  Yusuf uses the existing 96c22720 shift owner, not the similarly named second identity.
+- Five previously approved shifts contain orders of one workday each under the 04:00 rule.
+  Most 20 October photo orders are missing separate historical shifts, not mixed into those
+  approvals. No correction/reversal is authorized or executed by this evidence review.
+- Three after-midnight rows belong inside the requested workdays: Taha 20/10 00:06 ->19,
+  Ahmad 20/10 00:44 ->19, Abdullah 21/10 00:12 ->20. Qahwaji 19/10 00:51 belongs to18 and
+  stays outside this review's totals. Taha 20/10 15:07 negative50 is one cash deduction, not an order.
+- Evidence gaps: Balah19 has five database-only orders /1325.00 without local screenshots;
+  preserve them. Ahmad19 has only two visible photo rows /315.00, but 15 priced draft rows /
+  2770.00 plus one incomplete row. Photo23:36/175 vs draft23:26/175 is unresolved, never auto-merged.
+  Omar19 has no photo evidence; do not interpret this as zero work. Daily cash/wallet and actual
+  handoffs remain unverified; previously balancing-computed cash is explicitly not a counted balance.
+- Deliverable: outputs/shift-split-review-20261021/كشف فصل النوبات 19 و20 أكتوبر.html with
+  16 driver-day summaries, row-level source links, missing/unverified fields, source-snapshot.json,
+  split-review.json, original image hashes, and offline desktop/mobile screenshots.
+- Checks pass: exact bigint totals/row parity, 04:00 boundary tests, all54 source hashes, all8
+  driver anchors, no desktop/mobile page overflow, no browser errors and zero HTTP preview requests.
+  See report-checks.json. No production write or settlement alteration in this review.
+- See it in two minutes: open the HTML, scan the summary and midnight-boundary table, then open
+  a driver's day and its source images. Resolve missing daily figures before any financial action.
+
+## 2026-10-21 — owner-authorized close of blocking 19/20 October shifts (COMPLETE)
+
+- User explicitly selected admin, authorized zero defaults for missing financial values and
+  computed balancing cash, confirmed physical delivery, then prioritized closing existing old
+  shifts so drivers can start new ones. No new historical shift creation/deployment is performed
+  or claimed by this operational close.
+- COMMITTED and independently read back: محمد الحلاق 19 October (8fc773ae...), cash 4771.27,
+  wallet 292.73; طه قبلان 19 October (fda34135...), cash 2210.52, wallet 321.48. Both approved
+  under admin with zero scalar variance, immutable settlements and explicit computed-cash audit.
+  Evidence: outputs/shift-intake-20261021/existing-close-applied.json.
+- Also COMMITTED: Omar 20 October (077263ac...), cash 1133.39, wallet 614.61, and Yusuf
+  19 October (96c22720...), cash 4061.55, wallet -301.55. Yusuf's five photographed missing
+  orders were added once, bringing his total to 22 orders / 4700.00. Canonical force-close was
+  used with explicit exceptional reason; no battery readings/photos were invented. Individual
+  committed receipts are in outputs/shift-intake-20261021/closed-<shift-id>.json.
+- COMMITTED: Balah 19 October (9c6e1684...), cash 4857.64, wallet 1458.36, ten valid orders /
+  3020.00, materialized from the existing durable draft. Existing nonmissing wallet was retained.
+- Independent read-only HTTPS verification passed at 2026-10-21 10:47:18 UTC: all five target
+  shifts are approved by admin, exactly one immutable settlement each, zero scalar variance,
+  zero currency-unbalanced journal entries, and zero remaining live 19/20 October shifts for
+  those drivers. Evidence: outputs/shift-intake-20261021/final-verification.json.
+- Cash values above are explicitly owner-authorized equation-balancing values, not OCR readings
+  or independently observed cash counts. Cash/wallet delivery confirmations follow the owner's
+  explicit confirmation. No duplicate historical shifts, test shifts or deployment were performed.
+- See it in two minutes: refresh the shifts page, select 19/20 October and these five drivers;
+  their statuses are approved. Their previous-shift gate is clear. Phone permissions, licences,
+  documentation and other independent opening gates were not tested by creating a new shift.
+- The provided owner database connection is used only by tightly scoped application-service
+  scripts after exact database/admin/RBAC checks. No roles/credentials/triggers were altered;
+  the attempted SET ROLE was refused. Production runtime credentials are sensitive/unreadable
+  through Vercel; no bypass was attempted. Vercel control process stopped and its memory cleared.
+- Service tests passed: settlement 25/25 and shift override 11/11. Source change is only exporting
+  the existing pure closeDraftOperationsInput mapper for operational reuse (no new HTTP route).
+  Each write uses attributed transaction context, source fingerprint, bounded locks, canonical
+  ledger/settlement services and atomic rollback; retries only accept this operation's receipt.
+
+## 2026-10-21 — earlier two-day intake investigation (historical notes before the close above)
+
+- Later user instructions explicitly authorize missing values as zero, computed cash sufficient
+  to balance BR1, financial approval, and confirm physical delivery. Preserve existing nonmissing
+  wallet values; label computed cash as owner-authorized balancing, not OCR/count evidence.
+  No production writes have occurred. Do not attribute approval to an arbitrary active account:
+  the task operator's exact account identity has not yet been supplied.
+- All five directories now contain 35 images (Halla 14, Taha 5, Omar 3, Balah 4, Yusuf 9),
+  visually inspected. They are Recent Orders screens, not new cash/wallet evidence. Taha's
+  20 October 15:07 negative 50 SYP_NEW row is a cash deduction, not a delivery fee. His
+  20 October 00:06 printed row belongs to the preceding workday and must not be duplicated.
+- Directory names are not exact database names: Omar is عمر احمد مرعي (code omar), with an
+  existing open 20 October shift 077263ac-66a3-4af5-ab5e-e22a1561b9b2. Two active Yusuf
+  identities exist; يوسف قصيباتي has pending_review shift 96c22720-4375-4396-beec-0322a9bf3793
+  on 19 October (17 included orders, cash 7000.00, wallet -301.55). Do not invent a second
+  identity or overwrite a negative existing wallet with the missing-value default.
+- Current createShift accepts driver/vehicle and derives today's business date; no supported
+  historical shift creation route was found. A correct audited historical intake path is required
+  for missing prior-day shifts; do not spoof the clock, registration instants or ordinary approvals.
+
+- User requested closing/uploading the two days for محمد الحلاق from the desktop photo folder,
+  then extending to the other drivers and proceeding with available information. No production
+  mutation was performed: only read-only Neon SELECTs and local photo inspection.
+- Existing 19 October shift 8fc773ae-5832-4a74-aa9d-28d5cc948d52 is pending_review with 20
+  included orders, fees 3830.00 SYP_NEW, cash 3122.00 and wallet 292.73. Its submitted boundary is
+  20 October 08:19 UTC. The photos include later 20 October work (18 non-cancelled rows totaling
+  3900.00), so appending these to the original closed window would be incorrect. Photos also
+  include edges from already-approved 18 October; never duplicate them.
+- Local, non-executable intake preview saved in outputs/shift-intake-20261021/halla-intake-preview.json.
+  No second-day opening figures, cash, wallet or physical settlement confirmations were invented.
+  No claim of upload, approval or two-day shift creation is valid yet.
+- Other driver directories (طه قبلان, عمر مرعي, محمد البلح, يوسف القصيباتي) were empty.
+  Read-only review found طه قبلان pending_review and محمد البلح open on 19 October.
+- Access blocker: node_repl/Computer Use failed to write kernel assets (os error 3), still failed
+  after kernel reset and one retry. No authenticated browser/API session was available. Do not
+  forge sessions or substitute raw database accounting writes to bypass the normal gates.
+
+## 2026-10-20 — direct company operation editing/deletion (PUBLISHED)
+
+- Added atomic direct edit/delete actions for deposits, owner withdrawals, income and FX;
+  expenses retain their canonical correction workflow. Exact inverse + replacement + immutable
+  metadata receipt share one financial transaction, actor, reason and request fingerprint.
+  Expected journal identity protects stale tabs; exact UUID retries cannot repeat money.
+- Current ledger/reports/overview suppress cancelled operations, preserve audit journals, and
+  resolve repeated edits to one canonical report identity with the original posting date.
+  Current historical-import rows follow the effective command without rewriting source balances.
+  Owner withdrawal projection naturally nets the exact inverse and replacement once.
+- Expense deletion also unlinks documentary motor payments and cancels affected schedules in
+  the same transaction. Corrections refresh source evidence for explicit allocations; reductions
+  below allocated amounts/currency conflicts fail atomically rather than guess redistribution.
+  Original payment history and asset price remain. Financially recognized/sold/debt links block
+  independent edits/deletion. Current payment descriptions follow effective source evidence.
+- Scope boundary: branch/restoration mirrors, custody, debts, purchases and depreciation have
+  NOT gained generic edit/delete commands. The ledger explicitly labels these linked workflows
+  as protected; never imply one-sided deletion is supported. No production financial test writes.
+- Calendar/FX lookups occur before taking the direct action financial connection; dedicated test
+  proves no second pooled calendar read while holding that transaction. Arabic/English labels,
+  shared confirmations, semantic tokens, RTL, current-data reload and unknown-response retries.
+- Evidence and before-publish review: outputs/company-operation-actions-20261020/
+  نتيجة التعديل والاختبارات.html; API suite, desktop/mobile screenshots and isolated PostgreSQL
+  verification. Isolated database name is checked before any test write; all fixtures rolled back.
+- Published after explicit user approval: API dpl_FepFuqidUVFVza1ofAXG3Fv3zr8F followed by
+  Admin dpl_EPuZ2pf6gFG9yYCPuECVqF3YzB8h. Public aliases verified at 12:11 UTC:
+  exact tested Admin HTML/JS/CSS/theme hashes, API health 200 and unauthenticated finance GETs 401.
+  Driver deployment unchanged. No migrations, production financial mutations or shift mutations.
+- Final verification: API 1316 passed / 10 skipped; Admin 471 passed; exact compiled Admin
+  desktop/mobile browser scenarios 10 passed; isolated PostgreSQL financial checks 4 passed,
+  fixtures rolled back. Build, typecheck, translations, money, SQL, tokens and RTL checks passed.
+- Baseline reconstruction matches published Admin artifacts exactly. API semantic module diff
+  is limited to nine finance modules; unrelated dirty changes were excluded from deployment.
+  Existing metadata stores immutable operation receipts; no new schema migration is required.
+- Authenticated production visual inspection was unavailable because the computer-use tool
+  failed to initialize. Live delete/edit buttons were NOT clicked; compiled UI used synthetic API
+  responses, and actual financial posting was tested only against the isolated PostgreSQL database.
+  Evidence: outputs/company-operation-actions-20261020/نتيجة النشر.html and published-verification.json.
+- See it in 2 minutes: open the local result HTML, inspect direct-operation editor screenshot,
+  then read the protected-workflow and linked-payment scheduling boundaries before publishing.
+
+## 2026-10-18 — live-map display fix PUBLISHED, Admin ONLY
+
+- Explicit authorization: publish map fix only. Reconstructed pre-map Admin build via a Vite
+  transform (no workspace reversion) matches every retained October17 production static artifact
+  SHA256 exactly. Candidate differs only in JS and its HTML reference; CSS/theme/fonts unchanged.
+  Manifest: outputs/map-viewport-20261018/release-manifest.json. Excludes tracking classifier,
+  minimum-Android gate wiring, all API/Driver changes, migrations and application data commands.
+- Admin dpl_Efn3jYQvYDj6qam4WiCz6Fac8UCG staged with skip-domain, verified, then promoted.
+  Production alias/assets verified. API remains dpl_9d13BwWi8Eq83DmLcCjTkcp4Xm6h; Driver remains
+  dpl_HemgNntAr5R6DdFWqYBpXGnMXLso. Ten/ten desktop/mobile scenarios pass against the compiled
+  candidate itself, in addition to earlier unit/type/build checks. Protected /api/me remains401
+  without a session, proxy /api/health200. No shift or financial commands executed.
+- Live authenticated UI ~17:03 Damascus: new button/hint visible, zoom and keyboard pan exercised;
+  DOM map projection center/zoom identical after full reload and subsequent live updates. Saved
+  screenshot contains controls/hint only, not GPS. Credential kept in memory only; local release
+  helper stopped and credential discarded after verification.
+- Promotion endpoint returned an empty success body; initial JSON parsing reported a local error.
+  Did not blindly re-promote: read aliases and matched published assets first, confirming success.
+  Controller now accepts empty success bodies for future use.
+- Evidence: published-verification.json, published-ui-verification.json, release-browser-tests.json,
+  published-map-controls.png and نتيجة نشر إصلاح الخريطة.html in outputs/map-viewport-20261018.
+  See it in2minutes: https://ash-admin-eta.vercel.app/#gpsLive -> zoom/pan -> refresh -> same view;
+  Show all drivers resets framing only when explicitly requested. Phone tracking gaps remain.
+
+## 2026-10-18 — four silent drivers investigated (READ ONLY; NO DEPLOYMENT)
+
+- Read-only production SQL at ~16:49 Damascus and authenticated map observation. 26 shifts since
+  October11, 42 sanitized session records, 53 health events; none hit result caps. No coordinates,
+  session tokens, IPs, passwords or financial rows selected. Transaction READ ONLY verified, rolled
+  back; no app-source edits or shift mutations. User cannot provide phone diagnostics.
+- All four current shifts are awaiting_open_approval, confirmed by drivers; tracking starts at
+  confirmation, so pending approval is not a reason to stop capture. Corrects earlier shorthand
+  describing them all as open. Three other tracked shifts have fresh GPS and heartbeats.
+- Ahmed: 2 phone_fg fixes today, latest10:42:49; 341 foreground fixes over8 sampled shifts, no
+  native health. Hallaq: no fixes today, one foreground fix yesterday,160 over5 shifts, no native
+  health. Foreground-only pattern is proven; browser vs old/missing native plugin remains unknown.
+  Balah: no fixes or native health over6 sampled shifts; session active. Cannot identify permission
+  failure vs missing tracker remotely. No invented OEM/phone model or employee behavior claim.
+- Abdullah: build4,334 phone_bg fixes, last capture12:44:25; delayed points received16:07; latest
+  health16:32:02 online/permissions true/queue0/service unknown. Capture gap proven, OS kill/force
+  stop not proven. Existing classifier erroneously maps service unknown to service_stopped during
+  a fresh heartbeat, then unknown after10min. Source-extracted local probe reproduces this exactly.
+- Second code gap: Vercel entry omits minDriverAndroidTrackerBuild while standalone server passes
+  it; confirmed also in retained owner-withdrawals October17 release bundle. Do not blindly enable
+  a gate before device compatibility/APK availability is established. No code/config fix applied.
+-29/29 GPS API tests pass in memory. Platform request logs/current env unreadable because local
+  Vercel credential absent; do not infer absence of4xx/5xx. No published changes or handset tests.
+- Findings, recovery recommendations and source limits saved in
+  outputs/map-viewport-20261018/تشخيص توقف تتبع السائقين.html and tracker-*.json. See it in2minutes:
+  open that report, compare four driver rows; current evidence does not justify editing shifts,
+  reconstructing missed GPS, reinstalling/clearing handset data or claiming a proven phone cause.
+
+## 2026-10-18 — live-map viewport persistence and review (LOCAL ONLY)
+
+- User requested a map review and a fix for zoom/pan returning to the distant default on refresh.
+  No deployment requested for this task. Production map inspected read-only after human login;
+  no shift, GPS, treasury or financial records changed.
+- Root cause: every marker redraw unconditionally called fitBounds; ten-second polls, directory,
+  language/theme changes reset the chosen view. Full reload also discarded it.
+- GpsLive now saves validated display preferences per user/branch on the same browser, preserves
+  the view through polls/reload, fits once only when no saved/user-chosen view exists, and provides
+  explicit Show all drivers. Scoped responses prevent a delayed previous-branch read replacing
+  the current pins. Blocked/corrupt storage fails safely without breaking the map.
+- Verification: Admin 471/471 tests (including 5 new viewport tests), client 328/328; 10/10 desktop
+  and mobile browser scenarios; workspace typecheck, Admin build, i18n parity/boundaries, RTL CSS,
+  design-token and Damascus time checks passed. Existing bundle-size/code-splitting warnings remain.
+- Sealed actual-Admin preview at http://127.0.0.1:4191/#gpsLive uses synthetic fixtures, local-only
+  APIs and rejects non-GET writes (405). Smoke test verified reload persistence and zero browser
+  errors; public OSM base-map tiles only. Local preview server session40450 left running for review.
+- Production observation 2026-10-18 ~16:35-16:36 Damascus: 3 fresh drivers and 4 silent active shifts;
+  one service_stopped diagnosis, three unknown. Independent from viewport reset; not proof of
+  staff inactivity. No production GPS coordinates/secrets copied into the report.
+- Review and limitations: outputs/map-viewport-20261018/مراجعة الخريطة وإصلاح العرض.html,
+  browser-tests.json, admin-tests.json, preview-smoke.json, local-preview.png. Recorded-path map
+  unchanged; loading/failure UX, directory fetch cadence and safe marker text are documented
+  follow-ups, not represented as fixed. No publishing or production writes.
+
+## 2026-10-17 — owner withdrawals published; requested bookkeeping completed
+
+Supersedes the earlier local-only/pending status below. Explicit user authorization: publish the
+addition and execute the three previously explained bookkeeping actions.
+
+- API `dpl_9d13BwWi8Eq83DmLcCjTkcp4Xm6h` and Admin `dpl_DanhCZ9enyevoQTc9pTNepKJ5knU`
+  promoted after candidate artifact/environment checks; API health, protected routes, Admin asset
+  hashes and proxy checked again on production. Driver deployment unchanged; no migrations.
+  Full API regression repeated: 1304 passed, 10 skipped, zero failures.
+- Through the live authenticated Admin UI (no database writes or session impersonation):
+  company-to-branch cash SYP_NEW30000, branch journal12113/HQ mirror12114; personal owner cash
+  withdrawal SYP_NEW70000 from branch, journal12115; effective target cash20000/wallet10000 from
+  2026-10-17. Transfer posted first because initial branch cash46233.40 was below70000.
+- Verified final balances: branch cash6233.40, branch wallet8300.00, company SYP21894.00 and USD205.00.
+  Live owner summary shows SYP70000 and existing USD960 exactly once. Raw legacy owner-fund net9904
+  was investigated: entries506/507 are trial-balance cleanup/mixed correction, not a verified
+  personal cash withdrawal; not included in the personal summary or reposted.
+- Read-only before/after fingerprints: all 378 approved shifts, 498 settlements, 12048 existing
+  journals, 26590 existing lines, 103 expenses unchanged. Exactly3 new journals/6 lines for the two
+  requested movements; no new expense or shift edits. No restoration performed; SYP7550 shortage
+  remains a displayed plan, not an additional payment.
+- Evidence: `outputs/owner-withdrawals-20261017/financial-execution-verification.json`,
+  `published-verification.json`, `owner-withdrawal-12115.jpg`, and `نتيجة النشر وتسجيل الحركات.html`.
+  See it in2minutes: published `https://ash-admin-eta.vercel.app/#companyFund`, owner-withdrawals
+  section -> original entry12115; Treasury targets20000/10000. No required work remains for this request.
+
+## 2026-10-17 — explicit branch owner-drawing option (LOCAL ONLY)
+
+- Reused the existing `/treasury/withdraw` command: each branch cash/wallet row now requires an
+  explicit company-transfer or personal-owner destination, amount and reason. Company transfer
+  remains gated by `company_fund.manage`; the owner destination uses existing manual-write scope.
+  A shared confirmation describes the exact source and effect. In-flight guarding and destination-
+  bound held idempotency keys prevent double clicks/retry duplication; stale branch responses do
+  not overwrite another branch. Successful writes refresh the read-only restoration plan, never
+  execute restoration. No new posting recipe, API, migration, custody flow or generic wizard.
+- Company withdrawals already post `owner_drawings`; clarified the company entry option, history
+  labels and treasury button in Arabic/English. No historical records were rewritten or reclassified.
+- Verification: all 466 Admin and 328 Client tests, 49 targeted in-memory API tests; full workspace
+  typecheck and Admin build; localization, RTL, token and client-time checks. Browser checks cover
+  both destinations on cash/wallet, confirmation cancellation, same-key retry, role visibility,
+  company-entry meaning and the read-only owner summary on desktop/mobile. Screenshots are in
+  `outputs/owner-withdrawals-20261017/preview/06-branch-owner-*`.
+- Safety: no publishing or production access; no real financial entries, approved-shift edits,
+  target-capital edits or migrations. The local port-4190 preview uses synthetic GET data and rejects
+  all non-GET API calls with 405. The actual 70000/30000 operations and capital targets remain pending.
+- See it in 2 minutes: `http://127.0.0.1:4190/#treasury`, choose owner versus company in either box;
+  inspect the confirmation then cancel. The owner-summary preview remains under `#companyFund`.
+
+## 2026-10-17 — owner personal withdrawals and newest-first expenses (LOCAL ONLY)
+
+No deployment, migrations, production database access, new financial entries, or target-capital edits.
+The requested SYP70000 withdrawal, SYP30000 transfer and cash20000/wallet10000 targets remain unposted.
+
+- Added the read-only `/company/owner-withdrawals` snapshot under existing company-fund permissions.
+  It combines verified HQ owner-withdrawal journals with operating-branch cash/wallet drawings,
+  deduplicates by original branch/journal identity, walks every treasury cursor page, and validates
+  exact reversal chains. Reversed originals disappear from current totals without removing audit
+  evidence. Funding, custody, transfers and expense descriptions never substitute for account facts.
+  Original currency/rate and original/related entry references remain visible; no FX repricing.
+- Added the personal-withdrawals section directly below owner payments in the finance overview.
+  Full-history per-currency totals stay independent of detail date/currency/source filters.
+  Newest-first paginated details open a read-only, keyboard-accessible original-journal dialog.
+  Distinct loading/failure/empty-period/true-empty states prevent misleading zero totals.
+  Existing company-finance roles, bilingual catalogues, semantic tokens and mobile table cards remain.
+- Strengthened same-day expense ordering before pagination: company lists use original recording
+  time then journal sequence; branch PostgreSQL reads use business date/created_at/journal sequence,
+  with UUID only a final stable tie-break. The memory adapter uses journal sequence where no database
+  timestamp exists. Filters, totals, posting recipes and audit histories are unchanged.
+- Isolated interactive preview: `http://127.0.0.1:4190/#companyFund`, with explicit synthetic-data
+  notice. API requests are fulfilled locally; unrecognised reads fail locally, and every non-GET
+  API request is rejected405. Browser checks observed no external requests or page errors.
+  The illustrated SYP70000 and USD960 are preview examples, NOT newly posted transactions.
+
+See it in2minutes: open the preview above, then switch to Operations to check latest-first expenses.
+Screenshots and executable evidence are in `outputs/owner-withdrawals-20261017/`. Test results include
+API1304, admin466, DB201 and adapters236 passing; dedicated visual suite21passed/1existing mobile-only
+skip. Full typecheck and admin build pass. Optional PostgreSQL integration tests were not run for
+this read-only feature; SQL ordering is checked statically and paging behaviour through memory/API.
+
+## 2026-10-17 — OCR amount/evidence-lock fix published (API ONLY)
+
+- Explicitly authorised API-only deployment: `dpl_5UpC6LSVjczzqvQNaG1iiYVe19t7`,
+  replacing `dpl_D7EuRicSPW1tZY9GFm2JNBvyTku2`. Stable API alias verified on the new
+  deployment; admin and driver deployments remain unchanged. No migration, application mutation
+  request, financial operation, approved-shift edit, or subscription change was performed.
+- Compared compiled output with the previous production artifact: only six OCR/evidence/UOW
+  modules differ. Source upload hash verified on Vercel; application environment preserved.
+  Bundle SHA256: `6268c1766349bd60eef937ddacf8164d54acfa84ba118d32b6ff7a6b40642260`.
+- Revalidated source fingerprints against the 1733-test results, reran typecheck/SQL/wire checks,
+  and reran all four disposable PostgreSQL lock/atomicity tests successfully. The exact compiled
+  bundle passes 25 local publication-guard/lock-scope assertions with fake transaction transport.
+- Candidate and stable-host health/public-directory/authentication checks pass, including health
+  via both front-end proxies. Before/after production READ ONLY fingerprints show zero changes to
+  378 previously approved shifts, 498 settlements, 12048 journal entries, 26590 journal lines,
+  and 103 expenses; zero new rows in those sampled tables during the release window.
+- Tooling-only issues were resolved: avoid forced Node exit on Windows after a status check;
+  accept an empty successful Vercel promotion response. Promotion was confirmed by reading the
+  stable aliases rather than blindly repeating the command. These were not API runtime errors.
+- Replayed 1000 saved provider/cache results (requested last 30 days; returned coverage begins
+  2026-09-24) through the exact published compiled guard locally, with production SQL READ ONLY.
+  Twenty formerly successful payments-log results are now rejected safely; 281 incomplete order
+  rows remain present without an invented amount. No paid image read or production cache write.
+- Initial new-deployment log sample returned 50 entries despite limit1000, mostly real GPS traffic
+  with accepted202 responses. No safe error category/5xx was observed in that bounded sample;
+  status0 is unresolved, not a success. There was no fresh OCR request in this sample, so it is
+  not evidence of a live end-to-end image upload or proof that all future lock waits disappear.
+
+See it in 2 minutes: publication evidence and the safe cached-result replay/log sample are in
+`outputs/ocr-lock-fix-20261017/`; `نتيجة النشر.html` is the final release report when generated.
+No new-image upload or approved-shift workflow is exercised on production for verification.
+Legitimate same-shift contention remains protected; short post-release logs are not a load test.
+
+## 2026-10-17 — image amount publication and evidence lock contention (LOCAL ONLY)
+
+No deployment, production migration, financial mutation, approved-shift edit, or subscription change.
+
+- OCR money is validated at publication, including old cached results. Invalid/overflow amounts
+  cannot reach draft materialisation as a server error or a fabricated zero. Orders remain visible
+  for review; an unreadable archival payments page fails safely without partially importing it.
+  Only exact leading-plus/outer-whitespace normalisation is allowed. Non-money fields are not parsed
+  as money. Manual wallet fallback and paid-read limits remain intact.
+- Evidence upload/delete/restore selects an internal evidence-only close scope: the shift row lock
+  and attachment/draft CAS remain, without reserving branch receivables or locking financial
+  operation children. Final approval and every default financial UOW retain their original locks.
+- Immutable OCR observations use one parameterised recordset INSERT, not one round trip per row.
+  Numeric page-position precision, provenance, idempotency and transactional rollback are retained.
+- Node24.19.0 checks: API1292, DB201, adapters236, and four real-PostgreSQL lock/atomicity cases pass
+  (1733 broad checks total; targeted107 replay cases overlap API and are not added again).
+  Typecheck, SQL static check, wire-money check and changed-file whitespace checks pass.
+  Other optional integration cases remain skipped, explicitly listed in the report.
+- PostgreSQL checks used a new generated fixture schema in the existing isolated release-gate DB,
+  never neondb or public financial tables; it was cleaned afterwards. The fixtures represent the
+  repository's schema/constraints rather than rerunning every production trigger. An earlier remote
+  setup exceeded its10-second test-hook budget; that report is preserved. Test-only hook budgets
+  were raised, not the application's5-second SQL lock timeout. The final four cases pass.
+- Longer runtime-log retention was researched, not enabled: Vercel Plus supports30days with14-day
+  query windows; external Drains could support a chosen90-day archive. Both need entitlement,
+  destination/privacy and usage-cost review. No paid add-on or external log shipping was configured.
+
+See it in2minutes: open `outputs/ocr-lock-fix-20261017/ملخص الإصلاح والاختبارات.html`.
+Detailed results and source hashes are in `verification.json` beside it. Reproduce the isolated
+PostgreSQL cases with `.release/ops/run-ocr-lock-tests-20261017.mjs`, using Node24.
+Legitimate same-shift operations must still serialize; production improvement requires a separately
+authorised deployment and subsequent observation. Original-image model accuracy was not re-benchmarked.
+
+## 2026-10-13 — wallet locale/screen gate and remaining time alignment (LOCAL ONLY)
+
+No deployment, migrations, production writes, or approved-shift edits. The OCR adapter now accepts
+verified European grouped wallet balances (`1.180,83` → `1180.83`) without floats or a ×100 guess.
+Its three independent compact wallet passes require an identified wallet screen and two agreeing
+validated amounts. Known other screens are distinguished from genuinely unidentifiable images;
+failed transcripts remain diagnostic evidence, never a declared wallet balance. Cache signatures
+separate the new parser/screen gate from older results. Read/retry budget rules are unchanged.
+
+Clock alignment skips only demonstrably empty edge fragments and uses literal dated clock anchors
+at a fixed offset. Sparse alignment needs two unique anchors, rejects competing mappings, preserves
+all canonical financial rows, and gives unmatched/clipped/conflicting rows no verification votes.
+An unread bottom time row no longer discards independently identified clear neighbours. No amount-only
+matching, inferred clock, interior-row removal, or extra clock vote from the second money reader.
+
+Direct local model tests used 13 original failed-wallet images (4 genuine balances, 8 bike dashboards,
+1 payments log) and 5 original order images: all wallet expectations and 20 clear live-order clocks
+matched the visually checked evidence. Two transport failures in a repeat wallet check were retried
+once, preserved in diagnostics, and then correctly classified. Clipped cards remain reviewable.
+Replay of the month’s stored evidence recovered 154 clocks in 37 distinct images (previous local fix:
+141 in 34), with every replayed fee unchanged. These are evidence rows, not newly included deliveries.
+Read-only before/after fingerprints for 51 approved shifts, their orders and cash deductions matched.
+
+Verification: 234 adapter tests, 93 focused API OCR/close tests, 29 driver authority/error tests;
+contracts, adapters and API TypeScript checks passed. Evidence/report:
+`outputs/ocr-time-alignment-20261013/remaining-final-results.json` and
+`outputs/ocr-time-alignment-20261013/نتائج إصلاح المحفظة والوقت.html`.
+The test provider key was supplied through stdin, not saved in source or configuration.
+
 ## 2026-09-25 — driver breaks and GPS work distance deployed to web production
 
 **Live.** PR #4 merged as `1431e6e` (release source `197a7a7`). Neon migrations

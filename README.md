@@ -1,5 +1,8 @@
 # ASH Delivery
 
+For the current development checkpoint and macOS setup, see [MAC-HANDOFF.md](docs/MAC-HANDOFF.md).
+The historical deployment notes below describe older releases, not the complete handoff branch.
+
 Operational-financial platform for a Damascus fleet-delivery business partnered with Yallago.
 Every shift is photo-documented, every shift close must satisfy a zero-tolerance cash equation,
 every movement is a balanced double-entry posting, and the financial week freezes every Sunday.
