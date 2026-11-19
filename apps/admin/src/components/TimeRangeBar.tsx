@@ -28,9 +28,9 @@ import {
  * Presentation only: the owner of the selection (the screen) persists it and writes it to the URL.
  */
 
-/** `GET /dashboard/meta`, reloaded when the branch changes. */
+/** `GET /dashboard/meta`, reloaded for actor/scope changes and the authoritative day rollover. */
 export function useRangeMeta(): { meta: RangeMeta | null; error: string | null; retry(): void } {
-  const { api, branchId } = useApp()
+  const { api, branchId, session } = useApp()
   const [meta, setMeta] = useState<RangeMeta | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [attempt, setAttempt] = useState(0)
@@ -38,6 +38,7 @@ export function useRangeMeta(): { meta: RangeMeta | null; error: string | null; 
   useEffect(() => {
     let active = true
     const controller = new AbortController()
+    setMeta(null)
     setError(null)
     void api
       .get<RangeMeta>('/dashboard/meta', { cache: 'no-store', signal: controller.signal })
@@ -52,7 +53,7 @@ export function useRangeMeta(): { meta: RangeMeta | null; error: string | null; 
       active = false
       controller.abort()
     }
-  }, [api, branchId, attempt])
+  }, [api, branchId, session?.userId, session?.roleKey, session?.businessDate, attempt])
 
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
   return { meta, error, retry }

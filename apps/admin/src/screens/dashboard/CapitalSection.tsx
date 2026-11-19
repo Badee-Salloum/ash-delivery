@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { DateRange } from '@ash/domain'
+import { groupThousands } from '@ash/client'
 import { useApp } from '../../app-context.tsx'
 import { explainError } from '../../errors.ts'
 import { differenceView } from '../../treasury-view.ts'
@@ -60,7 +61,7 @@ export function CapitalSection({ range }: { range: DateRange }): ReactNode {
             <Stat
               label={t.dashboard.activeShiftCustody.replace('{n}', String(data.capital.activeShiftCount))}
               value={<Money value={data.capital.activeCustodyTotal} />}
-              sub={`${t.treasury.cashBox}: ${data.capital.activeCustodyCash} · ${t.treasury.wallet}: ${data.capital.activeCustodyWallet}`}
+              sub={t.dashboard.custodyChannelsHint.replace('{cash}', groupThousands(data.capital.activeCustodyCash)).replace('{wallet}', groupThousands(data.capital.activeCustodyWallet))}
             />
           </div>
         </section>

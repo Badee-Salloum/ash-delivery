@@ -6,7 +6,7 @@ import { useConfirm, useTextPrompt } from '../feedback.tsx'
 import { Button, Card, DateField, Field, Money, MoneyInput, Select, Table, TextInput } from '../ui.tsx'
 import type { Asset, AssetInstallmentDue, AssetInstallmentDueFeed, AssetInstallmentPlan, Mutate } from './CompanyFund.tsx'
 
-type InstallmentPaidFrom = 'pocket' | 'reserve' | 'owner_outside'
+type InstallmentPaidFrom = 'pocket' | 'reserve' | 'owner_outside' | 'owner_custody'
 type InstallmentScheduleKind = 'weekly' | 'monthly_first' | 'every_n_days'
 
 export interface InstallmentPlanDraft {
@@ -59,6 +59,7 @@ export function InstallmentPlanFields({
             <option value="pocket">{t.companyFinance.pocket}</option>
             <option value="reserve">{t.companyFinance.reserve}</option>
             <option value="owner_outside">{t.companyFinance.ownerOutside}</option>
+            <option value="owner_custody">{t.financeWorkspace.ownerCustody}</option>
           </Select>
         </Field>
       </div>
@@ -97,6 +98,7 @@ function positiveMoney(value: string): boolean {
 function sourceLabel(source: InstallmentPaidFrom, t: ReturnType<typeof useApp>['t']): string {
   if (source === 'pocket') return t.companyFinance.pocket
   if (source === 'reserve') return t.companyFinance.reserve
+  if (source === 'owner_custody') return t.financeWorkspace.ownerCustody
   return t.companyFinance.ownerOutside
 }
 
@@ -225,6 +227,7 @@ export function AssetInstallmentPanel({
                     <option value="pocket">{t.companyFinance.pocket}</option>
                     <option value="reserve">{t.companyFinance.reserve}</option>
                     <option value="owner_outside">{t.companyFinance.ownerOutside}</option>
+            <option value="owner_custody">{t.financeWorkspace.ownerCustody}</option>
                   </Select>
                 </td>
                 <td className="px-3 py-2">

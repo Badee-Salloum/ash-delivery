@@ -1,3 +1,5 @@
+import { allocate } from '@ash/domain'
+import { CloseReferencePanel } from '../components/CloseReferencePanel.tsx'
 import { type ReactNode, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import L, { type CircleMarker, type LeafletMouseEvent, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -20,6 +22,10 @@ import {
 import { abs, add, formatMinor, minor, parseMinor, sub, workedTime } from '@ash/domain'
 import { useApp } from '../app-context.tsx'
 import { ShiftPathMap } from '../components/ShiftPathMap.tsx'
+import { OperationDecisionPreview } from '../components/OperationDecisionPreview.tsx'
+import { FittedEvidenceImage } from '../components/FittedEvidenceImage.tsx'
+import { CashFloatCorrection } from '../components/CashFloatCorrection.tsx'
+import { decisionReasonReady, operationDecisionCopy } from '../operation-decision.ts'
 import { explainError } from '../errors.ts'
 import { formatDistance } from '../format-distance.ts'
 import { evidenceReviewWarning } from '../evidence-warning.ts'
@@ -44,7 +50,6 @@ import { LatestRequestGuard } from '../latest-request.ts'
 import { shiftPatternLabel, shiftPatternTone } from '../shift-shape.ts'
 import { isValidOpeningFundInput, openingApprovalRequest } from '../opening-funds.ts'
 import {
-  buildOrderDuplicateRevision,
   buildOrderTimingRevision,
   closeDraftReviewReasonLabel,
   type ApprovalBlockerCode,
@@ -55,6 +60,8 @@ import {
   guardPhysicalSettlementConfirmations,
   orderHasDashboardEvidenceOrigin,
   orderNeedsAttention,
+  operationReviewResolved,
+  missingClosingFigures,
   positionEvidenceLabel,
   rowEvidencePage,
   defaultRereadSlot,
@@ -65,6 +72,7 @@ import {
 import {
   type OperationWindowStatus,
   countUnresolvedWindowRows,
+  isUnresolvedWindowRow,
 } from '../operation-window.ts'
 import {
   activeForcePreparation,
@@ -349,6 +357,14 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [settlementLoadError, setSettlementLoadError] = useState<string | null>(null)
   const [walletTransferConfirmed, setWalletTransferConfirmed] = useState(false)
   const [cashSettlementConfirmed, setCashSettlementConfirmed] = useState(false)
+  const [cashFloatEditing, setCashFloatEditing] = useState(false)
+  const editCashFloat = useCallback((editing: boolean) => {
+    setCashFloatEditing(editing)
+    if (editing) {
+      setCashSettlementConfirmed(false)
+      setWalletTransferConfirmed(false)
+    }
+  }, [])
   const [varianceReason, setVarianceReason] = useState('')
   const [cashReceivableDeferred, setCashReceivableDeferred] = useState('0')
   const [walletReceivableDeferred, setWalletReceivableDeferred] = useState('0')
@@ -395,7 +411,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   const [loadError, setLoadError] = useState<string | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const reviewRequests = useRef(new LatestRequestGuard())
-  const fetchReview = useCallback((preserveVisibleReview: boolean) => {
+  const fetchReview = useCallback(async (preserveVisibleReview: boolean) => {
     const request = reviewRequests.current.next()
     setLoadError(null)
     setRefreshing(preserveVisibleReview)
@@ -413,17 +429,19 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     setCashShortageReceivable('0')
     setSettlementRecalculating(false)
     setOrderRereads({})
-    void api
-      .shiftReview<Review>(shiftId, { cache: 'no-store', signal: request.signal })
+    return api
+      .shiftReview<Review>(shiftId, { cache: 'no-store', signal: request.signal, timeoutMs: 20_000 })
       .then((next) => {
         if (!request.isCurrent()) return
         // Local AI suggestions/drafts belong to the previous hash. Clear the guard and remount its
         // cards in the same accepted-snapshot render, so no hidden stale draft can survive while
         // the parent thinks there are zero pending edits.
         setPendingTimingDraftKeys(new Set())
+        setCashFloatEditing(false)
         setReviewGeneration((generation) => generation + 1)
         setReview(next)
         setRefreshing(false)
+        return true
       })
       .catch((e: { error?: string }) => {
         if (!request.isCurrent()) return
@@ -432,6 +450,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         if (!preserveVisibleReview) setReview(null)
         setRefreshing(false)
         setLoadError(e.error ?? 'error')
+        return false
       })
   }, [api, shiftId])
   const load = useCallback(() => fetchReview(false), [fetchReview])
@@ -445,7 +464,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   // cannot post without the exact snapshot hash and both confirmations, so a load failure is shown
   // and blocks the close rather than silently falling back to an older cash-only flow.
   useEffect(() => {
-    if (!review || review.state !== 'pending_review') return
+    if (!review || review.state !== 'pending_review' || refreshing || loadError) return
     if (
       !isNonnegativeSettlementMoney(cashReceivableDeferred) ||
       !isNonnegativeSettlementMoney(walletReceivableDeferred) ||
@@ -456,6 +475,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       return
     }
     let cancelled = false
+    const controller = new AbortController()
+    // Keep editable deferral fields mounted while typing. Financial edits already clear the
+    // previous settlement in fetchReview; the recalculating gate blocks handover/approval here.
     setSettlementLoadError(null)
     setSettlementRecalculating(true)
     const timer = window.setTimeout(() => {
@@ -464,7 +486,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           cashReceivableDeferred: cashReceivableDeferred.trim(),
           walletReceivableDeferred: walletReceivableDeferred.trim(),
           cashShortageReceivable: cashShortageReceivable.trim(),
-        })
+        }, { cache: 'no-store', signal: controller.signal, timeoutMs: 20_000 })
         .then((next) => {
           if (cancelled) return
           if (!isKnownSettlementAction(next)) throw new Error('invalid_settlement_action')
@@ -479,9 +501,10 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     }, 250)
     return () => {
       cancelled = true
+      controller.abort()
       window.clearTimeout(timer)
     }
-  }, [api, cashReceivableDeferred, cashShortageReceivable, review, walletReceivableDeferred])
+  }, [api, cashReceivableDeferred, cashShortageReceivable, review, walletReceivableDeferred, refreshing, loadError])
 
   /*
    * THE CLOSING STATEMENT OF A SHIFT THAT IS ALREADY CLOSED.
@@ -600,6 +623,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     settlement,
   )
   const closeSettlementReady =
+    !loadError && !settlementLoadError && !refreshing &&
     !settlementRecalculating &&
     deferralMatchesSettlement &&
     settlementApprovalReady(settlement, settlementDraft)
@@ -684,8 +708,8 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
     difference.direction === 'surplus'
       ? 'text-amber-700'
       : difference.direction === 'shortage'
-        ? 'text-red-700'
-        : 'text-emerald-700'
+        ? 'text-danger-ink'
+        : 'text-success-ink'
   const verdict =
     br1State === 'not_balanced'
       ? { tone: 'red' as const, label: t.br1.notBalanced }
@@ -701,6 +725,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
       return
     }
     if (!opening && unresolvedWindowCount > 0) return
+    if (!opening && cashFloatEditing) return
     if (!opening && pendingTimingDraftKeys.size > 0) {
       setError('unsaved_timing_correction')
       return
@@ -765,7 +790,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
 
   async function forceApprove(): Promise<void> {
     if (!review || !settlement || !forcePrepared || !closeSettlementReady || notes.trim() === '') return
-    if (unresolvedWindowCount > 0 || pendingTimingDraftKeys.size > 0) return
+    if (unresolvedWindowCount > 0 || pendingTimingDraftKeys.size > 0 || cashFloatEditing) return
     const ok = await confirm({
       title: t.approval.confirmForceCloseTitle,
       body:
@@ -835,14 +860,33 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
    * settlement hash, so the two ticks the manager has already given belong to a settlement that no
    * longer exists — `setSettlement` landing a new hash is what clears them.
    */
-  async function setCharge(amount: string, reason: string | null): Promise<boolean> {
+  async function setCharge(amount: string, reason: string | null, percentBps?: number): Promise<boolean> {
     if (!review) return false
     setBusy(true)
     setError(null)
     try {
-      await api.setManagerCharge(review.id, { amount, reason })
-      toast.success(t.approval.recomputed)
-      refreshVisible()
+      await api.setManagerCharge(review.id, { amount, reason, ...(percentBps === undefined ? {} : {percentBps}) })
+      toast.success(t.common.saved)
+      await refreshVisible()
+      return true
+    } catch (err) {
+      setError((err as { error?: string }).error ?? 'error')
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function correctCashFloat(input: Parameters<typeof api.adjustCashFloat>[1]): Promise<boolean> {
+    if (!review || busy || refreshing || loadError || review.state !== 'pending_review') return false
+    setBusy(true)
+    setError(null)
+    setCashSettlementConfirmed(false)
+    setWalletTransferConfirmed(false)
+    try {
+      await api.adjustCashFloat(review.id, input)
+      toast.success(t.common.saved)
+      await refreshVisible()
       return true
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -853,15 +897,15 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
   }
 
   async function reviseOps(body: Record<string, unknown>): Promise<boolean> {
-    if (!review) return false
+    if (!review || busy || refreshing || loadError) return false
     setBusy(true)
     setError(null)
     try {
       await api.post(`/shifts/${review.id}/operations/revise`, body)
       // The checkbox that just moved re-ran the whole equation, and the verdict is a card away.
       // Unannounced, the manager sees a flicker and a changed colour without knowing he caused it.
-      toast.success(t.approval.recomputed)
-      refreshVisible()
+      toast.success(t.common.saved)
+      await refreshVisible()
       return true
     } catch (err) {
       setError((err as { error?: string }).error ?? 'error')
@@ -986,6 +1030,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         who={{ driver: inlineDriver, vehicle: inlineVehicle }}
         settlement={settlement}
         settlementLoadError={settlementLoadError}
+        reviewLoadError={loadError}
         refreshing={refreshing || settlementRecalculating}
         busy={busy}
         error={error ?? loadError}
@@ -1013,6 +1058,9 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         orderRereads={orderRereads}
         onRereadOrder={rereadOrderEvidence}
         pendingTimingDraftKeys={pendingTimingDraftKeys}
+        cashFloatEditing={cashFloatEditing}
+        onCashFloatEditing={editCashFloat}
+        onCorrectCashFloat={correctCashFloat}
         onTimingDraftPending={setTimingDraftPending}
         onRequestRephoto={() => decide('request-rephoto')}
         onSendBack={() => decide('reject-close')}
@@ -1035,7 +1083,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         <div className="min-w-0">
           <h1 className="truncate text-xl font-bold">
             {who.driver ?? t.approval.review}
-            {who.vehicle ? <span className="num ms-2 text-base font-medium text-slate-500">{who.vehicle}</span> : null}
+            {who.vehicle ? <span className="num ms-2 text-base font-medium text-ink-muted">{who.vehicle}</span> : null}
           </h1>
           {/*
             * WHEN, not just which day. A business date and «#1» identified nothing on a day the
@@ -1149,7 +1197,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             manager and easy to misread at a glance on the screen that signs off real cash. */}
         {/* Two states, not three. `br1Verdict` stopped returning `split_off` when pay mode was
             retired, so the amber path was unreachable code pretending to be a warning. */}
-        <p className={`text-lg font-bold ${verdict.tone === 'green' ? 'text-emerald-700' : 'text-red-700'}`}>
+        <p className={`text-lg font-bold ${verdict.tone === 'green' ? 'text-success-ink' : 'text-danger-ink'}`}>
           {verdict.label}
         </p>
 
@@ -1183,7 +1231,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
         </dl>
 
         {/* The net difference, biggest thing on the screen — it is the number that decides. */}
-        <div className="mt-3 flex items-baseline justify-between border-t border-slate-100 pt-3">
+        <div className="mt-3 flex items-baseline justify-between border-t border-line pt-3">
           <span className={`text-sm font-semibold ${differenceColour}`}>{differenceLabel}</span>
           <span dir="ltr" className={`num text-3xl font-bold ${differenceColour}`}>
             {difference.amountText}
@@ -1205,7 +1253,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 <span>{t.br1.cause[c.code as keyof typeof t.br1.cause] ?? c.code}</span>
                 <Money value={c.amount} className="ms-auto text-base font-semibold" />
                 {c.candidateOrderNos.length > 0 ? (
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-ink-muted">
                     ({c.candidateOrderNos.length} {t.orders.title})
                   </span>
                 ) : null}
@@ -1224,7 +1272,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             {review.state === 'awaiting_open_approval' ? (
               <>
                 <div>
-                  <dt className="text-xs text-slate-500"><label htmlFor={floatInputId}>{t.shift.cashFloat}</label></dt>
+                  <dt className="text-xs text-ink-muted"><label htmlFor={floatInputId}>{t.shift.cashFloat}</label></dt>
                   <dd className="mt-1">
                     <MoneyInput
                       id={floatInputId}
@@ -1236,7 +1284,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-xs text-slate-500"><label htmlFor={topupInputId}>{t.shift.walletTopup}</label></dt>
+                  <dt className="text-xs text-ink-muted"><label htmlFor={topupInputId}>{t.shift.walletTopup}</label></dt>
                   <dd className="mt-1">
                     <MoneyInput
                       id={topupInputId}
@@ -1258,7 +1306,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 {!openingFundsValid ? (
                   <div className="col-span-2">
                     <dt className="sr-only">{t.liveShifts.openingAmountInvalid}</dt>
-                    <dd className="text-xs font-medium text-red-700">{t.liveShifts.openingAmountInvalid}</dd>
+                    <dd className="text-xs font-medium text-danger-ink">{t.liveShifts.openingAmountInvalid}</dd>
                   </div>
                 ) : null}
               </>
@@ -1295,7 +1343,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
             <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
           </dl>
           {review.endPackage.odometerAnomalyConfirmedAt ? (
-            <p className="mt-2 text-xs font-medium text-red-700">
+            <p className="mt-2 text-xs font-medium text-danger-ink">
               {t.approval.odometerAnomalyConfirmed}: {' '}
               <span className="num">{formatDateTime(review.endPackage.odometerAnomalyConfirmedAt, lang)}</span>
               {' · '}{review.endPackage.odometerAnomalyConfirmedBy ?? '—'}
@@ -1323,7 +1371,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
           <Table head={['#', t.battery.swap.slot, t.battery.swap.outReading, t.battery.swap.inReading]}>
             {review.batterySwaps.map((s) => (
               <tr key={s.seqNo}>
-                <td className="px-3 py-1 num text-slate-500">{s.seqNo}</td>
+                <td className="px-3 py-1 num text-ink-muted">{s.seqNo}</td>
                 <td className="px-3 py-1 num">{t.battery.swap.slotLabel.replace('{{n}}', String(s.slotNo))}</td>
                 <td className="px-3 py-1 num">
                   {s.outSerial ?? '—'} · {s.outPercent ?? '—'}%
@@ -1375,7 +1423,7 @@ export function Approval({ shiftId, onDone }: { shiftId: string; onDone(): void 
                 </td>
                 <td className="num whitespace-nowrap px-3 py-1">
                   <div>{deduction.occurredDate ?? '—'}</div>
-                  <div className="text-xs text-slate-500">{deduction.occurredMinute ?? '—'}</div>
+                  <div className="text-xs text-ink-muted">{deduction.occurredMinute ?? '—'}</div>
                 </td>
                 <td className="px-3 py-1 text-xs text-slate-600">
                   {[deduction.pointA, deduction.pointB].filter(Boolean).join(' ← ') || '—'}
@@ -1843,97 +1891,56 @@ function ClosingStatement({ settlement }: { settlement: SettlementView }): React
  * operation. Nothing was scanned and nothing was counted; it is a decision about the settlement,
  * and it belongs where the settlement is read.
  */
-function ManagerChargeBox({
-  settlement,
-  disabled,
-  copy,
-  onSave,
-}: {
+function ManagerChargeBox({settlement, disabled, copy, onSave}: {
   settlement: SettlementView
   disabled: boolean
   copy: ReturnType<typeof useApp>['t']['settlement']
-  onSave(amount: string, reason: string | null): Promise<boolean>
+  onSave(amount: string, reason: string | null, percentBps?: number): Promise<boolean>
 }): ReactNode {
+  const {t} = useApp()
+  const text = t.dailySummary
   const applied = parseMinor(settlement.managerCharge ?? '0')
-  const [amount, setAmount] = useState(applied === 0n ? '' : (settlement.managerCharge ?? ''))
+  const [mode, setMode] = useState<'fixed' | 'percentage'>(settlement.managerChargeBps ? 'percentage' : 'fixed')
+  const [value, setValue] = useState(settlement.managerChargeBps ? String(settlement.managerChargeBps / 100) : applied === 0n ? '' : settlement.managerCharge ?? '')
   const [reason, setReason] = useState('')
-  const amountReady = isPositiveMoneyInput(amount)
-  const reasonReady = reason.trim() !== ''
-
-  return (
-    <div className="mt-3 rounded-xl border border-warning-line bg-warning-surface p-3">
-      <p className="text-sm font-extrabold text-warning-ink">{copy.chargeTitle}</p>
-      <p className="mt-1 text-label text-warning-ink">{copy.chargeHint}</p>
-
-      {applied > 0n ? (
-        <p className="mt-2 flex items-baseline justify-between gap-2 text-sm font-bold text-warning-ink">
-          <span>{copy.chargeApplied}</span>
-          <span dir="ltr" className="num">
-            <Money value={settlement.managerCharge ?? '0'} />
-          </span>
-        </p>
-      ) : null}
-
-      <label className="mt-3 flex flex-col gap-1 text-label font-bold text-warning-ink">
-        <span>{copy.chargeAmount}</span>
-        <MoneyInput
-          value={amount}
-          min="0"
-          disabled={disabled}
-          aria-invalid={amount.trim() !== '' && !amountReady}
-          onChange={(event) => setAmount(event.target.value)}
-          className="bg-surface-card"
-        />
-      </label>
-      <label className="mt-2 flex flex-col gap-1 text-label font-bold text-warning-ink">
-        <span>{copy.chargeReason}</span>
-        <TextInput
-          value={reason}
-          disabled={disabled}
-          placeholder={copy.chargeReasonPlaceholder}
-          onChange={(event) => setReason(event.target.value)}
-          className="bg-surface-card"
-        />
-      </label>
-      {/* Why the button is dead, in words. An `aria-invalid` outline tells a screen reader and
-          nobody else, and a 40%-opacity ghost is how a manager concludes the console is broken. */}
-      {amountReady && !reasonReady ? (
-        <p role="alert" className="mt-2 text-label font-semibold text-warning-ink">
-          {copy.chargeReasonRequired}
-        </p>
-      ) : null}
-      <div className="mt-2 flex flex-wrap gap-2">
-        <Button
-          variant="ghost"
-          disabled={disabled || !amountReady || !reasonReady}
-          onClick={() => {
-            void onSave(amount.trim(), reason.trim()).then((saved) => {
-              if (saved) setReason('')
-            })
-          }}
-        >
-          {copy.chargeSave}
-        </Button>
-        {applied > 0n ? (
-          <Button
-            variant="ghost"
-            disabled={disabled}
-            onClick={() => {
-              // Clearing needs no reason: removing a charge takes nothing from anyone.
-              void onSave('0.00', null).then((saved) => {
-                if (saved) {
-                  setAmount('')
-                  setReason('')
-                }
-              })
-            }}
-          >
-            {copy.chargeClear}
-          </Button>
-        ) : null}
-      </div>
+  const usable = isPositiveMoneyInput(value)
+  const rate = usable && mode === 'percentage' ? parseMinor(value) : 0n
+  const ready = usable && (mode === 'fixed' || (rate > 0n && rate <= 10000n))
+  const preview = mode === 'percentage' && ready
+    ? allocate(parseMinor(settlement.grossDriverShare), Number(rate), 'half-up')
+    : ready ? parseMinor(value) : 0n
+  const previewMoney = `${preview / 100n}.${String(preview % 100n).padStart(2, '0')}`
+  return <div className="mt-3 rounded-xl border border-warning-line bg-warning-surface p-3">
+    <p className="text-sm font-extrabold text-warning-ink">{copy.chargeTitle}</p>
+    <label className="mt-3 flex flex-col gap-1 text-label font-bold text-warning-ink">
+      <span>{text.chargeMode}</span>
+      <select value={mode} disabled={disabled} className="rounded-lg border border-line bg-surface-card p-2"
+        onChange={event => {setMode(event.target.value as 'fixed' | 'percentage'); setValue('')}}>
+        <option value="fixed">{text.fixed}</option><option value="percentage">{text.percentage}</option>
+      </select>
+    </label>
+    <label className="mt-3 flex flex-col gap-1 text-label font-bold text-warning-ink">
+      <span>{mode === 'percentage' ? text.rate : copy.chargeAmount}</span>
+      <MoneyInput value={value} min="0" disabled={disabled} aria-invalid={value !== '' && !ready}
+        onChange={event => setValue(event.target.value)} className="bg-surface-card" />
+    </label>
+    {mode === 'percentage' ? <p className="mt-2 text-xs text-warning-ink">{text.basis} <Money value={settlement.grossDriverShare} /></p> : null}
+    {ready ? <p className="mt-2 text-sm font-bold text-warning-ink">{text.chargePreview} <Money value={previewMoney} /></p> : null}
+    {value !== '' && !ready ? <p role="alert" className="mt-2 text-sm text-red-700">{text.chargeInvalid}</p> : null}
+    <label className="mt-2 flex flex-col gap-1 text-label font-bold text-warning-ink"><span>{copy.chargeReason}</span>
+      <TextInput value={reason} disabled={disabled} onChange={event => setReason(event.target.value)} className="bg-surface-card" />
+    </label>
+    {ready && !reason.trim() ? <p className="mt-2 text-xs text-warning-ink">{copy.chargeReasonRequired}</p> : null}
+    {applied > 0n || settlement.managerChargeBps ? <p className="mt-2 font-bold text-warning-ink">{copy.chargeApplied} <Money value={settlement.managerCharge ?? '0'} /></p> : null}
+    <div className="mt-2 flex flex-wrap gap-2">
+      <Button variant="ghost" disabled={disabled || !ready || !reason.trim()} onClick={() => {
+        void onSave(mode === 'fixed' ? value.trim() : '0.00', reason.trim(), mode === 'percentage' ? Number(rate) : undefined).then(saved => {if (saved) setReason('')})
+      }}>{copy.chargeSave}</Button>
+      {applied > 0n || settlement.managerChargeBps ? <Button variant="ghost" disabled={disabled} onClick={() => {
+        void onSave('0.00', null).then(saved => {if (saved) {setMode('fixed');setValue('');setReason('')}})
+      }}>{copy.chargeClear}</Button> : null}
     </div>
-  )
+  </div>
 }
 
 interface CloseApprovalWorkspaceProps {
@@ -1943,6 +1950,7 @@ interface CloseApprovalWorkspaceProps {
   who: { driver: string | null; vehicle: string | null }
   settlement: SettlementView | null
   settlementLoadError: string | null
+  reviewLoadError: string | null
   refreshing: boolean
   busy: boolean
   error: string | null
@@ -1963,13 +1971,16 @@ interface CloseApprovalWorkspaceProps {
   onBack(): void
   onRefresh(): void
   onRevise(body: Record<string, unknown>): Promise<boolean>
-  onSetManagerCharge(amount: string, reason: string | null): Promise<boolean>
+  onSetManagerCharge(amount: string, reason: string | null, percentBps?: number): Promise<boolean>
   onManagerRead(pkg: 'start' | 'end', batteryId: string, percent: number): Promise<void>
   onApprove(): Promise<void>
   onForceApprove(): Promise<void>
   orderRereads: Record<string, ManagerOrderEvidenceRereadResponse>
   onRereadOrder(target: ManagerOrderEvidenceRereadTarget, slot: string, reason: string): Promise<void>
   pendingTimingDraftKeys: ReadonlySet<string>
+  cashFloatEditing: boolean
+  onCashFloatEditing(value: boolean): void
+  onCorrectCashFloat(input: Parameters<ReturnType<typeof useApp>['api']['adjustCashFloat']>[1]): Promise<boolean>
   onTimingDraftPending(key: string, pending: boolean): void
   onRequestRephoto(): Promise<void>
   onSendBack(): Promise<void>
@@ -1982,6 +1993,7 @@ function CloseApprovalWorkspace({
   who,
   settlement,
   settlementLoadError,
+  reviewLoadError,
   refreshing,
   busy,
   error,
@@ -2009,6 +2021,9 @@ function CloseApprovalWorkspace({
   orderRereads,
   onRereadOrder,
   pendingTimingDraftKeys,
+  cashFloatEditing,
+  onCashFloatEditing,
+  onCorrectCashFloat,
   onTimingDraftPending,
   onRequestRephoto,
   onSendBack,
@@ -2017,12 +2032,16 @@ function CloseApprovalWorkspace({
   const copy = closeWorkspaceCopy(lang)
   const operationCopy = operationReviewCopy(lang)
   const cashDeductions = review.cashDeductions ?? []
+  const missingFigures = missingClosingFigures(review.endPackage)
+  const snapshotUnavailable = Boolean(reviewLoadError)
+  const figuresCurrent = missingFigures.length === 0 && !snapshotUnavailable
+  const editsDisabled = busy || refreshing || snapshotUnavailable
   const unresolvedCount = countUnresolvedWindowRows(review.orders, cashDeductions)
   const physicalConfirmationGuard = guardPhysicalSettlementConfirmations(unresolvedCount, {
     walletTransferConfirmed,
     cashSettlementConfirmed,
   })
-  const physicalConfirmationsLocked = !physicalConfirmationGuard.allowed
+  const physicalConfirmationsLocked = !physicalConfirmationGuard.allowed || cashFloatEditing
 
   // A previous tick belongs to a financial statement that is no longer actionable once an
   // unresolved timestamp appears. Clear the source state as well as rendering guarded values so
@@ -2062,14 +2081,15 @@ function CloseApprovalWorkspace({
    * the button and says nothing has become impossible to write. Two used to exist.
    */
   const blockerInput = {
-    settlementReady: deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
-    settlementLoaded: settlement !== null,
+    settlementReady: !reviewLoadError && !settlementLoadError && deferralMatchesSettlement && settlementApprovalReady(settlement, settlementDraft),
+    settlementLoaded: settlement !== null && !reviewLoadError && !settlementLoadError,
     deferralMatches: deferralMatchesSettlement,
     confirmationsComplete:
       physicalConfirmationGuard.walletTransferConfirmed && physicalConfirmationGuard.cashSettlementConfirmed,
     unresolvedOperationCount: unresolvedCount,
     managerBatteryReadingCount,
     pendingTimingDraftCount: pendingTimingDraftKeys.size,
+    cashFloatEditing,
     refreshing,
     forcePrepared,
     forceReason: settlementDraft.varianceReason,
@@ -2089,15 +2109,17 @@ function CloseApprovalWorkspace({
   const lookupDuplicateRow = (target: DuplicateChoiceTarget): DuplicateChoiceRow | null => {
     if (target.kind === 'order') {
       const found = orders.find((item) => item.providerOrderNo === target.providerOrderNo)
-      return found ? duplicateRowFromOrder(found) : null
+      return found ? { ...duplicateRowFromOrder(found), pendingTimingDraft: pendingTimingDraftKeys.has(`order:${found.providerOrderNo}`) } : null
     }
     const found = cashDeductions.find((item) => item.id === target.id)
-    return found ? duplicateRowFromDeduction(found) : null
+    return found ? { ...duplicateRowFromDeduction(found), pendingTimingDraft: pendingTimingDraftKeys.has(`cash_deduction:${found.id}`) } : null
   }
   const summary = summarizeOrders(orders)
-  const attentionOrders = orders.filter(orderNeedsAttention)
-  const ordinaryOrders = orders.filter((order) => !orderNeedsAttention(order))
-  const attentionCount = attentionOrders.length + cashDeductions.length
+  const attentionOrders = orders.filter((order) => orderNeedsAttention(order) && !operationReviewResolved(order))
+  const ordinaryOrders = orders.filter((order) => !attentionOrders.includes(order))
+  const attentionDeductions = cashDeductions.filter((row) => !operationReviewResolved(row))
+  const resolvedDeductions = cashDeductions.filter(operationReviewResolved)
+  const attentionCount = attentionOrders.length + attentionDeductions.length
   const dashboardEvidence = review.media
     .filter((item) => item.package === 'end' && splitSlot(item.slot).base === 'dashboard')
     .sort((left, right) => splitSlot(left.slot).n - splitSlot(right.slot).n)
@@ -2107,6 +2129,7 @@ function CloseApprovalWorkspace({
       ? review.endPackage.odometerKm - review.startPackage.odometerKm
       : null
   const evidenceHasAnomaly =
+    missingFigures.length > 0 ||
     odoDelta === null ||
     odoDelta <= 0 ||
     Boolean(review.endPackage.odometerAnomalyConfirmedAt) ||
@@ -2127,14 +2150,14 @@ function CloseApprovalWorkspace({
         : 'text-slate-700'
   const { verdict: br1State } = br1Verdict(review.br1)
   const readyTone =
-    refreshing || unresolvedCount > 0 || managerBatteryReadingCount > 0 || pendingTimingDraftKeys.size > 0
+    refreshing || snapshotUnavailable || missingFigures.length > 0 || unresolvedCount > 0 || managerBatteryReadingCount > 0 || pendingTimingDraftKeys.size > 0 || cashFloatEditing
       ? 'amber'
       : approvalReady
         ? 'green'
         : 'slate'
   const readyLabel = refreshing
     ? copy.recalculating
-    : unresolvedCount > 0 || managerBatteryReadingCount > 0 || pendingTimingDraftKeys.size > 0
+    : snapshotUnavailable || missingFigures.length > 0 || unresolvedCount > 0 || managerBatteryReadingCount > 0 || pendingTimingDraftKeys.size > 0 || cashFloatEditing
       ? copy.needsAttention
       : approvalReady
         ? copy.ready
@@ -2157,6 +2180,30 @@ function CloseApprovalWorkspace({
         </div>
         <Badge tone={readyTone}>{readyLabel}</Badge>
       </header>
+
+      {reviewLoadError ? (
+        <div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900">
+          <p>{copy.refreshFailed}</p>
+          <p className="mt-1 text-xs">{explainError(reviewLoadError, t)}</p>
+          <Button variant="ghost" className="mt-2" disabled={busy || refreshing} onClick={onRefresh}>{t.common.retry}</Button>
+        </div>
+      ) : refreshing ? <p role="status" className="rounded-lg bg-sky-50 p-3 text-sm text-sky-900">{copy.recalculating}</p> : null}
+      {missingFigures.length > 0 ? (
+        <div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+          <p className="font-bold">{copy.missingFiguresTitle}</p>
+          <p className="mt-1">{copy.missingFiguresHint} {missingFigures.map((field) => field === 'cash' ? t.shift.cashHandover : t.shift.walletBalance).join(' · ')}</p>
+        </div>
+      ) : null}
+
+      <CloseReferencePanel shiftId={review.id} orders={review.orders} version={review.br1.ordersHash} />
+      <CashFloatCorrection
+        currentTotal={review.startPackage.floatTotal}
+        disabled={editsDisabled}
+        editing={cashFloatEditing}
+        onEditing={onCashFloatEditing}
+        onSave={onCorrectCashFloat}
+      />
+      {cashFloatEditing ? <p role="status" className="text-sm text-ink-muted">{t.approval.cashFloatCorrection.unsaved}</p> : null}
 
       {/*
         TWO COLUMNS FROM 1536px, NOT 1280px. The nav rail is `w-60` and goes static at 1024px, so at
@@ -2200,7 +2247,7 @@ function CloseApprovalWorkspace({
                     distanceMetres={distanceByOrderNo.get(order.providerOrderNo)}
                     index={orders.indexOf(order) + 1 || index + 1}
                     businessDate={day}
-                    disabled={busy || refreshing}
+                    disabled={editsDisabled}
                     copy={copy}
                     operationCopy={operationCopy}
                     onRevise={onRevise}
@@ -2214,12 +2261,12 @@ function CloseApprovalWorkspace({
                     onTimingDraftPending={(pending) => onTimingDraftPending(`order:${order.providerOrderNo}`, pending)}
                   />
                 ))}
-                {cashDeductions.map((deduction) => (
+                {attentionDeductions.map((deduction) => (
                   <DeductionAttentionCard
                     key={deduction.id}
                     lookupDuplicateRow={lookupDuplicateRow}
                     deduction={deduction}
-                    disabled={busy || refreshing}
+                    disabled={editsDisabled}
                     copy={copy}
                     operationCopy={operationCopy}
                     onRevise={onRevise}
@@ -2262,7 +2309,7 @@ function CloseApprovalWorkspace({
                           distanceMetres={distanceByOrderNo.get(order.providerOrderNo)}
                           index={orders.indexOf(order) + 1}
                           businessDate={day}
-                          disabled={busy || refreshing}
+                          disabled={editsDisabled}
                           copy={copy}
                           operationCopy={operationCopy}
                           onRevise={onRevise}
@@ -2283,9 +2330,21 @@ function CloseApprovalWorkspace({
               </ul>
             </details>
 
+            {resolvedDeductions.length > 0 ? <details className="mt-3 rounded-lg border border-slate-200 p-3">
+              <summary className={`cursor-pointer text-sm font-bold text-brand ${FOCUS_RING}`}>{copy.resolvedDeductions.replace('{n}', String(resolvedDeductions.length))}</summary>
+              {resolvedDeductions.map((deduction) => <DeductionAttentionCard
+                key={deduction.id} deduction={deduction} disabled={editsDisabled} copy={copy} operationCopy={operationCopy}
+                onRevise={onRevise} dashboardEvidence={dashboardEvidence}
+                duplicateHints={duplicateHintsForDeduction(review.duplicateHints, deduction.id)} lookupDuplicateRow={lookupDuplicateRow}
+                {...(orderRereads[`cash_deduction:${deduction.id}`] ? { reread: orderRereads[`cash_deduction:${deduction.id}`] } : {})}
+                onReread={onRereadOrder} timingDraftPending={pendingTimingDraftKeys.has(`cash_deduction:${deduction.id}`)}
+                onTimingDraftPending={(pending) => onTimingDraftPending(`cash_deduction:${deduction.id}`, pending)}
+              />)}
+            </details> : null}
+
             <details className="mt-3 rounded-lg border border-slate-200 p-3">
               <summary className={`cursor-pointer text-sm font-bold text-brand ${FOCUS_RING}`}>{copy.addOrder}</summary>
-              <AddOrderForm shiftId={review.id} onAdded={onRefresh} />
+              <AddOrderForm shiftId={review.id} onAdded={onRefresh} disabled={editsDisabled} />
             </details>
           </Card>
 
@@ -2317,7 +2376,7 @@ function CloseApprovalWorkspace({
                   <Figure label={t.shift.cashHandover} value={review.endPackage.cashDeclared ?? '—'} />
                   <Figure label={t.shift.walletBalance} value={review.endPackage.walletDeclared ?? '—'} />
                 </dl>
-                <ReviseFigures shiftId={review.id} review={review} onRevised={onRefresh} />
+                <ReviseFigures shiftId={review.id} review={review} onRevised={onRefresh} disabled={editsDisabled} />
                 <OcrDeltaLines deltas={[
                   ...scalarDelta(t.shift.odometer, review.endPackage.odometerKmOcr == null ? null : String(review.endPackage.odometerKmOcr), review.endPackage.odometerKm === null ? null : String(review.endPackage.odometerKm)),
                   ...scalarDelta(t.shift.walletBalance, review.endPackage.walletDeclaredOcr, review.endPackage.walletDeclared),
@@ -2366,12 +2425,12 @@ function CloseApprovalWorkspace({
         </main>
 
         <aside className={`min-w-0 2xl:order-2 2xl:sticky 2xl:top-2 ${unresolvedCount > 0 ? 'order-2' : 'order-1'}`}>
-          <Card className={`ring-2 ${br1State === 'balanced' ? 'ring-emerald-300' : 'ring-amber-300'}`}>
+          <Card className={`ring-2 ${br1State === 'balanced' && missingFigures.length === 0 && !snapshotUnavailable ? 'ring-emerald-300' : 'ring-amber-300'}`}>
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-bold text-slate-500">{copy.settlementAndBalance}</p>
-                <p className={`mt-1 text-lg font-extrabold ${br1State === 'balanced' ? 'text-emerald-700' : 'text-amber-800'}`}>
-                  {br1State === 'balanced' ? t.br1.balanced : t.br1.notBalanced}
+                <p className={`mt-1 text-lg font-extrabold ${br1State === 'balanced' && figuresCurrent ? 'text-emerald-700' : 'text-amber-800'}`}>
+                  {missingFigures.length > 0 ? copy.missingFiguresTitle : snapshotUnavailable ? copy.needsAttention : br1State === 'balanced' ? t.br1.balanced : t.br1.notBalanced}
                 </p>
               </div>
               <Badge tone={readyTone}>{readyLabel}</Badge>
@@ -2379,10 +2438,10 @@ function CloseApprovalWorkspace({
 
             <dl className="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-sm">
               <Figure label={t.br1.expected} value={formatMinor(add(parseMinor(review.br1.expectedCash), parseMinor(review.br1.expectedWallet)))} />
-              <Figure label={t.br1.declared} value={formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
+              <Figure label={t.br1.declared} value={missingFigures.length > 0 ? '—' : formatMinor(add(parseMinor(review.endPackage.cashDeclared || '0'), parseMinor(review.endPackage.walletDeclared || '0')))} />
               <div className="col-span-2 flex items-baseline justify-between border-t border-slate-200 pt-2">
-                <dt className={`font-bold ${differenceColour}`}>{t.br1[difference.direction]}</dt>
-                <dd dir="ltr" className={`num text-2xl font-extrabold ${differenceColour}`}>{difference.amountText}</dd>
+                <dt className={`font-bold ${figuresCurrent ? differenceColour : 'text-slate-500'}`}>{figuresCurrent ? t.br1[difference.direction] : copy.unconfirmedBalance}</dt>
+                <dd dir="ltr" className={`num text-2xl font-extrabold ${figuresCurrent ? differenceColour : 'text-slate-500'}`}>{figuresCurrent ? difference.amountText : '—'}</dd>
               </div>
               {/*
                 WHERE the difference sits — money rule 4's other two terms, which this screen has
@@ -2391,7 +2450,7 @@ function CloseApprovalWorkspace({
                 moves these apart on a perfectly correct shift. `br1Verdict` suppresses its own
                 `split_off` verdict for that reason; colouring them would alarm on every honest close.
               */}
-              {split.cash !== '' ? (
+              {figuresCurrent && split.cash !== '' ? (
                 <div className="col-span-2 border-t border-slate-200 pt-2 text-xs text-slate-600">
                   <p dir="ltr" className="num text-start">
                     {t.br1.whereItSits
@@ -2475,92 +2534,9 @@ function CloseApprovalWorkspace({
 
             {settlement ? (
               <>
-                <div className="mt-3 rounded-xl border border-violet-200 bg-violet-50 p-3">
-                  <p className="text-sm font-extrabold text-violet-950">{t.settlement.receivableDeferralTitle}</p>
-                  <p className="mt-1 text-xs text-violet-900">{t.settlement.receivableDeferralHint}</p>
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
-                    <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
-                      <span>{t.settlement.cashReceivableDeferred}</span>
-                      <MoneyInput
-                        value={cashReceivableDeferred}
-                        min="0"
-                        aria-invalid={!isNonnegativeSettlementMoney(cashReceivableDeferred)}
-                        disabled={busy}
-                        onChange={(event) => onCashReceivableDeferred(event.target.value)}
-                        className="bg-surface-card"
-                      />
-                      <span className="font-normal text-violet-800">
-                        {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.cashClaimToOffice)} />
-                      </span>
-                    </label>
-                    <label className="flex flex-col gap-1 text-xs font-bold text-violet-950">
-                      <span>{t.settlement.walletReceivableDeferred}</span>
-                      <MoneyInput
-                        value={walletReceivableDeferred}
-                        min="0"
-                        aria-invalid={!isNonnegativeSettlementMoney(walletReceivableDeferred)}
-                        disabled={busy}
-                        onChange={(event) => onWalletReceivableDeferred(event.target.value)}
-                        className="bg-surface-card"
-                      />
-                      <span className="font-normal text-violet-800">
-                        {t.settlement.receivableMaximum}: <Money value={positiveSettlementClaim(settlement.walletClaimToOffice)} />
-                      </span>
-                    </label>
-                  </div>
-                  {refreshing ? (
-                    <p className="mt-2 text-xs font-semibold text-violet-800">{t.settlement.receivableRecalculating}</p>
-                  ) : settlementLoadError ? (
-                    <p role="alert" className="mt-2 text-xs font-semibold text-red-700">
-                      {explainError(settlementLoadError, t)}
-                    </p>
-                  ) : null}
-                </div>
-
-                {parseMinor(settlement.maximumCashShortageReceivable) > 0n ? (
-                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3">
-                    <p className="text-sm font-extrabold text-red-950">{t.settlement.shortageReceivableTitle}</p>
-                    <p className="mt-1 text-xs text-red-900">{t.settlement.shortageReceivableHint}</p>
-                    <label className="mt-3 flex flex-col gap-1 text-xs font-bold text-red-950">
-                      <span>{t.settlement.cashShortageReceivable}</span>
-                      <MoneyInput
-                        value={cashShortageReceivable}
-                        min="0"
-                        aria-invalid={!isNonnegativeSettlementMoney(cashShortageReceivable)}
-                        disabled={busy}
-                        onChange={(event) => onCashShortageReceivable(event.target.value)}
-                        className="bg-surface-card"
-                      />
-                      <span className="font-normal text-red-800">
-                        {t.settlement.receivableMaximum}: <Money value={settlement.maximumCashShortageReceivable} />
-                      </span>
-                    </label>
-                    {/*
-                      One press for the whole amount. This block only appears when the employee ends
-                      the shift owing the office, which is rare — one of eight shifts on 2026-08-30 —
-                      so the manager meets it seldom and should not have to retype a figure the
-                      settlement already knows. Typing stays available for a part payment.
-                    */}
-                    {parseMinor(cashShortageReceivable.trim() || '0') !==
-                      parseMinor(settlement.maximumCashShortageReceivable) ? (
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => onCashShortageReceivable(settlement.maximumCashShortageReceivable)}
-                        className="mt-2 inline-flex min-h-9 items-center rounded-lg border border-red-300 bg-surface-card px-3 text-xs font-bold text-red-900 disabled:opacity-40"
-                      >
-                        {t.settlement.shortageReceivableAll}
-                      </button>
-                    ) : null}
-                    <p className="mt-2 rounded-lg bg-surface-card/80 px-3 py-2 text-xs font-semibold text-red-900">
-                      {t.settlement.shortageReceivableOfficeUnchanged}
-                    </p>
-                  </div>
-                ) : null}
-
                 {physicalConfirmationsLocked ? (
                   <p role="alert" className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm font-bold text-amber-950">
-                    {copy.resolveUnknownBeforeHandover.replace('{n}', String(unresolvedCount))}
+                    {cashFloatEditing ? t.approval.cashFloatCorrection.unsaved : copy.resolveUnknownBeforeHandover.replace('{n}', String(unresolvedCount))}
                   </p>
                 ) : null}
                 <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-1">
@@ -2570,7 +2546,7 @@ function CloseApprovalWorkspace({
                     amount={settlement.walletAmount}
                     confirmedLabel={t.settlement.walletConfirmed}
                     confirmed={physicalConfirmationGuard.walletTransferConfirmed}
-                    disabled={busy || refreshing || physicalConfirmationsLocked}
+                    disabled={busy || refreshing || physicalConfirmationsLocked || Boolean(settlementLoadError)}
                     tone={settlement.walletAction === 'fund' ? 'amber' : 'sky'}
                     onChange={onWalletTransferConfirmed}
                   />
@@ -2580,7 +2556,7 @@ function CloseApprovalWorkspace({
                     amount={settlement.cashAmount}
                     confirmedLabel={t.settlement.cashConfirmed}
                     confirmed={physicalConfirmationGuard.cashSettlementConfirmed}
-                    disabled={busy || refreshing || physicalConfirmationsLocked}
+                    disabled={busy || refreshing || physicalConfirmationsLocked || Boolean(settlementLoadError)}
                     tone={settlement.cashAction === 'pay' ? 'amber' : 'green'}
                     onChange={onCashSettlementConfirmed}
                   />
@@ -2672,6 +2648,13 @@ function CloseApprovalWorkspace({
 }
 
 interface CloseWorkspaceCopy {
+  unconfirmedBalance: string
+  refreshFailed: string
+  missingFiguresTitle: string
+  missingFiguresHint: string
+  resolvedDeductions: string
+  resolvedBadge: string
+  confirmReading: string
   attentionTitle: string
   attentionHint: string
   included: string
@@ -2741,14 +2724,21 @@ interface CloseWorkspaceCopy {
 function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
   if (lang === 'en') {
     return {
+      refreshFailed: 'Could not refresh the review. The displayed snapshot is not current, so editing and approval are paused. Retry the read only; do not repeat a saved decision.',
+      unconfirmedBalance: 'Difference not confirmed',
+      missingFiguresTitle: 'Complete the closing figures',
+      missingFiguresHint: 'A missing reading is not zero. Verify the evidence, then correct these fields under Evidence and details:',
+      resolvedDeductions: 'Show {n} reviewed cash deductions',
+      resolvedBadge: 'Review resolved',
+      confirmReading: 'Confirm this reading',
       attentionTitle: 'Needs your attention',
-      attentionHint: 'Only exceptions and audited changes appear here. An accepted OCR order is not an exception.',
+      attentionHint: 'Unresolved exceptions appear here. Resolved decisions stay in the record below and no longer count as pending work.',
       included: 'Included orders',
       excluded: 'Excluded orders',
-      unresolved: 'Unknown time',
+      unresolved: 'Awaiting review',
       noAttention: 'No operation exceptions. The ordinary orders remain available below.',
-      ordinaryOrders: 'Show {n} ordinary orders',
-      ordinaryHint: 'These rows are included, inside the shift window and unchanged.',
+      ordinaryOrders: 'Show {n} ordinary or reviewed orders',
+      ordinaryHint: 'Includes ordinary orders and reviewed decisions, with their amounts, inclusion status and audit reasons.',
       addOrder: 'Add a missing or manual order',
       evidenceTitle: 'Evidence and details',
       evidenceAnomaly: 'check required',
@@ -2768,13 +2758,13 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       duplicateHintAmountOnly: 'Amounts match only; no clock or route to confirm it.',
       duplicateHintAdvisory: 'A hint only — nothing is counted or excluded automatically. The decision, and the reason, are yours.',
       duplicateChoiceTitle: 'These may be two rows for one delivery',
-      duplicateChoiceMisread: 'Same minute, same route, two different amounts — almost certainly ONE delivery read twice, with one reading wrong. Yallago deducts 20% per delivery, so its payments log will show one deduction here, not two.',
+      duplicateChoiceMisread: 'The recorded minute and route match, but the amounts differ. Compare both original images; this is a possible reading error, not proof of duplication.',
       duplicateChoiceQuestion: 'Which row is the real delivery?',
       duplicateChoiceThisRow: 'This row',
       duplicateChoiceOtherRow: 'The other row',
       duplicateChoiceSave: 'Save — the selected row stays, the other is excluded',
       duplicateChoiceReversible: 'The excluded row keeps its reason and stays in the record. Nothing is deleted.',
-      duplicateChoiceTimedNote: 'carries a printed clock',
+      duplicateChoiceTimedNote: 'has a recorded time; verify its evidence',
       duplicateChoiceNoClock: 'no clock',
       duplicateChoiceIncludedNow: 'counted now',
       duplicateChoiceExcludedNow: 'excluded now',
@@ -2803,18 +2793,25 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
       discardTimingDraft: 'Discard copied time',
       requestReread: 'Request a new photo and AI reading',
       resolveUnknownBeforeHandover:
-        'Resolve the {n} unknown-time operation(s) above before confirming either wallet or cash handover. Any previous confirmations have been cleared.',
+        'Resolve the {n} pending operation review(s) above before confirming either wallet or cash handover. Any previous confirmations have been cleared.',
     }
   }
   return {
+    refreshFailed: 'تعذّر تحديث المراجعة. البيانات المعروضة ليست النسخة الأحدث، لذلك أوقفنا التعديل والاعتماد. أعد تحميل البيانات فقط؛ لا تكرر حفظ قرار سبق حفظه.',
+    unconfirmedBalance: 'الفرق غير محسوم',
+    missingFiguresTitle: 'أكمل أرقام الإغلاق',
+    missingFiguresHint: 'القراءة الناقصة ليست صفراً. تحقق من الدليل ثم صحّح هذه الحقول ضمن «الأدلة والتفاصيل»:',
+    resolvedDeductions: 'عرض {n} حسميات نقدية محسومة',
+    resolvedBadge: 'تم حسم المراجعة',
+    confirmReading: 'تأكيد القراءة الحالية',
     attentionTitle: 'يحتاج انتباهك',
-    attentionHint: 'تظهر هنا الاستثناءات والتعديلات المدققة فقط. طلب OCR المقبول ليس استثناءً.',
+    attentionHint: 'تظهر هنا الاستثناءات التي لم تُحسم. القرارات المحسومة تبقى في السجل أدناه ولا تُحسب ضمن المراجعات المتبقية.',
     included: 'طلبات مشمولة',
     excluded: 'طلبات مستبعدة',
-    unresolved: 'توقيت غير محسوم',
+    unresolved: 'بانتظار المراجعة',
     noAttention: 'لا توجد استثناءات في العمليات. تبقى الطلبات الطبيعية متاحة أدناه.',
-    ordinaryOrders: 'عرض {n} طلبات طبيعية',
-    ordinaryHint: 'هذه الطلبات مشمولة وداخل نافذة النوبة ولم تُعدّل.',
+    ordinaryOrders: 'عرض {n} طلبات طبيعية أو محسومة',
+    ordinaryHint: 'يتضمن الطلبات الطبيعية والقرارات المحسومة، مع مبالغها وحالة احتسابها وأسباب القرارات.',
     addOrder: 'إضافة طلب ناقص أو يدوي',
     evidenceTitle: 'الأدلة والتفاصيل',
     evidenceAnomaly: 'تحتاج فحصاً',
@@ -2834,13 +2831,13 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     duplicateHintAmountOnly: 'التطابق على المبلغ فقط؛ لا وقت ولا مسار يؤكّده.',
     duplicateHintAdvisory: 'إشارة فقط — لا شيء يُحتسب أو يُستبعد تلقائياً. القرار والسبب لك.',
     duplicateChoiceTitle: 'يُحتمل أنّ هذين صفّان لتوصيلة واحدة',
-    duplicateChoiceMisread: 'نفس الدقيقة ونفس المسار، ومبلغان مختلفان — على الأرجح توصيلة واحدة قُرئت مرّتين وإحدى القراءتين خاطئة. يلاغو يحسم ٢٠٪ عن كل توصيلة، فسجلّ المدفوعات سيُظهر هنا حسماً واحداً لا حسمين.',
+    duplicateChoiceMisread: 'الوقت والمسار المسجّلان متطابقان والمبلغان مختلفان. قارن الصورتين الأصليتين؛ قد يكون خطأ قراءة، لكنه ليس إثباتاً للتكرار.',
     duplicateChoiceQuestion: 'أيّ الصفّين هو التوصيلة الحقيقية؟',
     duplicateChoiceThisRow: 'هذا الصفّ',
     duplicateChoiceOtherRow: 'الصفّ المقابل',
     duplicateChoiceSave: 'احفظ — يبقى المحدَّد ويُستبعد الآخر',
     duplicateChoiceReversible: 'الصفّ المستبعَد يبقى في السجلّ بسببه، ولا يُحذف.',
-    duplicateChoiceTimedNote: 'يحمل وقتاً مطبوعاً',
+    duplicateChoiceTimedNote: 'له وقت مسجّل؛ تحقّق من دليله',
     duplicateChoiceNoClock: 'بلا وقت',
     duplicateChoiceIncludedNow: 'محتسَب الآن',
     duplicateChoiceExcludedNow: 'مستبعَد الآن',
@@ -2869,7 +2866,7 @@ function closeWorkspaceCopy(lang: 'ar' | 'en'): CloseWorkspaceCopy {
     discardTimingDraft: 'إلغاء الوقت المنسوخ',
     requestReread: 'طلب إعادة تصوير وقراءة AI',
     resolveUnknownBeforeHandover:
-      'احسم توقيت {n} عملية أعلاه قبل تأكيد تحويل المحفظة أو معاملة الكاش. أُلغيت أي تأكيدات سابقة.',
+      'احسم مراجعة {n} عملية أعلاه قبل تأكيد تحويل المحفظة أو معاملة الكاش. أُلغيت أي تأكيدات سابقة.',
   }
 }
 
@@ -2977,10 +2974,12 @@ function duplicateRowFromOrder(order: Review['orders'][number]): DuplicateChoice
     occurredMinute: order.occurredMinute ?? null,
     occurredDate: order.occurredDate ?? null,
     included: order.included !== false,
+    requiresReview: isUnresolvedWindowRow(order),
     evidenceSlot: order.evidenceSlot,
     evidenceMediaId: order.evidenceMediaId,
     positionEvidence: order.positionEvidence,
     hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
+    route: (order.points ?? []).map((point) => point.label).filter(Boolean).join(' ← '),
   }
 }
 
@@ -2992,10 +2991,12 @@ function duplicateRowFromDeduction(
     occurredMinute: deduction.occurredMinute,
     occurredDate: deduction.occurredDate,
     included: deduction.included,
+    requiresReview: isUnresolvedWindowRow(deduction),
     evidenceSlot: deduction.evidenceSlot,
     evidenceMediaId: deduction.evidenceMediaId,
     positionEvidence: deduction.positionEvidence,
     hasScanOrigin: deductionHasDashboardEvidenceOrigin(deduction),
+    route: [deduction.pointA, deduction.pointB].filter(Boolean).join(' ← '),
   }
 }
 
@@ -3045,9 +3046,11 @@ function DuplicateChoiceColumn({
         <Money value={side.row.amount} />
       </p>
       <p className="num text-xs text-slate-700">
+        {side.row.occurredDate || '—'} ·{' '}
         {side.row.occurredMinute || copy.duplicateChoiceNoClock}
         {timed ? <span className="text-slate-500"> · {copy.duplicateChoiceTimedNote}</span> : null}
       </p>
+      {side.row.route ? <p className="mt-1 break-words text-xs text-ink-muted">{side.row.route}</p> : null}
       <p className="num text-[11px] text-slate-500">
         {copy.duplicateChoicePage
           .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
@@ -3063,7 +3066,7 @@ function DuplicateChoiceColumn({
         position={side.row.positionEvidence}
       />
       <p className={`mt-1 text-[11px] font-semibold ${side.row.included ? 'text-emerald-700' : 'text-slate-500'}`}>
-        {side.row.included ? copy.duplicateChoiceIncludedNow : copy.duplicateChoiceExcludedNow}
+        {side.row.requiresReview ? copy.unresolved : side.row.included ? copy.duplicateChoiceIncludedNow : copy.duplicateChoiceExcludedNow}
       </p>
     </div>
   )
@@ -3104,6 +3107,14 @@ function DuplicateChoicePanel({
   const { t, lang } = useApp()
   const groupName = useId()
   const [keepKey, setKeepKey] = useState('')
+  useEffect(() => { setKeepKey('') }, [
+    view.self.key, view.counterpart.key,
+    view.self.row.included, view.counterpart.row.included,
+    view.self.row.amount, view.counterpart.row.amount,
+    view.self.row.occurredDate, view.counterpart.row.occurredDate,
+    view.self.row.occurredMinute, view.counterpart.row.occurredMinute,
+  ])
+  const decisionDisabled = disabled || !!view.self.row.pendingTimingDraft || !!view.counterpart.row.pendingTimingDraft
   const factLabel = {
     amount: copy.duplicateFactAmount,
     minute: copy.duplicateFactMinute,
@@ -3172,11 +3183,11 @@ function DuplicateChoicePanel({
               name={groupName}
               value={side.key}
               checked={keepKey === side.key}
-              disabled={disabled}
+              disabled={decisionDisabled}
               onChange={() => setKeepKey(side.key)}
               className="size-4 shrink-0"
             />
-            <span className="num min-w-0 flex-1 truncate">
+            <span className="num min-w-0 flex-1 break-words">
               {side.row.occurredMinute || copy.duplicateChoiceNoClock} · <Money value={side.row.amount} /> ·{' '}
               {copy.duplicateChoicePage
                 .replace('{page}', slotLabel(side.slot, t.shift.slotNames, lang))
@@ -3187,14 +3198,15 @@ function DuplicateChoicePanel({
       </fieldset>
 
       {settled ? <p className="mt-2 text-slate-600">{copy.duplicateChoiceSettled}</p> : null}
-      <Button
-        variant="primary"
-        className="mt-2"
-        disabled={disabled || revision === null || reason.trim() === ''}
-        onClick={() => void onSave(revision)}
-      >
-        {copy.duplicateChoiceSave}
-      </Button>
+      {revision ? <OperationDecisionPreview
+        rows={sides.map((side) => ({ key: side.key, kind: side.target.kind, amount: side.row.amount, included: side.row.included, proposedIncluded: side.key === keepKey, requiresReview: side.row.requiresReview, date: side.row.occurredDate, minute: side.row.occurredMinute, route: side.row.route }))}
+        reason={reason}
+        lang={lang}
+        disabled={decisionDisabled}
+        onApply={() => onSave(revision)}
+        onCancel={() => setKeepKey('')}
+      /> : null}
+      {view.self.row.pendingTimingDraft || view.counterpart.row.pendingTimingDraft ? <p className="mt-2 text-ink-muted">{operationDecisionCopy(lang).draftWarning}</p> : null}
       <p className="mt-1 text-amber-800">{copy.duplicateChoiceReversible}</p>
     </section>
   )
@@ -3239,6 +3251,8 @@ function OrderAttentionCard({
   const confirm = useConfirm()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
+  const [decision, setDecision] = useState<'include' | 'duplicate' | null>(null)
+  const [timingIncludePreview, setTimingIncludePreview] = useState(false)
   const [timingDate, setTimingDate] = useState(order.occurredDate ?? businessDate)
   const [timingMinute, setTimingMinute] = useState(order.occurredMinute ?? '')
   const [timingEditorOpen, setTimingEditorOpen] = useState(false)
@@ -3249,7 +3263,7 @@ function OrderAttentionCard({
       hasScanOrigin: orderHasDashboardEvidenceOrigin(order),
     }),
   )
-  const reasonReady = reason.trim() !== ''
+  const reasonReady = decisionReasonReady(reason)
   const canRereadStoredDashboard = orderHasDashboardEvidenceOrigin(order)
   const evidenceOrigin: RowEvidenceOriginInput = {
     evidenceSlot: order.evidenceSlot,
@@ -3264,7 +3278,7 @@ function OrderAttentionCard({
     lookupDuplicateRow,
   )
   const reviewReasons = order.closeDraftReviewReasons ?? []
-  const date = order.occurredDate ?? businessDate
+  const date = order.occurredDate ?? '—'
   const route = [
     (order.points ?? []).find((point) => point.role === 'start')?.label,
     (order.points ?? []).find((point) => point.role === 'end')?.label,
@@ -3299,11 +3313,13 @@ function OrderAttentionCard({
     setTimingDate(order.occurredDate ?? businessDate)
     setTimingMinute(order.occurredMinute ?? '')
     setTimingEditorOpen(false)
+    setTimingIncludePreview(false)
     onTimingDraftPending(false)
   }
   const saveTimingDraft = async (decision: 'preserve' | 'include'): Promise<void> => {
     const saved = await revise(timingRevision(decision))
     if (!saved) return
+    setTimingIncludePreview(false)
     onTimingDraftPending(false)
     setTimingEditorOpen(false)
   }
@@ -3338,7 +3354,7 @@ function OrderAttentionCard({
           {copy.saveTimingPreserve}
         </Button>
         {order.included === false ? (
-          <Button variant="primary" disabled={disabled || !reasonReady || !timingChanged} onClick={() => void saveTimingDraft('include')}>
+          <Button variant="primary" disabled={disabled || !timingChanged} onClick={() => setTimingIncludePreview(true)}>
             {copy.correctAndInclude}
           </Button>
         ) : null}
@@ -3348,11 +3364,17 @@ function OrderAttentionCard({
           </Button>
         ) : null}
       </div>
+      {timingIncludePreview ? <OperationDecisionPreview
+        rows={[{ key: order.providerOrderNo, kind: 'order', amount: order.fee, included: order.included !== false, proposedIncluded: true, requiresReview: isUnresolvedWindowRow(order), date: timingDate || null, minute: timingMinute || null, route }]}
+        reason={reason} lang={lang} disabled={disabled || !timingChanged}
+        onApply={() => saveTimingDraft('include')}
+        onCancel={() => setTimingIncludePreview(false)}
+      /> : null}
     </div>
   )
 
   return (
-    <article className={`min-w-0 rounded-xl border p-3 ${reviewReasons.length > 0 || order.windowStatus === 'unknown' ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-surface-card'}`}>
+    <article className={`min-w-0 rounded-xl border p-3 ${isUnresolvedWindowRow(order) ? 'border-amber-300 bg-amber-50/40' : order.included === false ? 'border-slate-300 bg-slate-50' : 'border-sky-200 bg-surface-card'}`}>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         <span className="num rounded bg-slate-100 px-2 py-1 text-xs font-bold">#{index}</span>
         <div className="min-w-0 flex-1">
@@ -3372,7 +3394,7 @@ function OrderAttentionCard({
       </div>
 
       <div className="mt-2 flex flex-wrap gap-1.5">
-        {order.windowStatus ? <WindowStatusBadge status={order.windowStatus} copy={operationCopy} /> : null}
+        {operationReviewResolved(order) ? <Badge tone="green">{copy.resolvedBadge}</Badge> : order.windowStatus ? <WindowStatusBadge status={order.windowStatus} copy={operationCopy} /> : null}
         {order.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {order.removedAt ? <Badge tone="red">{copy.removedBadge}</Badge> : order.included === false ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {order.kind === 'manual' ? <Badge tone="sky">{operationCopy.manual}</Badge> : null}
@@ -3409,13 +3431,14 @@ function OrderAttentionCard({
           view={duplicateChoice}
           pages={dashboardEvidence}
           copy={copy}
-          disabled={disabled}
+          disabled={disabled || timingChanged || timingDraftPending}
           reason={reason}
           onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
         />
       ) : null}
       <div className="mt-2 flex flex-wrap gap-2">
-        {order.included === false ? <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: true })}>{copy.includeException}</Button> : null}
+        {order.included !== false && isUnresolvedWindowRow(order) && !duplicateChoice && !order.removedAt ? <Button variant="ghost" disabled={disabled || timingChanged || timingDraftPending} onClick={() => setDecision('include')}>{copy.confirmReading}</Button> : null}
+        {order.included === false && !order.removedAt ? <Button variant="ghost" disabled={disabled || timingChanged || timingDraftPending} onClick={() => setDecision('include')}>{copy.includeException}</Button> : null}
         {/*
           EVERY included row, not just a manual one. A scanned row's only exclude control used to be
           «تثبيت كتكرار» — so a manager who wanted to leave a real delivery uncounted had to press a
@@ -3445,20 +3468,11 @@ function OrderAttentionCard({
             {copy.removeRow}
           </Button>
         )}
-        {order.kind !== 'manual' ? (
+        {order.kind !== 'manual' && !duplicateChoice ? (
           <Button
             variant="ghost"
-            disabled={disabled || !reasonReady}
-            onClick={() =>
-              void revise(
-                buildOrderDuplicateRevision(
-                  order.occurredDate ?? businessDate,
-                  order.occurredMinute ?? null,
-                  timingDate || null,
-                  timingMinute || null,
-                ),
-              )
-            }
+            disabled={disabled || order.included === false || timingChanged || timingDraftPending || !!order.removedAt}
+            onClick={() => setDecision('duplicate')}
           >
             {copy.markDuplicate}
           </Button>
@@ -3479,6 +3493,13 @@ function OrderAttentionCard({
           </Button>
         ) : null}
       </div>
+      {timingChanged || timingDraftPending ? <p className="mt-2 text-xs text-ink-muted">{operationDecisionCopy(lang).draftWarning}</p> : null}
+      {decision ? <OperationDecisionPreview
+        rows={[{ key: order.providerOrderNo, kind: 'order', amount: order.fee, included: order.included !== false, proposedIncluded: decision === 'include', requiresReview: isUnresolvedWindowRow(order), date: order.occurredDate ?? null, minute: order.occurredMinute ?? null, route }]}
+        reason={reason} lang={lang} disabled={disabled || timingChanged || timingDraftPending}
+        onApply={async () => { if (await revise({ included: decision === 'include' })) setDecision(null) }}
+        onCancel={() => setDecision(null)}
+      /> : null}
       {canRereadStoredDashboard ? (
         <div className="mt-2 rounded-lg border border-sky-200 bg-sky-50 p-2 text-xs">
           <p className="font-semibold text-sky-900">{rereadCopy.fullImageHint}</p>
@@ -3606,6 +3627,7 @@ function DeductionAttentionCard({
   const { t, lang } = useApp()
   const rereadCopy = managerEvidenceRereadCopy(lang)
   const [reason, setReason] = useState('')
+  const [decisionOpen, setDecisionOpen] = useState(false)
   const [selectedEvidenceSlot, setSelectedEvidenceSlot] = useState(() =>
     defaultRereadSlot(dashboardEvidence, {
       evidenceSlot: deduction.evidenceSlot,
@@ -3618,7 +3640,7 @@ function DeductionAttentionCard({
     date: string | null
     minute: string | null
   } | null>(null)
-  const reasonReady = reason.trim() !== ''
+  const reasonReady = decisionReasonReady(reason)
   const canRereadStoredDashboard = deductionHasDashboardEvidenceOrigin(deduction)
   const evidenceOrigin: RowEvidenceOriginInput = {
     evidenceSlot: deduction.evidenceSlot,
@@ -3654,7 +3676,7 @@ function DeductionAttentionCard({
         <span dir="ltr" className="num text-lg font-extrabold text-red-700">−<Money value={deduction.amount} /></span>
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
-        <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />
+        {operationReviewResolved(deduction) ? <Badge tone="green">{copy.resolvedBadge}</Badge> : <WindowStatusBadge status={deduction.windowStatus} copy={operationCopy} />}
         {deduction.windowBasis === 'screen_position' ? <Badge tone="sky">{operationCopy.positionBasis}</Badge> : null}
         {!deduction.included ? <Badge tone="slate">{operationCopy.excluded}</Badge> : null}
         {duplicateHints.length > 0 ? <Badge tone="amber">{copy.duplicateHintBadge}</Badge> : null}
@@ -3675,22 +3697,22 @@ function DeductionAttentionCard({
       ) : null}
       {deduction.decisionReason ? <p className="mt-2 text-xs text-slate-600">{operationCopy.decisionReason}: {deduction.decisionReason}</p> : null}
       <RowEvidencePanel pages={dashboardEvidence} row={evidenceOrigin} position={deduction.positionEvidence} />
+      <label className="mt-3 flex min-w-0 flex-col gap-1">
+        <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
+        <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
+      </label>
       {duplicateChoice ? (
         <DuplicateChoicePanel
           view={duplicateChoice}
           pages={dashboardEvidence}
           copy={copy}
-          disabled={disabled}
+          disabled={disabled || timingDraftPending}
           reason={reason}
           onSave={async (revision) => { if (revision) await onRevise(revision as unknown as Record<string, unknown>) }}
         />
       ) : null}
-      <label className="mt-3 flex min-w-0 flex-col gap-1">
-        <span className="text-xs font-semibold text-slate-600">{copy.auditReason}</span>
-        <TextInput value={reason} onChange={(event) => setReason(event.target.value)} disabled={disabled} maxLength={500} placeholder={copy.auditReasonPlaceholder} className="w-full" />
-      </label>
       <div className="mt-2 flex flex-wrap gap-2">
-        <Button variant="ghost" disabled={disabled || !reasonReady} onClick={() => void revise({ included: !deduction.included })}>
+        <Button variant="ghost" disabled={disabled || timingDraftPending} onClick={() => setDecisionOpen(true)}>
           {deduction.included ? copy.excludeDeduction : copy.includeException}
         </Button>
         {canRereadStoredDashboard ? (
@@ -3709,6 +3731,13 @@ function DeductionAttentionCard({
           </Button>
         ) : null}
       </div>
+      {timingDraftPending ? <p className="mt-2 text-xs text-ink-muted">{operationDecisionCopy(lang).draftWarning}</p> : null}
+      {decisionOpen ? <OperationDecisionPreview
+        rows={[{ key: deduction.id, kind: 'cash_deduction', amount: deduction.amount, included: deduction.included, proposedIncluded: !deduction.included, requiresReview: isUnresolvedWindowRow(deduction), date: deduction.occurredDate, minute: deduction.occurredMinute, route: [deduction.pointA, deduction.pointB].filter(Boolean).join(' ← ') }]}
+        reason={reason} lang={lang} disabled={disabled || timingDraftPending}
+        onApply={async () => { if (await revise({ included: !deduction.included })) setDecisionOpen(false) }}
+        onCancel={() => setDecisionOpen(false)}
+      /> : null}
       {canRereadStoredDashboard ? (
         <div className="mt-2 rounded-lg border border-sky-200 bg-sky-50 p-2 text-xs">
           <p className="font-semibold text-sky-900">{rereadCopy.fullImageHint}</p>
@@ -3814,7 +3843,7 @@ function OrdinaryOrderRow({
   businessDate: string
   distanceMetres?: number | undefined
 }): ReactNode {
-  const { t } = useApp()
+  const { t, lang } = useApp()
   const route = [
     (order.points ?? []).find((point) => point.role === 'start')?.label,
     (order.points ?? []).find((point) => point.role === 'end')?.label,
@@ -3827,13 +3856,14 @@ function OrdinaryOrderRow({
   return (
     <span className="flex min-w-0 items-start gap-3 text-sm">
       <span className="min-w-0 flex-1">
-        <span className="num block font-semibold">{order.occurredDate ?? businessDate} · {order.occurredMinute ?? '—'}</span>
+        <span className="num block font-semibold">{order.occurredDate ?? (order.kind === 'manual' ? businessDate : '—')} · {order.occurredMinute ?? '—'}</span>
         {route ? <span className="block truncate text-xs text-slate-500" title={route}>{route}</span> : null}
       </span>
       {typeof distanceMetres === 'number' ? (
         <span className="num shrink-0 text-xs text-ink-muted" dir="ltr">{formatDistance(distanceMetres, t.shiftPath)}</span>
       ) : null}
-      <Money value={order.fee} className="shrink-0 font-bold" />
+      {operationReviewResolved(order) ? <Badge tone={order.included === false ? 'slate' : 'green'}>{lang === 'ar' ? order.included === false ? 'محسوم — مستبعد' : 'محسوم — مشمول' : order.included === false ? 'Reviewed — excluded' : 'Reviewed — included'}</Badge> : null}
+      <Money value={order.fee} className={`shrink-0 font-bold ${order.included === false ? 'text-slate-500 line-through' : ''}`} />
       {/* The affordance. A `<summary>` with `list-none` shows no marker of its own. */}
       <span aria-hidden="true" className="shrink-0 text-xs text-slate-400">▾</span>
     </span>
@@ -3906,6 +3936,8 @@ function ApprovalBlockers({
         return operationCopy.cannotApproveUnknown.replace('{n}', String(unresolvedCount))
       case 'unsaved_timing_draft':
         return copy.unsavedTimingDraft
+      case 'unsaved_cash_float':
+        return t.approval.cashFloatCorrection.unsaved
       case 'manager_battery_required':
         return copy.managerBatteryRequired.replace('{n}', String(managerBatteryReadingCount))
       case 'force_reason_required':
@@ -3996,7 +4028,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
       correctTiming: 'Correct date / time',
       saveTiming: 'Save timing',
       manualOutsideWindow: 'Manager-entered · outside auto-classification',
-      cannotApproveUnknown: 'Approval is blocked: resolve {n} operation time(s).',
+      cannotApproveUnknown: 'Approval is blocked: resolve {n} pending operation review(s).',
       statuses: {
         in_window: 'Inside window',
         pre_open: 'Before open',
@@ -4037,7 +4069,7 @@ function operationReviewCopy(lang: 'ar' | 'en'): OperationReviewCopy {
     correctTiming: 'تصحيح التاريخ / الوقت',
     saveTiming: 'حفظ التوقيت',
     manualOutsideWindow: 'طلب مدير · خارج التصنيف الآلي',
-    cannotApproveUnknown: 'الاعتماد متوقف: يجب حسم توقيت {n} عملية.',
+    cannotApproveUnknown: 'الاعتماد متوقف: يجب حسم مراجعة {n} عملية.',
     statuses: {
       in_window: 'داخل النافذة',
       pre_open: 'قبل الفتح',
@@ -4247,6 +4279,7 @@ function ReviseFigures({
   shiftId,
   review,
   onRevised,
+  disabled = false,
 }: {
   shiftId: string
   review: {
@@ -4254,6 +4287,7 @@ function ReviseFigures({
     endPackage: { odometerKm: number | null; cashDeclared: string | null; walletDeclared: string | null }
   }
   onRevised(): void
+  disabled?: boolean
 }): ReactNode {
   const { api, t } = useApp()
   const confirm = useConfirm()
@@ -4267,7 +4301,7 @@ function ReviseFigures({
   if (!open) {
     return (
       <div className="mt-2">
-        <Button variant="ghost" onClick={() => setOpen(true)}>
+        <Button variant="ghost" disabled={disabled} onClick={() => setOpen(true)}>
           {t.approval.reviseFigures}
         </Button>
       </div>
@@ -4336,7 +4370,7 @@ function ReviseFigures({
       </div>
       {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
       <div className="flex gap-2">
-        <Button variant="primary" disabled={busy} onClick={save}>
+        <Button variant="primary" disabled={busy || disabled} onClick={save}>
           {busy ? t.common.loading : t.common.save}
         </Button>
         <Button variant="ghost" onClick={() => setOpen(false)}>
@@ -4370,7 +4404,7 @@ interface PointDraft {
  * Adding either kind changes the orders hash, so a manager who was mid-review must look again
  * before he can approve.
  */
-function AddOrderForm({ shiftId, onAdded }: { shiftId: string; onAdded(): void }): ReactNode {
+function AddOrderForm({ shiftId, onAdded, disabled = false }: { shiftId: string; onAdded(): void; disabled?: boolean }): ReactNode {
   const { api, t } = useApp()
   const [kind, setKind] = useState<'yallago' | 'manual'>('yallago')
   const [orderNo, setOrderNo] = useState('')
@@ -4408,6 +4442,7 @@ function AddOrderForm({ shiftId, onAdded }: { shiftId: string; onAdded(): void }
     setPoints((cur) => cur.map((p, j) => (j === i ? { ...p, ...patch } : p)))
 
   const submit = async (): Promise<void> => {
+    if (disabled || busy) return
     setBusy(true)
     setError(null)
     try {
@@ -4540,7 +4575,7 @@ function AddOrderForm({ shiftId, onAdded }: { shiftId: string; onAdded(): void }
 
       {error ? <p className="text-sm font-medium text-red-600">{explainError(error, t)}</p> : null}
       <div>
-        <Button variant="ghost" disabled={busy || !ready} onClick={submit}>
+        <Button variant="ghost" disabled={disabled || busy || !ready} onClick={submit}>
           {isManual ? t.orders.addManualJob : t.orders.addManual}
         </Button>
       </div>
@@ -4863,8 +4898,8 @@ function Lightbox({
   if (!shot) return null
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-scrim/90" role="dialog" aria-modal="true">
-      <div className="flex items-center gap-3 p-3 text-white">
+    <div className="fixed inset-0 z-50 flex h-dvh flex-col overflow-hidden bg-scrim/90" role="dialog" aria-modal="true" aria-label={label(shot.slot)}>
+      <div className="flex shrink-0 flex-wrap items-center gap-3 p-3 text-white">
         <span className="font-semibold">{label(shot.slot)}</span>
         <span className="num text-sm text-white/70">
           {index + 1}/{shots.length}
@@ -4883,15 +4918,10 @@ function Lightbox({
         </div>
       </div>
       {/* Scrolls when zoomed, so a magnified odometer can actually be panned to its digits. */}
-      <div className="flex-1 overflow-auto p-3">
-        <img
-          src={`/api/media/${shot.mediaId}`}
-          alt={label(shot.slot)}
-          className="mx-auto origin-top rounded-lg"
-          style={{ width: `${scale * 100}%`, maxWidth: scale === 1 ? '100%' : 'none' }}
-        />
+      <div className="min-h-0 flex-1 p-3">
+        <FittedEvidenceImage src={`/api/media/${shot.mediaId}`} alt={label(shot.slot)} zoom={scale} />
       </div>
-      <div className="flex items-center justify-between p-3">
+      <div className="flex shrink-0 items-center justify-between p-3">
         <Button variant="ghost" disabled={index === 0} onClick={() => onIndex(index - 1)}>
           ‹
         </Button>

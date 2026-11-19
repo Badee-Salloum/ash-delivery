@@ -77,9 +77,9 @@ export function Money({
   // GROUPED. Seven-digit figures were read by counting zeros — «1500000.00» against «150000.00» —
   // at the moment a manager decides whether a shift balances. Display only: the wire string the
   // caller holds is untouched, and every parse still happens on that.
-  if (currency === undefined) return <span className={`num ${className}`}>{groupThousands(value)}</span>
+  if (currency === undefined) return <span dir="ltr" className={`num ${className}`}>{groupThousands(value)}</span>
   return (
-    <span className={`num ${className}`}>
+    <span dir="ltr" className={`num ${className}`}>
       {groupThousands(value)}
       <CurrencyMark currency={currency} />
     </span>
@@ -89,7 +89,7 @@ export function Money({
 /** The currency mark, from the catalog (`currency.SYP_NEW` / `currency.USD`). */
 function CurrencyMark({ currency }: { currency: Currency }): ReactNode {
   const { t } = useApp()
-  return <span className="ms-1 text-[0.85em] font-normal text-ink-muted">{t.currency[currency]}</span>
+  return <bdi className="ms-1 text-[0.85em] font-normal text-ink-muted">{t.currency[currency]}</bdi>
 }
 
 /** An amount that carries its currency on the wire: `{ currency, amount }`. */
@@ -433,6 +433,19 @@ export function Stat({
 /** A column. A bare string is still accepted, so every existing call site compiles untouched. */
 export type Column = string | { label: string; numeric?: boolean }
 
+/** One paging pattern for financial tables; totals always belong to the complete filtered set. */
+export function FinancePagination({ page, total, pageSize, onChange }: {
+  page: number; total: number; pageSize: number; onChange: (page: number) => void
+}): ReactNode {
+  const { t } = useApp()
+  const pages = Math.max(1, Math.ceil(total / pageSize)), current = Math.min(page, pages - 1)
+  return <nav aria-label={t.financeReview.reportDetails} className="mt-3 flex flex-wrap items-center justify-between gap-3">
+    <Button variant="ghost" disabled={current === 0} onClick={() => onChange(current - 1)}>{t.financeReview.previousPage}</Button>
+    <bdi className="text-label text-ink-muted" aria-live="polite">{current + 1} / {pages}</bdi>
+    <Button variant="ghost" disabled={current + 1 >= pages} onClick={() => onChange(current + 1)}>{t.financeReview.nextPage}</Button>
+  </nav>
+}
+
 const columnLabel = (c: Column): string => (typeof c === 'string' ? c : c.label)
 
 export function Table({
@@ -570,6 +583,7 @@ export function Pending({
   onRetry?: (() => void) | undefined
   retryLabel?: string | undefined
 }): ReactNode {
+  const { t } = useApp()
   /*
    * NOT wrapped in a Card any more.
    *
@@ -593,9 +607,9 @@ export function Pending({
   return (
     // `role="alert"`: a failed load must be announced, not merely coloured.
     <div role="alert" className="rounded-lg border border-danger-line bg-danger-surface p-3">
-      <p className="text-body font-semibold text-danger-ink">{errorLabel}</p>
-      {/* The raw cause stays visible. It is what a manager reads down the phone to whoever can fix it. */}
-      <p className="mt-1 text-label text-ink-secondary">{error}</p>
+      <p className="text-body font-semibold text-danger-ink">{error === 'database_busy' ? t.financeReview.temporaryLoadFailure : errorLabel}</p>
+      {/* Keep diagnostic codes for unknown failures; a known busy read has an actionable message. */}
+      {error !== 'database_busy' ? <p className="mt-1 text-label text-ink-secondary">{error}</p> : null}
       {onRetry ? (
         <div className="mt-3">
           <Button variant="ghost" size="sm" onClick={onRetry}>

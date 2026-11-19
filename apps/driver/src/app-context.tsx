@@ -114,14 +114,15 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
       const me = await api.me()
       setSession(me)
       setSessionExpired(false)
-    } catch {
-      setSession(null)
+    } catch (error) {
+      if ((error as { status?: number }).status === 401) setSession(null)
+      throw error
     }
   }, [api])
 
   // Resume an existing session on load — the cookie may still be valid from a prior visit.
   useEffect(() => {
-    void refreshSession()
+    void refreshSession().catch(() => undefined)
   }, [refreshSession])
 
   const value: AppContextValue = {

@@ -8,32 +8,33 @@ export function useDashboardRead<T>(path: string): {
   error: string | null
   retry(): void
 } {
-  const { api, branchId } = useApp()
+  const { api, branchId, session } = useApp()
   const requests = useRef(new LatestRequestGuard())
-  const [data, setData] = useState<T | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [result, setResult] = useState<{ key: string; data: T | null; error: string | null } | null>(null)
   const [attempt, setAttempt] = useState(0)
+  const key = JSON.stringify([session?.userId, session?.roleKey, session?.businessDate, branchId, path, attempt])
+  const currentKey = useRef(key)
+  currentKey.current = key
 
   const load = useCallback(() => {
     const request = requests.current.next()
-    setData(null)
-    setError(null)
+    setResult({ key, data: null, error: null })
     void api
       .get<T>(path, { cache: 'no-store', signal: request.signal })
       .then((next) => {
-        if (!request.isCurrent()) return
-        setData(next)
+        if (!request.isCurrent() || currentKey.current !== key) return
+        setResult({ key, data: next, error: null })
       })
       .catch((cause: { name?: string; error?: string }) => {
-        if (!request.isCurrent() || cause.name === 'AbortError') return
-        setError(cause.error ?? 'error')
+        if (!request.isCurrent() || currentKey.current !== key || cause.name === 'AbortError') return
+        setResult({ key, data: null, error: cause.error ?? 'error' })
       })
-  }, [api, path])
+  }, [api, path, key])
 
   useEffect(() => {
     load()
     return () => requests.current.cancel()
   }, [load, branchId, attempt])
 
-  return { data, error, retry: () => setAttempt((value) => value + 1) }
+  return { data: result?.key === key ? result.data : null, error: result?.key === key ? result.error : null, retry: () => setAttempt((value) => value + 1) }
 }

@@ -1,9 +1,10 @@
-import type { ReactNode } from 'react'
+import { type ReactNode, useState } from 'react'
 import { minor, parseMinor, type DateRange } from '@ash/domain'
 import { useApp } from '../../app-context.tsx'
 import { drill } from '../../drill.ts'
 import { explainError } from '../../errors.ts'
-import { Card, Money, Pending, Stat, Table } from '../../ui.tsx'
+import { Card, FOCUS_RING, Money, Pending, Stat, Table } from '../../ui.tsx'
+import { ProfitCostDetailsDialog } from './ProfitCostDetailsDialog.tsx'
 import { SectionHeading } from './SectionHeading.tsx'
 import type { FleetPerformance } from './types.ts'
 import { useDashboardRead } from './use-dashboard-read.ts'
@@ -13,6 +14,7 @@ const gpsKm = (metres: number | null, unavailable: string): string =>
 
 export function FleetSection({ range }: { range: DateRange }): ReactNode {
   const { t } = useApp()
+  const [costVehicle, setCostVehicle] = useState<string | null>(null)
   const query = `?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`
   const { data, error, retry } = useDashboardRead<FleetPerformance>(`/dashboard/fleet-performance${query}`)
 
@@ -88,7 +90,7 @@ export function FleetSection({ range }: { range: DateRange }): ReactNode {
                     {data.financeVisible ? (
                       <>
                         <td className="px-3 py-2 text-end"><Money value={vehicle.companyShareSyp ?? '0.00'} /></td>
-                        <td className="px-3 py-2 text-end"><Money value={vehicle.vehicleCostSyp ?? '0.00'} /></td>
+                        <td className="px-3 py-2 text-end">{vehicle.vehicleCostSyp === undefined ? '—' : <button type="button" className={`cursor-pointer text-brand underline ${FOCUS_RING}`} aria-label={`${vehicle.code ?? vehicle.vehicleId} · ${t.dashboard.vehicleCosts}`} onClick={() => setCostVehicle(vehicle.vehicleId)}><Money value={vehicle.vehicleCostSyp} /></button>}</td>
                         <td className={`px-3 py-2 text-end font-semibold ${parseMinor(contribution) < minor(0n) ? 'text-danger-ink' : 'text-success-ink'}`}>
                           <Money value={contribution} />
                         </td>
@@ -106,6 +108,7 @@ export function FleetSection({ range }: { range: DateRange }): ReactNode {
           </Card>
         </div>
       )}
+      {costVehicle ? <ProfitCostDetailsDialog key={`${range.from}:${range.to}:${costVehicle}`} from={range.from} to={range.to} kind="vehicle_cost" vehicleId={costVehicle} vehicleLabel={data?.vehicles.find(vehicle => vehicle.vehicleId === costVehicle)?.code ?? ''} onClose={() => setCostVehicle(null)} /> : null}
     </section>
   )
 }

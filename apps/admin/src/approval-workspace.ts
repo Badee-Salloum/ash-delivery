@@ -1,5 +1,5 @@
 import { add, formatMinor, hasVisibleText, parseMinor } from '@ash/domain'
-import type { OperationWindowStatus } from './operation-window.ts'
+import { isUnresolvedWindowRow, type OperationWindowStatus, type WindowReviewRow } from './operation-window.ts'
 
 export type CloseDraftReviewReason =
   | 'missing_money'
@@ -71,7 +71,7 @@ export function guardPhysicalSettlementConfirmations(
 }
 
 /** One local timing draft is enough to keep the financial close button unavailable. */
-export function closeWorkspaceApprovalReady(input: CloseWorkspaceApprovalGateInput): boolean {
+export function closeWorkspaceApprovalReady(input: ApprovalBlockerInput): boolean {
   return approvalBlockerCodes(input).length === 0
 }
 
@@ -82,6 +82,7 @@ export type ApprovalBlockerCode =
   | 'confirm_before_approval'
   | 'unresolved_operations'
   | 'unsaved_timing_draft'
+  | 'unsaved_cash_float'
   | 'manager_battery_required'
   | 'force_reason_required'
 
@@ -92,6 +93,7 @@ export interface ApprovalBlockerInput extends CloseWorkspaceApprovalGateInput {
   confirmationsComplete?: boolean
   forcePrepared?: boolean
   forceReason?: string
+  cashFloatEditing?: boolean
 }
 
 /**
@@ -124,6 +126,7 @@ export function approvalBlockerCodes(input: ApprovalBlockerInput): ApprovalBlock
 
   if (input.unresolvedOperationCount > 0) codes.push('unresolved_operations')
   if (input.pendingTimingDraftCount > 0) codes.push('unsaved_timing_draft')
+  if (input.cashFloatEditing) codes.push('unsaved_cash_float')
   if (input.managerBatteryReadingCount > 0) codes.push('manager_battery_required')
   /*
    * `hasVisibleText`, not `.trim()`. An exceptional close is the one path where the reason is
@@ -205,6 +208,18 @@ export function orderNeedsAttention(order: ReviewOrderSummaryInput): boolean {
     (order.closeDraftReviewReasons?.length ?? 0) > 0 ||
     (order.feeOcr != null && order.feeOcr !== order.fee)
   )
+}
+
+/** Resolved exceptions remain inspectable, but no longer inflate the active work queue. */
+export function operationReviewResolved(row: WindowReviewRow & { windowBasis?: string | null }): boolean {
+  return !isUnresolvedWindowRow(row) && row.windowBasis === 'manager' && hasVisibleText(row.decisionReason)
+}
+
+export function missingClosingFigures(end: { cashDeclared: string | null; walletDeclared: string | null }): Array<'cash' | 'wallet'> {
+  const missing: Array<'cash' | 'wallet'> = []
+  if (end.cashDeclared === null) missing.push('cash')
+  if (end.walletDeclared === null) missing.push('wallet')
+  return missing
 }
 
 /** Human-facing copy for the durable reader reasons that must be resolved before approval. */

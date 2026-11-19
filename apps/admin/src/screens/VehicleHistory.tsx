@@ -66,13 +66,14 @@ interface VehicleHistoryResponse {
   asset?: null | {
     id: string
     currency: 'SYP_NEW' | 'USD'
-    price: string
-    purchasedOn: string
-    paidNow: string
-    outstanding: string
-    bookValue: string
-    depreciationDue: string
-    depreciationFunded: string
+    price: string | null
+    purchasedOn: string | null
+    paidNow: string | null
+    outstanding: string | null
+    bookValue: string | null
+    depreciationDue: string | null
+    depreciationFunded: string | null
+    registrationMode?: 'register_existing'
   }
   companyExpenses?: Array<{
     id: string
@@ -225,11 +226,13 @@ function VehicleHistoryData({ vehicleId, range }: { vehicleId: string; range: Da
         ) : (
           <Card title={t.vehicleHistory.asset}>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-              <Stat label={t.companyFinance.price} value={<Money value={data.asset.price} currency={data.asset.currency} />} />
-              <Stat lead label={t.companyFinance.bookValue} value={<Money value={data.asset.bookValue} currency={data.asset.currency} />} />
-              <Stat label={t.companyFinance.outstanding} value={<Money value={data.asset.outstanding} currency={data.asset.currency} />} />
-              <Stat label={t.companyFinance.depreciationDue} value={<Money value={data.asset.depreciationDue} currency={data.asset.currency} />} />
+              <Stat label={t.companyFinance.price} value={data.asset.price===null?'—':<Money value={data.asset.price} currency={data.asset.currency} />} />
+              <Stat lead label={t.companyFinance.bookValue} value={data.asset.bookValue===null?t.dashboard.pendingAssetRecognition:<Money value={data.asset.bookValue} currency={data.asset.currency} />} />
+              {data.asset.outstanding!==null?<Stat label={t.companyFinance.outstanding} value={<Money value={data.asset.outstanding} currency={data.asset.currency} />}/>:null}
+              {data.asset.depreciationDue!==null?<Stat label={t.companyFinance.depreciationDue} value={<Money value={data.asset.depreciationDue} currency={data.asset.currency} />}/>:null}
             </div>
+            <p className="mt-3 text-label text-ink-muted">{data.asset.registrationMode==='register_existing'?t.dashboard.cardPriceNotBookValue:t.dashboard.assetBookValueHint}</p>
+            {data.asset.registrationMode === 'register_existing' ? <a className={`mt-3 inline-block text-brand underline ${FOCUS_RING}`} href={`#companyFund?tab=assets&vehicle=${encodeURIComponent(vehicleId)}`}>{t.financeWorkspace.motorDepreciationHistory}</a> : null}
           </Card>
         )
       ) : null}

@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useState } from 'react'
+import { loginErrorMessage } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, Field, Screen, TextInput, ThemeChoiceGroup } from '../ui.tsx'
 import { Register } from './Register.tsx'
@@ -27,8 +28,7 @@ export function Login(): ReactNode {
       await refreshSession()
       void retryNativeUploads()
     } catch (err) {
-      const code = (err as { error?: string }).error
-      setError(code === 'locked' ? t.auth.locked : t.auth.invalidCredentials)
+      setError(loginErrorMessage(err, t.auth))
     } finally {
       setBusy(false)
     }

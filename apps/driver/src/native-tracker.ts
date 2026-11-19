@@ -49,7 +49,7 @@ export interface NativeTrackerStatus {
 }
 
 interface AshTrackerPlugin {
-  preflight?(): Promise<NativePreflight>
+  preflight?(options?: { forceFresh: boolean }): Promise<NativePreflight>
   setupReliability?(): Promise<NativeReliability>
   openTrackingSettings?(options: { target: 'app' | 'location' | 'background' | 'notifications' | 'battery' | 'autostart' }): Promise<{ opened: boolean }>
   acknowledgeAutostart?(): Promise<{ acknowledged: boolean }>
@@ -76,11 +76,11 @@ export function nativeTrackerAvailable(): boolean {
 }
 
 /** Null means a browser or an older shell. The server rollout gate handles older shells. */
-export async function preflightNativeTracker(): Promise<NativePreflight | null> {
+export async function preflightNativeTracker(options: { forceFresh: boolean } = { forceFresh: false }): Promise<NativePreflight | null> {
   const tracker = plugin()
   if (!tracker?.preflight) return null
   try {
-    return await tracker.preflight()
+    return await tracker.preflight(options)
   } catch {
     return { ready: false, reason: 'provider_error' }
   }

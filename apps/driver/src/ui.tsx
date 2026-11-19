@@ -360,7 +360,7 @@ export function Screen({
            the primary button sat UNDER the home indicator: the driver's tap dismissed the app
            instead of submitting his shift. */
         <footer
-          className="fixed inset-x-0 bottom-0 mx-auto w-full min-w-0 max-w-md overflow-x-hidden border-t border-line bg-surface-card p-3"
+            className="fixed inset-x-0 bottom-0 z-20 mx-auto w-full min-w-0 max-w-md overflow-x-hidden border-t border-line bg-surface-card p-3"
           style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
           {footer}

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { type AiOcrAuthorityState, reduceAiOcrAuthority } from '../src/ai-ocr-authority.ts'
+import {readBlocksClose} from '../src/close-gate.ts'
 
 const shift = readFileSync(new URL('../src/screens/Shift.tsx', import.meta.url), 'utf8')
 
@@ -38,7 +39,9 @@ describe('odometer cloud-AI authority', () => {
   it('gates both submissions while odometer AI is reading', () => {
     expect(shift).toContain("if (odoCloud?.status === 'reading') return")
     expect(shift).toContain("attachment.read?.status === 'running'")
-    expect(shift).toContain("item.read?.status === 'running'")
+    expect(readBlocksClose({field:'odometer',status:'running'})).toBe(true)
+    expect(readBlocksClose({field:'daily_summary',status:'running'})).toBe(false)
+    expect(shift).toContain('readBlocksClose(item.read)')
     expect(shift).toMatch(/const missing:[\s\S]*odoCloud\?\.status === 'reading'[\s\S]*const ready/u)
     expect(shift).toMatch(/const missing:[\s\S]*readingAttachment[\s\S]*const ready/u)
     expect(shift).toContain("readLinkedAttachment('odometer', 'odometer', false, result)")

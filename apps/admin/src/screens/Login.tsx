@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useState } from 'react'
+import { loginErrorMessage } from '@ash/client'
 import { useApp } from '../app-context.tsx'
 import { Button, Card, TextInput, Wordmark } from '../ui.tsx'
 
@@ -25,8 +26,7 @@ export function Login(): ReactNode {
       await api.login(username, password)
       await refreshSession()
     } catch (err) {
-      const c = (err as { error?: string }).error
-      setError(c === 'locked' ? t.auth.locked : t.auth.invalidCredentials)
+      setError(loginErrorMessage(err, t.auth))
     } finally {
       setBusy(false)
     }

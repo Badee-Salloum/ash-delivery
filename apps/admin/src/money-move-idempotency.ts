@@ -15,6 +15,11 @@ export interface PendingMoneyMove {
   idempotencyKey: string
 }
 
+/** Authentication/rate-limit failures say nothing about a previous unknown financial commit. */
+export function uncertainMoneyMoveOutcome(outcome: { ok: true } | { ok: false; status?: number | undefined }): boolean {
+  return !outcome.ok && (outcome.status === undefined || outcome.status >= 500 || [401, 403, 408, 425, 429].includes(outcome.status))
+}
+
 export interface MoneyMovePayload {
   /** Which command: `company_deposit`, `company_withdraw`, `treasury_deposit:cash`, … */
   command: string

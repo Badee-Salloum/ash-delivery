@@ -92,6 +92,10 @@ export function NotificationBell({
                   {n.read ? null : <span className="inline-block size-2 rounded-full bg-red-500" aria-hidden="true" />}
                   {label(n.kind)}
                 </span>
+                {n.kind.startsWith('tracking_permission_') ? <span className="text-xs font-normal">
+                  {typeof n.payload.driverName === 'string' ? n.payload.driverName : ''}
+                  {' · '}{(t.dailySummary as Record<string, string>)[String(n.payload.permission)] ?? ''}
+                </span> : null}
                 <span className="text-xs font-normal text-slate-600">{relTime(n.createdAt, nowMs, ago)}</span>
               </button>
             ))

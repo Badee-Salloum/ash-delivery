@@ -68,6 +68,11 @@ export function Treasury(): ReactNode {
   // a lost response, so the server answers with the original entry instead of depositing twice.
   const pendingDeposit = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
   const [withdrawAmt, setWithdrawAmt] = useState<{ cash: string; wallet: string }>({ cash: '', wallet: '' })
+  const [withdrawTo, setWithdrawTo] = useState<Record<'cash' | 'wallet', '' | 'company_box' | 'owner_drawings'>>({ cash: '', wallet: '' })
+  const [withdrawReason, setWithdrawReason] = useState({ cash: '', wallet: '' })
+  const [withdrawBusy, setWithdrawBusy] = useState({ cash: false, wallet: false })
+  const anyWithdrawalBusy = withdrawBusy.cash || withdrawBusy.wallet
+  const withdrawalInFlight = useRef({ cash: false, wallet: false })
   // The same held-key rule for «كييش» by hand: a second press after a lost response sweeps once.
   const pendingKaish = useRef<Record<'cash' | 'wallet', PendingMoneyMove | null>>({ cash: null, wallet: null })
   const [advances, setAdvances] = useState<Awaited<ReturnType<typeof api.advances>> | null>(null)
@@ -94,6 +99,7 @@ export function Treasury(): ReactNode {
   // ── «الترميم» ─────────────────────────────────────────────────────────────────────────────
   const [restoration, setRestoration] = useState<RestorationView | null>(null)
   const [restorationError, setRestorationError] = useState<string | null>(null)
+  const pendingRestoration = useRef<PendingMoneyMove | null>(null)
   const [capitalTargetsDraft, setCapitalTargetsDraft] = useState({ cash: '', wallet: '' })
   const [capitalTargetReason, setCapitalTargetReason] = useState('')
   const [capitalTargetsBusy, setCapitalTargetsBusy] = useState(false)
@@ -305,35 +311,54 @@ export function Treasury(): ReactNode {
     void loadReceivableHistory()
   }, [loadReceivableHistory])
 
-  /**
-   * «كييش» — take the day's profit out of the branch box and into صندوق الشركة.
-   *
-   * Moving the company fund is `company_fund.manage` (GM + system admin, 2026-09-17): the server
-   * answers anyone else with 403 `company_fund_forbidden`, and the row is only rendered for holders.
-   */
+  // The destination is explicit: company transfer and owner drawings use separate existing recipes.
+  // Selecting an owner destination must never create an HQ mirror or an operating expense.
   async function withdraw(target: 'cash' | 'wallet'): Promise<void> {
     const amount = withdrawAmt[target]
-    if (!amount) return
+    const destination = withdrawTo[target]
+    const reasonText = withdrawReason[target].trim()
+    if (!amount || !destination || !reasonText || withdrawalInFlight.current.cash || withdrawalInFlight.current.wallet) return
+    if (destination === 'company_box' && !canManageCompanyFund) return
+    try { if (parseMinor(amount) <= 0n) return } catch { return }
+    const version = loadVersion.current
+    withdrawalInFlight.current[target] = true
+    setWithdrawBusy(current => ({ ...current, [target]: true }))
     setDepositMsg(null)
-    const operation = pendingMoneyMove(pendingKaish.current[target], {
-      command: `treasury_kaish:${target}`,
-      branchId: branchId ?? session?.branchId ?? null,
-      amount,
-      reason: t.treasury.kaish,
-    })
-    pendingKaish.current[target] = operation
+    const destinationLabel = destination === 'owner_drawings' ? t.treasury.personalOwnerWithdrawal : t.treasury.transferToCompanyKaish
     try {
-      const res = await api.treasuryWithdraw(target, amount, t.treasury.kaish, 'company_box', operation.idempotencyKey)
-      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: true })
-      setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
-      setWithdrawAmt({ ...withdrawAmt, [target]: '' })
-      setDepositMsg(t.treasury.withdrawn)
-      void refreshCompany()
-    } catch (err) {
-      const code = (err as { error?: string }).error
-      pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
-      setDepositMsg(null)
-      toast.error(explainError(code ?? 'error', t))
+      const accepted = await confirm({
+        title: destinationLabel,
+        body: `${target === 'cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet} · ${groupThousands(amount)} ${t.currency.SYP_NEW} · ${destinationLabel}. ${destination === 'owner_drawings' ? t.treasury.ownerWithdrawalHint : t.treasury.companyTransferHint} ${reasonText}`,
+        confirmLabel: t.companyFinance.submit,
+      })
+      if (!accepted || version !== loadVersion.current) return
+      const operation = pendingMoneyMove(pendingKaish.current[target], {
+        command: `treasury_withdraw:${target}:${destination}`,
+        branchId: branchId ?? session?.branchId ?? null,
+        amount,
+        reason: reasonText,
+      })
+      pendingKaish.current[target] = operation
+      try {
+        const res = await api.treasuryWithdraw(target, amount, reasonText, destination, operation.idempotencyKey)
+        pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: true })
+        if (version !== loadVersion.current) return
+        setBalances((b) => (b ? { ...b, [target]: res.balance } : b))
+        setWithdrawAmt(current => ({ ...current, [target]: '' }))
+        setWithdrawReason(current => ({ ...current, [target]: '' }))
+        setDepositMsg(t.treasury.withdrawn)
+        if (destination === 'company_box') void refreshCompany()
+        void loadRestoration()
+      } catch (err) {
+        const code = (err as { error?: string }).error
+        pendingKaish.current[target] = pendingAfterAttempt(operation, { ok: false, error: code })
+        if (version !== loadVersion.current) return
+        setDepositMsg(null)
+        toast.error(explainError(code ?? 'error', t))
+      }
+    } finally {
+      withdrawalInFlight.current[target] = false
+      setWithdrawBusy(current => ({ ...current, [target]: false }))
     }
   }
 
@@ -837,8 +862,11 @@ export function Treasury(): ReactNode {
       confirmLabel: t.treasury.doRestore,
     })
     if (!ok) return
+    const operation = pendingMoneyMove(pendingRestoration.current, { command: 'treasury_restoration', branchId, amount: restoration.netToCompany, reason: t.treasury.restoration, details: restoration.legs })
+    pendingRestoration.current = operation
     try {
-      await api.restore(t.treasury.restoration)
+      await api.restore(t.treasury.restoration, operation.idempotencyKey)
+      pendingRestoration.current = null
       // POST returns the plan that was executed, whose positions are necessarily pre-action. The
       // preview endpoint returns the live post-action position plus `alreadyRestored`; reload it
       // before painting success so the card cannot present the old position as the live balance.
@@ -1061,28 +1089,33 @@ export function Treasury(): ReactNode {
                       {t.treasury.ownerFunding}
                     </Button>
                   </div>
-                  {/* «كييش» by hand. The owner's book moves money out of the box every day; الترميم
-                      posts through the very same recipe, so the two are one thing in the ledger.
-                      Only for `company_fund.manage` — it moves صندوق الشركة, which the branch
-                      manager may not (2026-09-17). */}
-                  {canManageCompanyFund ? (
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <MoneyInput
-                        value={withdrawAmt[target]}
-                        onChange={(e) => setWithdrawAmt({ ...withdrawAmt, [target]: e.target.value })}
-                        className="min-w-0 flex-1"
-                        placeholder={t.treasury.kaish}
-                        aria-label={`${t.glossary.finance.surplusToCompany}: ${target === 'cash' ? t.glossary.finance.officeCash : t.glossary.finance.officeWallet}`}
-                      />
+                    <div className="flex flex-col gap-2 border-t border-line pt-3" data-branch-withdrawal={target}>
+                      <Field label={t.treasury.withdrawTo}>
+                        <Select value={withdrawTo[target]} disabled={anyWithdrawalBusy} onChange={event => setWithdrawTo(current => ({ ...current, [target]: event.target.value as '' | 'company_box' | 'owner_drawings' }))}>
+                          <option value="">{t.treasury.chooseWithdrawalDestination}</option>
+                          {canManageCompanyFund ? <option value="company_box">{t.treasury.transferToCompanyKaish}</option> : null}
+                          <option value="owner_drawings">{t.treasury.personalOwnerWithdrawal}</option>
+                        </Select>
+                      </Field>
+                      <Field label={t.companyFinance.amount}>
+                        <MoneyInput
+                          value={withdrawAmt[target]}
+                          onChange={(e) => setWithdrawAmt(current => ({ ...current, [target]: e.target.value }))}
+                          disabled={anyWithdrawalBusy}
+                        />
+                      </Field>
+                      <Field label={t.companyFinance.description}>
+                        <TextInput value={withdrawReason[target]} maxLength={500} disabled={anyWithdrawalBusy} onChange={event => setWithdrawReason(current => ({ ...current, [target]: event.target.value }))} />
+                      </Field>
+                      {withdrawTo[target] ? <p className="text-label text-ink-secondary">{withdrawTo[target] === 'owner_drawings' ? t.treasury.ownerWithdrawalHint : t.treasury.companyTransferHint}</p> : null}
                       <Button
                         variant="ghost"
                         onClick={() => withdraw(target)}
-                        disabled={!withdrawAmt[target]}
+                        disabled={anyWithdrawalBusy || !balances || !withdrawAmt[target] || !withdrawTo[target] || !withdrawReason[target].trim()}
                       >
-                        {t.treasury.transferToCompanyKaish}
+                        {withdrawBusy[target] ? t.common.loading : t.companyFinance.submit}
                       </Button>
                     </div>
-                  ) : null}
                 </div>
               ) : (
                 // Saying why beats an empty card somebody reads as a broken screen.
@@ -1169,7 +1202,7 @@ export function Treasury(): ReactNode {
                   onClick={() => moveCompany('withdraw')}
                   disabled={companyBusy || !companyAmt || !companyReason.trim()}
                 >
-                  {t.treasury.withdraw}
+                  {t.treasury.personalOwnerWithdrawal}
                 </Button>
               </div>
             </div>

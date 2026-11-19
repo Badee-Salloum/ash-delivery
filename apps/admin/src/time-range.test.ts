@@ -176,11 +176,14 @@ describe('resolving against the server’s dates', () => {
 })
 
 describe('the filter bar', () => {
-  it('reads today from /dashboard/meta, never from the browser clock or the session', () => {
+  it('reads today from /dashboard/meta and uses the session day only to invalidate that read', () => {
     expect(barSource).toContain("api\n      .get<RangeMeta>('/dashboard/meta'")
     expect(barSource).not.toContain('new Date(')
     expect(barSource).not.toContain('Date.now(')
-    expect(barSource).not.toContain('businessDate')
+    expect(barSource.match(/session\?\.businessDate/g)).toHaveLength(1)
+    expect(barSource).toContain('[api, branchId, session?.userId, session?.roleKey, session?.businessDate, attempt]')
+    expect(barSource).toContain('if (active) setMeta(next)')
+    expect(barSource).toContain('resolveSelection(selection, meta)')
     expect(barSource).toContain('canGoNextWeek(shownWeek, meta.today)')
   })
 

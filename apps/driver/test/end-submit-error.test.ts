@@ -3,6 +3,7 @@ import { slotLabel } from '@ash/client'
 import { ar, en } from '@ash/client/i18n'
 import { describe, expect, it } from 'vitest'
 import { describeEndSubmitFailure } from '../src/end-submit-error.ts'
+import {readBlocksClose} from '../src/close-gate.ts'
 
 const inArabic = (error: unknown) =>
   describeEndSubmitFailure(
@@ -111,7 +112,7 @@ describe('driver end-shift failure copy', () => {
 const shiftSource = readFileSync(new URL('../src/screens/Shift.tsx', import.meta.url), 'utf8')
 
 describe('end-shift failure and optional-log source guards', () => {
-  it('keeps the payment log out of the close gate and labels it archive-only', () => {
+  it('keeps the legacy payment log and optional home summary out of the close gate', () => {
     const endStart = shiftSource.indexOf('function EndPackage(')
     const missingStart = shiftSource.indexOf('const blockers = closeGateBlockers(', endStart)
     const missingEnd = shiftSource.indexOf('const ready = blockers.length === 0', missingStart)
@@ -119,8 +120,10 @@ describe('end-shift failure and optional-log source guards', () => {
 
     expect(closeGate).not.toContain("draft.log.kind === 'reading'")
     expect(closeGate).toContain('readingAttachment')
-    expect(shiftSource).toContain("attachment.read.field !== 'payments_log'")
-    expect(shiftSource).toContain('t.shift.paymentsLogArchiveHint')
+    expect(shiftSource).toContain('readBlocksClose(attachment.read)')
+    expect(readBlocksClose({field:'payments_log',status:'running'})).toBe(false)
+    expect(readBlocksClose({field:'daily_summary',status:'running'})).toBe(false)
+    expect(shiftSource).toContain('<DailySummary')
     expect(ar.shift.paymentsLogArchiveHint).toBe('اختياري للأرشفة فقط — لا يغيّر قيمة الطلبات أو فرق النوبة')
     expect(en.shift.paymentsLogArchiveHint).toContain('Optional archive only')
     expect(ar.orders.movementsLegend).toBe('أرشيف اختياري فقط — لا تغيّر هذه الحركات قيمة الطلبات أو فرق النوبة.')

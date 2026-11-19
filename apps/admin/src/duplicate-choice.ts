@@ -36,6 +36,9 @@ export interface DuplicateChoiceRow {
     | null
     | undefined
   hasScanOrigin: boolean
+  route?: string | undefined
+  pendingTimingDraft?: boolean | undefined
+  requiresReview?: boolean | undefined
 }
 
 export interface DuplicateChoiceSide {
@@ -186,7 +189,7 @@ export function duplicateChoiceRevision(
 
   const revision: DuplicateChoiceRevision = { orders: [], cashDeductions: [] }
   const add = (side: DuplicateChoiceSide, included: boolean): void => {
-    if (side.row.included === included) return
+    if (side.row.included === included && !side.row.requiresReview) return
     if (side.target.kind === 'order') {
       revision.orders.push({ providerOrderNo: side.target.providerOrderNo, included, reason })
     } else {

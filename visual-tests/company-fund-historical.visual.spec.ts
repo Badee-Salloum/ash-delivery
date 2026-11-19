@@ -8,7 +8,8 @@ const variants = [
   {
     project: 'admin-desktop', language: 'en' as const, appearance: 'light' as const,
     labels: {
-      entry: 'Record a historical movement', occurredOn: 'Occurred on', reference: 'Unique audit reference',
+      entry: 'Record a historical movement', occurredOn: 'Occurred on', reference: 'External document reference — optional',
+      generatedReference: 'The system generates the movement number; you do not enter it.',
       description: 'Description', kind: 'Kind', fromCurrency: 'Currency sold', toCurrency: 'Currency received',
       fromAmount: 'Amount sold', toAmount: 'Amount received',
     },
@@ -16,7 +17,8 @@ const variants = [
   {
     project: 'admin-mobile', language: 'ar' as const, appearance: 'dark' as const,
     labels: {
-      entry: 'إدخال حركة مالية سابقة', occurredOn: 'تاريخ حدوث العملية', reference: 'المرجع التدقيقي الفريد',
+      entry: 'إدخال حركة مالية سابقة', occurredOn: 'تاريخ حدوث العملية', reference: 'مرجع مستند خارجي — اختياري',
+      generatedReference: 'رقم العملية يولده النظام؛ ليس مطلوباً منك.',
       description: 'الوصف', kind: 'النوع', fromCurrency: 'العملة المباعة', toCurrency: 'العملة المستلمة',
       fromAmount: 'المبلغ المباع', toAmount: 'المبلغ المستلم',
     },
@@ -34,6 +36,8 @@ for (const variant of variants) {
     await expect(entry).toBeVisible()
     await expect(entry.getByLabel(variant.labels.occurredOn, { exact: true })).toHaveAttribute('min', '2000-01-01')
     await expect(entry.getByLabel(variant.labels.reference, { exact: true })).toBeVisible()
+    await expect(entry.getByLabel(variant.labels.reference, { exact: true })).not.toHaveAttribute('required', '')
+    await expect(entry.getByText(variant.labels.generatedReference, { exact: true })).toBeVisible()
     await expect(entry.getByLabel(variant.labels.description, { exact: true })).toBeVisible()
 
     await entry.getByLabel(variant.labels.kind, { exact: true }).selectOption('exchange')

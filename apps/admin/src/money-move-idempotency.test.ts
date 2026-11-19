@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { pendingAfterAttempt, pendingMoneyMove } from './money-move-idempotency.ts'
+import { pendingAfterAttempt, pendingMoneyMove, uncertainMoneyMoveOutcome } from './money-move-idempotency.ts'
 
 const payload = {
   command: 'company_deposit',
@@ -9,6 +9,13 @@ const payload = {
 }
 
 describe('treasury money-move idempotency', () => {
+  it('preserves unknown outcomes through expired authentication and temporary gateway rejection', () => {
+    for (const status of [401, 403, 408, 425, 429, 500, 504]) expect(uncertainMoneyMoveOutcome({ ok: false, status })).toBe(true)
+    expect(uncertainMoneyMoveOutcome({ ok: false })).toBe(true)
+    expect(uncertainMoneyMoveOutcome({ ok: true })).toBe(false)
+    expect(uncertainMoneyMoveOutcome({ ok: false, status: 422 })).toBe(false)
+    expect(uncertainMoneyMoveOutcome({ ok: false, status: 409 })).toBe(false)
+  })
   it('keeps the same key when a lost-response retry has the exact same payload', () => {
     const generate = vi.fn().mockReturnValueOnce('key-1').mockReturnValueOnce('key-2')
     const first = pendingMoneyMove(null, payload, generate)

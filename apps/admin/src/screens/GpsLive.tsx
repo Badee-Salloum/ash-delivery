@@ -6,7 +6,8 @@ import { useApp } from '../app-context.tsx'
 import { explainError } from '../errors.ts'
 import { type GpsFreshness, gpsAgeMinutes, gpsFreshness } from '../gps-freshness.ts'
 import { leafletFreshnessPaints } from '../map-theme.ts'
-import { Badge, Card } from '../ui.tsx'
+import { Badge, Button, Card } from '../ui.tsx'
+import { browserViewportStorage, mapViewportKey, readMapViewport, writeMapViewport } from '../map-viewport.ts'
 
 /**
  * The live map (SRS K-2): the latest GPS fix per driver in the branch, polled every 10 s. A pin per
@@ -27,53 +28,76 @@ const DAMASCUS: [number, number] = [33.5138, 36.2765]
 const MARKER_OPACITY: Record<GpsFreshness, number> = { fresh: 0.9, recent: 0.75, stale: 0.15 }
   // Hollow: still where he last was, which is worth seeing — but not where he is.
 export function GpsLive(): ReactNode {
-  const { api, t, lang, theme, branchId } = useApp()
-  const [drivers, setDrivers] = useState<GpsLiveDriver[]>([])
-  const [silent, setSilent] = useState<GpsSilentShift[]>([])
-  const [health, setHealth] = useState<GpsLiveHealth[]>([])
+  const { api, t, lang, theme, branchId, session } = useApp()
+  const scope = mapViewportKey(session?.userId ?? null, branchId)
+  const [live, setLive] = useState<{ scope: string; drivers: GpsLiveDriver[]; silent: GpsSilentShift[]; health: GpsLiveHealth[] } | null>(null)
+  const drivers = live?.scope === scope ? live.drivers : []
+  const silent = live?.scope === scope ? live.silent : []
+  const health = live?.scope === scope ? live.health : []
   const [names, setNames] = useState<Record<string, DriverLite>>({})
   const [error, setError] = useState<string | null>(null)
 
   const mapDiv = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<L.Map | null>(null)
   const layerRef = useRef<L.LayerGroup | null>(null)
+  const initialFitPending = useRef(false)
+  const requestVersion = useRef(0)
 
   const load = useCallback(() => {
+    if (!scope) return
+    const version = ++requestVersion.current
     setError(null)
     void api
       .gpsLive()
       .then((r) => {
-        setDrivers(r.drivers)
-        setSilent(r.silent)
-        setHealth(r.health ?? [])
+        if (version !== requestVersion.current) return
+        setLive({ scope, drivers: r.drivers, silent: r.silent, health: r.health ?? [] })
       })
-      .catch((e: { error?: string }) => setError(e.error ?? 'error'))
+      .catch((e: { error?: string }) => { if (version === requestVersion.current) setError(e.error ?? 'error') })
     void api
       .get<{ drivers: DriverLite[] }>('/drivers')
-      .then((r) => setNames(Object.fromEntries(r.drivers.map((d) => [d.id, d]))))
+      .then((r) => { if (version === requestVersion.current) setNames(Object.fromEntries(r.drivers.map((d) => [d.id, d]))) })
       .catch(() => undefined)
-  }, [api])
+  }, [api, scope])
 
   useEffect(() => {
     load()
     const timer = setInterval(load, 10_000)
-    return () => clearInterval(timer)
-  }, [load, branchId])
+    return () => { clearInterval(timer); requestVersion.current += 1 }
+  }, [load])
 
-  // Initialise the map once. The div is always in the DOM (no Pending gate), so this runs with a
-  // real container.
+  // A branch/user owns its own viewport. Polls, names and theme changes must never reset it.
   useEffect(() => {
-    if (!mapDiv.current || mapRef.current) return
-    const map = L.map(mapDiv.current).setView(DAMASCUS, 12)
+    if (!mapDiv.current || !scope) return
+    const storage = browserViewportStorage(), saved = readMapViewport(storage, scope)
+    const map = L.map(mapDiv.current).setView(saved ? [saved.lat, saved.lng] : DAMASCUS, saved?.zoom ?? 12)
+    initialFitPending.current = saved === null
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap', maxZoom: 19 }).addTo(map)
     layerRef.current = L.layerGroup().addTo(map)
     mapRef.current = map
+    const remember = () => {
+      const center = map.getCenter()
+      writeMapViewport(storage, scope, { lat: center.lat, lng: center.lng, zoom: map.getZoom() })
+    }
+    const keepChosenView = () => { initialFitPending.current = false }
+    // Covers zoom controls, touch, keyboard and drag, including before the first GPS response.
+    map.on('movestart zoomstart', keepChosenView)
+    map.on('moveend zoomend', remember)
     return () => {
+      remember()
+      map.off('movestart zoomstart', keepChosenView)
+      map.off('moveend zoomend', remember)
       map.remove()
       mapRef.current = null
       layerRef.current = null
     }
-  }, [])
+  }, [scope])
+
+  const fitAllDrivers = () => {
+    if (!mapRef.current || drivers.length === 0) return
+    initialFitPending.current = false
+    mapRef.current.fitBounds(L.latLngBounds(drivers.map(d => [d.lat, d.lng] as [number, number])).pad(0.3), { maxZoom: 15, animate: false })
+  }
 
   const driverName = useCallback(
     (id: string): string => {
@@ -124,12 +148,19 @@ export function GpsLive(): ReactNode {
         .bindPopup(`${driverName(d.driverId)}<br>${formatDateTimeSeconds(d.capturedAt, lang)}`)
         .addTo(layer)
     }
-    if (pts.length > 0 && mapRef.current) mapRef.current.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 15 })
-  }, [drivers, driverName, lang, theme])
+    if (initialFitPending.current && pts.length > 0 && mapRef.current) {
+      initialFitPending.current = false
+      mapRef.current.fitBounds(L.latLngBounds(pts).pad(0.3), { maxZoom: 15, animate: false })
+    }
+  }, [drivers, driverName, lang, theme, scope])
 
   return (
     <div className="flex flex-col gap-4">
       <Card title={t.gpsLive.title}>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <Button variant="ghost" onClick={fitAllDrivers} disabled={drivers.length === 0}>{t.gpsLive.showAll}</Button>
+          <p className="min-w-0 flex-1 text-label text-ink-muted">{t.gpsLive.viewPreserved}</p>
+        </div>
         {error ? <p className="mb-2 text-sm text-red-600">{explainError(error, t)}</p> : null}
         <div ref={mapDiv} className="h-[60vh] w-full rounded-lg" />
       </Card>

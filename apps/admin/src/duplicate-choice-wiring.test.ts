@@ -66,7 +66,12 @@ describe('the side-by-side duplicate choice', () => {
 
   it('cannot post without an answer and an audited reason', () => {
     const panel = bodyOf('DuplicateChoicePanel')
-    expect(panel).toContain("disabled={disabled || revision === null || reason.trim() === ''}")
+    expect(panel).toContain('{revision ? <OperationDecisionPreview')
+    expect(panel).toContain('reason={reason}')
+    expect(panel).toContain('onApply={() => onSave(revision)}')
+    const preview = readFileSync(new URL('./components/OperationDecisionPreview.tsx', import.meta.url), 'utf8')
+    expect(preview).toContain('!decisionReasonReady(reason)')
+    expect(preview).toContain('inFlight.current')
   })
 
   it('states both outcomes on the button and that nothing is deleted', () => {

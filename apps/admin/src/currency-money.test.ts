@@ -27,9 +27,9 @@ describe('Money says which currency it is in, when asked', () => {
     expect(uiSource).toContain('currency?: Currency')
     expect(uiSource).toContain('{t.currency[currency]}')
     expect(uiSource).not.toMatch(/['"]ل\.س['"]/)
-    // Without a currency the figure is rendered exactly as every branch screen always had it.
+    // Isolate numeric direction even on RTL pages, keeping the minus sign before the digits.
     expect(uiSource).toContain(
-      "if (currency === undefined) return <span className={`num ${className}`}>{groupThousands(value)}</span>",
+      "if (currency === undefined) return <span dir=\"ltr\" className={`num ${className}`}>{groupThousands(value)}</span>",
     )
   })
 
@@ -40,6 +40,7 @@ describe('Money says which currency it is in, when asked', () => {
   })
 
   it('keeps the mark beside the figure with logical spacing only', () => {
-    expect(uiSource).toContain('<span className="ms-1 text-[0.85em] font-normal text-ink-muted">')
+    expect(uiSource).toContain('<bdi className="ms-1 text-[0.85em] font-normal text-ink-muted">')
+    expect(uiSource.match(/<span dir="ltr" className=\{`num/g)).toHaveLength(2)
   })
 })

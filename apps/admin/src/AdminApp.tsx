@@ -166,7 +166,7 @@ export function AdminApp(): ReactNode {
     void api.markNotificationRead(id).then(refreshNotifs).catch(() => undefined)
   }
   const openNotif = (n: Notif): void => {
-    if (n.kind.startsWith('shift_awaiting') && typeof n.payload.shiftId === 'string') {
+    if ((n.kind.startsWith('shift_awaiting') || n.kind.startsWith('tracking_permission_')) && typeof n.payload.shiftId === 'string') {
       setOpenShift(n.payload.shiftId)
     } else if (n.kind.startsWith('shift_awaiting')) {
       setSection('queue')
@@ -469,7 +469,7 @@ export function AdminApp(): ReactNode {
         ) : section === 'treasuryMovements' && canSeeTreasuryMovements ? (
           <TreasuryMovements key={mountKey} initial={liveParams.current} />
         ) : section === 'expenses' ? (
-          <Expenses />
+          <Expenses key={mountKey} initial={liveParams.current} />
         ) : section === 'companyFund' && canManageCompanyFund ? (
           <CompanyFund key={mountKey} initial={liveParams.current} />
         ) : section === 'checkin' ? (

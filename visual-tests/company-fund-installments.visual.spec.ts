@@ -10,6 +10,7 @@ const variants = [
     labels: {
       due: 'الأقساط المستحقة', plan: 'خطة الأقساط', pay: 'دفع القسط', confirmPay: 'تأكيد دفع القسط',
       create: 'إنشاء خطة أقساط', amount: 'قيمة القسط', recurrence: 'التكرار', weekday: 'يوم الأسبوع',
+      archive: 'شراء جديد وأقساط قائمة',
     },
   },
   {
@@ -17,6 +18,7 @@ const variants = [
     labels: {
       due: 'Installments due', plan: 'Installment plan', pay: 'Pay installment', confirmPay: 'Confirm installment payment',
       create: 'Create installment plan', amount: 'Installment amount', recurrence: 'Recurrence', weekday: 'Weekday',
+      archive: 'New purchase and existing installments',
     },
   },
 ]
@@ -28,6 +30,7 @@ for (const variant of variants) {
     await stubCompanyFund(page)
 
     await page.goto(`${adminUrl}#companyFund?tab=assets`)
+    await page.getByRole('button', { name: variant.labels.archive, exact: true }).click()
     const dueCard = page.locator('section').filter({ has: page.getByRole('heading', { name: variant.labels.due, exact: true }) })
     await expect(dueCard).toBeVisible()
     await expect(dueCard.getByRole('button', { name: variant.labels.pay, exact: true })).toBeVisible()

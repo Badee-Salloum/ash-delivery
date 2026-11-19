@@ -20,7 +20,9 @@ describe('durable operations OCR authority guards', () => {
     expect(pageGrid).toContain('closeDraftRevision={closeDraftRevision}')
     expect(pageGrid).toContain('onImage={(file, result) => onImage(file, slot, result)}')
     expect(pageGrid).toContain('onRetryRead: () => onRetryRead(slot)')
-    expect(shift.match(/attachments=\{draft\.closeDraftAttachments\}/gu)).toHaveLength(2)
+    // Recent orders remain paged; the optional home summary has its own scalar tile.
+    expect(shift.match(/attachments=\{draft\.closeDraftAttachments\}/gu)).toHaveLength(1)
+    expect(shift).toContain('attachment={draft.closeDraftAttachments.daily_summary ?? null}')
   })
 
   it('uploads first and never starts a reader after a rejected attachment', () => {

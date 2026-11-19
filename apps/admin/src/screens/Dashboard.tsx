@@ -12,6 +12,7 @@ import {
 import type { RouteParams } from '../route.ts'
 import { useHashParams } from '../use-hash-params.ts'
 import { AlertsSection } from './dashboard/AlertsSection.tsx'
+import { OwnerFundingSection } from './dashboard/OwnerFundingSection.tsx'
 import { CapitalSection } from './dashboard/CapitalSection.tsx'
 import { CompanyFundSection } from './dashboard/CompanyFundSection.tsx'
 import { DueSection } from './dashboard/DueSection.tsx'
@@ -67,11 +68,12 @@ export function Dashboard({ initial = {} }: { initial?: RouteParams }): ReactNod
           <OperationsSection range={range} />
           <FleetSection range={range} />
           {canSeeProfit ? <CapitalSection range={range} /> : null}
-          {canSeeCompanyFund ? <CompanyFundSection /> : null}
           <DueSection />
           <AlertsSection />
         </>
       ) : null}
+      {canSeeCompanyFund ? <CompanyFundSection /> : null}
+      {canSeeCompanyFund ? <OwnerFundingSection range={range} {...(meta ? { asOf: meta.today } : {})} /> : null}
     </div>
   )
 }

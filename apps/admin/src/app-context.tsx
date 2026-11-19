@@ -2,6 +2,7 @@ import { type ReactNode, createContext, useCallback, useContext, useEffect, useM
 import { ApiClient } from '@ash/client'
 import { type Catalog, type Lang, catalogs, dir } from '@ash/client/i18n'
 import { type Theme, applyTheme, readTheme, watchSystemTheme } from './theme.ts'
+import { businessDateRefreshDelay, refreshedSessionSnapshot } from './session-business-date.ts'
 
 /**
  * The app-wide context: the API client, the current language (ar default, RTL-first), and the
@@ -130,15 +131,51 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
       const me = await api.me()
       setSession(me)
       setSessionExpired(false)
-    } catch {
-      setSession(null)
+    } catch (error) {
+      if ((error as { status?: number }).status === 401) setSession(null)
+      // Let the login screen report /me failure; do not silently show the same form again.
+      throw error
     }
   }, [api])
 
   // Resume an existing session on load — the cookie may still be valid from a prior visit.
   useEffect(() => {
-    void refreshSession()
+    void refreshSession().catch(() => undefined)
   }, [refreshSession])
+
+  // Login-day dates must not survive overnight: finance limits and exact Dashboard links use
+  // the authoritative /me date. Minute-boundary reads cover the configured 04:00 day start
+  // without deriving a financial date from the browser's zone. Sleeping tabs catch up on focus.
+  useEffect(() => {
+    const userId = session?.userId
+    if (!userId) return
+    let active = true, reading = false
+    let timer: ReturnType<typeof setTimeout>
+    const readDate = async (): Promise<void> => {
+      if (!active || document.visibilityState === 'hidden' || reading) return
+      reading = true
+      try {
+        const fresh = await api.me()
+        if (active) setSession(current => refreshedSessionSnapshot(current, fresh, userId))
+      } catch {
+        // A real 401 already goes through the shared unauthorized hook. A transient network
+        // failure must not throw away the user's valid session or unsaved financial work.
+      } finally { reading = false }
+    }
+    const schedule = (): void => {
+      timer = setTimeout(() => { void readDate().finally(() => { if (active) schedule() }) }, businessDateRefreshDelay(Date.now()))
+    }
+    const resume = (): void => { void readDate() }
+    schedule()
+    window.addEventListener('focus', resume)
+    document.addEventListener('visibilitychange', resume)
+    return () => {
+      active = false
+      clearTimeout(timer)
+      window.removeEventListener('focus', resume)
+      document.removeEventListener('visibilitychange', resume)
+    }
+  }, [api, session?.userId])
 
   const setBranchId = useCallback(
     (next: string) => {
@@ -181,7 +218,8 @@ export function AppProvider({ children }: { children: ReactNode }): ReactNode {
         }
       })
       .catch(() => setBranches([]))
-  }, [api, session])
+  // A new business date is not a new branch choice. Only an actor/scope change reinitializes it.
+  }, [api, session?.userId, session?.roleKey, session?.branchId])
 
   const value: AppContextValue = {
     api,

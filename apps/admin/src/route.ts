@@ -58,6 +58,7 @@ export type PatternParam = 'day' | 'evening' | 'full'
 export type LiveStateParam = 'open' | 'suspended'
 export type TreasuryChannelParam = 'cash' | 'wallet'
 export type TreasuryFlowParam = 'in' | 'out' | 'internal'
+export const COMPANY_REPORT_KINDS = ['cash', 'custody', 'branch', 'cost_income', 'owner', 'assets_debts', 'all'] as const
 
 /** The filters a view may carry. Every field optional; absence means «no filter». */
 export interface RouteParams {
@@ -78,6 +79,16 @@ export interface RouteParams {
   readonly over?: true
   readonly tab?: string
   readonly id?: string
+  readonly category?: string
+  readonly costCenterKind?: 'general' | 'branch' | 'vehicle' | 'operating'
+  readonly expenseChannel?: 'office_cash' | 'office_wallet'
+  readonly receipt?: 'with' | 'without'
+  readonly minAmount?: string
+  readonly maxAmount?: string
+  readonly page?: string
+  readonly view?: 'as_booked' | 'current_corrected'
+  readonly dateBasis?: 'posting' | 'occurrence'
+  readonly report?: (typeof COMPANY_REPORT_KINDS)[number]
 }
 
 export interface RouteView {
@@ -106,6 +117,16 @@ export const PARAM_KEYS = [
   'over',
   'tab',
   'id',
+  'category',
+  'costCenterKind',
+  'expenseChannel',
+  'receipt',
+  'minAmount',
+  'maxAmount',
+  'page',
+  'view',
+  'dateBasis',
+  'report',
 ] as const satisfies readonly (keyof RouteParams)[]
 
 /** Row ids: UUIDs in production, `vehicle-1` in the harness. Nothing else. */
@@ -193,8 +214,28 @@ export function sanitizeParams(input: Readonly<Record<string, unknown>>): RouteP
   if (flag('over')) out.over = true
   const tab = text('tab')
   if (tab !== null && TAB.test(tab)) out.tab = tab
+  const reportView = text('view')
+  if (reportView === 'as_booked' || reportView === 'current_corrected') out.view = reportView
+  const dateBasis = text('dateBasis')
+  if (dateBasis === 'posting' || dateBasis === 'occurrence') out.dateBasis = dateBasis
+  const report = text('report')
+  if (report !== null && (COMPANY_REPORT_KINDS as readonly string[]).includes(report)) out.report = report as (typeof COMPANY_REPORT_KINDS)[number]
   const id = text('id')
   if (id !== null && ID.test(id)) out.id = id
+  const category = text('category')
+  if (category !== null && ID.test(category)) out.category = category
+  const centre = text('costCenterKind')
+  if (centre === 'general' || centre === 'branch' || centre === 'vehicle' || centre === 'operating') out.costCenterKind = centre
+  const expenseChannel = text('expenseChannel')
+  if (expenseChannel === 'office_cash' || expenseChannel === 'office_wallet') out.expenseChannel = expenseChannel
+  const receipt = text('receipt')
+  if (receipt === 'with' || receipt === 'without') out.receipt = receipt
+  for (const field of ['minAmount', 'maxAmount'] as const) {
+    const value = text(field)
+    if (value !== null && /^\d{1,17}(\.\d{1,2})?$/.test(value)) out[field] = value
+  }
+  const page = text('page')
+  if (page !== null && /^[1-9]\d{0,4}$/.test(page)) out.page = page
   return out
 }
 

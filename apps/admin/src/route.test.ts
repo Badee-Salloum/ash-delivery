@@ -14,7 +14,7 @@ import {
 } from './route.ts'
 import { replaceHashParams } from './use-hash-params.ts'
 
-const appSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8')
+const appSource = readFileSync(new URL('./AdminApp.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const UUID = '3f2b8c1e-4d5a-4b6c-9d7e-8f9a0b1c2d3e'
 
 describe('parseHash — the links that already exist keep working', () => {
@@ -43,6 +43,13 @@ describe('parseHash — the links that already exist keep working', () => {
 })
 
 describe('parseHash — filter params', () => {
+  it('retains a validated current income/expense report drill without treating its name as a category UUID', () => {
+    const hash = '#companyFund?tab=reports&range=custom&from=2026-09-01&to=2026-09-20&dateBasis=occurrence&view=current_corrected&report=cost_income'
+    expect(parseHash(formatHash(parseHash(hash)))).toEqual(parseHash(hash))
+    expect(parseHash(hash).params).toMatchObject({ report: 'cost_income', view: 'current_corrected', dateBasis: 'occurrence' })
+    expect(parseHash('#companyFund?report=not_a_report').params.report).toBeUndefined()
+    expect(parseHash('#expenses?category=cost_income').params.category).toBeUndefined()
+  })
   it('reads every known key with a valid value', () => {
     expect(
       parseHash(

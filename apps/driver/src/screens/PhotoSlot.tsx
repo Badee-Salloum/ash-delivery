@@ -718,14 +718,16 @@ export function PhotoSlot({
       : null
   const readLabel =
     read === null || read.status === 'idle'
-      ? t.shift.readStateIdle
+      ? slot === 'daily_summary' ? t.dailySummary.awaitingRead : t.shift.readStateIdle
       : read.status === 'running'
         ? t.shift.readStateRunning
         : read.status === 'complete'
-          ? completedOrdersLabel ?? t.shift.readStateComplete
+          ? read.field === 'daily_summary' ? t.dailySummary.saved : completedOrdersLabel ?? t.shift.readStateComplete
           : read.failure === 'wrong_screen'
             ? t.shift.wrongScreen
-            : t.shift.readStateFailed
+            : read.field === 'payments_log' && read.failure === 'no_fields' && (read.rowCount ?? 0) > 0
+              ? t.shift.readStatePartialPayments
+              : t.shift.readStateFailed
   const readTone =
     read?.status === 'complete'
       ? 'text-emerald-700'

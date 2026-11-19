@@ -1,0 +1,7 @@
+{
+  "version": "4.1.0",
+  "versionCode": 6,
+  "minSdkVersion": 24,
+  "downloadPage": "https://ash-driver.vercel.app/download.html",
+  "apkUrl": "https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v4.1.0/ash-driver-v4.1.0-signed.apk"
+}

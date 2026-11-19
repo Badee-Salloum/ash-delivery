@@ -191,6 +191,24 @@ describe('duplicateChoiceKey', () => {
   })
 })
 
+describe('resolving both readings', () => {
+  const REASON = 'راجعت الصورتين وحددت القراءة الصحيحة'
+  it('also confirms the retained row when its reader conflict is still unresolved', () => {
+    const view = build(row({ requiresReview: true }), row({ requiresReview: true }))!
+    expect(duplicateChoiceRevision(view, 'order:A', REASON)).toEqual({
+      orders: [{ providerOrderNo: 'A', included: true, reason: REASON }, { providerOrderNo: 'B', included: false, reason: REASON }],
+      cashDeductions: [],
+    })
+  })
+
+  it('can confirm a zero-delta pair without manufacturing a financial change', () => {
+    const view = build(row({ requiresReview: true }), row({ included: false }))!
+    expect(duplicateChoiceRevision(view, 'order:A', REASON)?.orders).toEqual([
+      { providerOrderNo: 'A', included: true, reason: REASON },
+    ])
+  })
+})
+
 describe('likelyOneRowMisread', () => {
   const seam = (selfAmount: string, otherAmount: string, causes: any[]) =>
     duplicateChoiceView({

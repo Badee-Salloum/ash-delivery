@@ -48,6 +48,11 @@ export interface CloseGateInput {
   readonly draftSaved: boolean
 }
 
+/** Optional reference evidence can keep reading while the financial close is submitted. */
+export function readBlocksClose(read: {status: string; field: string} | null | undefined): boolean {
+  return read?.status === 'running' && read.field !== 'payments_log' && read.field !== 'daily_summary'
+}
+
 export function closeGateBlockers(input: CloseGateInput): CloseGateBlocker[] {
   const out: CloseGateBlocker[] = []
 

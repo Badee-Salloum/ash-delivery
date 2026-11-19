@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useApp } from './app-context.tsx'
 import { dropFixes, enqueueFix, gpsBatchDisposition, markRejectedFixes, peekFixes, sweepOutbox } from './gps-outbox.ts'
 import { nativeTrackerAvailable } from './native-tracker.ts'
+import { GpsUploadSchedule } from './gps-upload-schedule.ts'
 
 /**
  * Live GPS beacon (SRS K).
@@ -32,10 +33,9 @@ const INTERVAL_MS = 15_000
 const FLUSH_MAX = 500
 
 export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
-  const { api } = useApp()
+  const { api, session } = useApp()
   const [tracking, setTracking] = useState(false)
   const latest = useRef<GeolocationPosition | null>(null)
-  const flushing = useRef(false)
 
   useEffect(() => {
     if (shiftId === null) return
@@ -45,6 +45,10 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
     // produce rows the server then discards on `(shift_id, captured_at)`.
     if (nativeTrackerAvailable()) return
     let stopped = false
+    let flushing = false
+    const uploads = new GpsUploadSchedule()
+    latest.current = null
+    setTracking(false)
     let wakeLock: WakeLockSentinel | null = null
 
     const requestWake = async (): Promise<void> => {
@@ -59,7 +63,7 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         latest.current = pos
-        setTracking(true)
+        setTracking(!uploads.blocked)
       },
       () => setTracking(false),
       { enableHighAccuracy: true, maximumAge: 10_000, timeout: 20_000 },
@@ -74,8 +78,8 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
      * mid-flight costs nothing. Fixes are deleted only once the server has acknowledged them.
      */
     const flush = async (): Promise<void> => {
-      if (stopped || flushing.current) return
-      flushing.current = true
+      if (stopped || flushing) return
+      flushing = true
       try {
         const pos = latest.current
         if (pos) {
@@ -89,8 +93,10 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
           })
         }
 
+        if (stopped || !uploads.canSend(Date.now())) return
         const pending = await peekFixes(shiftId, FLUSH_MAX)
         if (pending.length === 0) return
+        if (stopped) return
         try {
           const response = await api.sendGpsBatch(shiftId, {
             source: 'phone_fg',
@@ -105,18 +111,19 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
           const { acknowledged, rejected } = gpsBatchDisposition(pending, response)
           await dropFixes(acknowledged)
           await markRejectedFixes(rejected)
+          uploads.succeeded()
         } catch (err) {
           // A closed shift can still receive fixes captured during its tracking window for seven
-          // days. An unexpected 409 stops this foreground watcher but never clears saved points.
-          if ((err as { status?: number }).status === 409) {
-            stopped = true
+          // days. A refusal pauses uploads for this watcher; capture and saved points survive.
+          uploads.failed(err, Date.now())
+          if (uploads.blocked) {
             setTracking(false)
           }
         }
       } catch {
         /* the buffer is intact; the next tick tries again */
       } finally {
-        flushing.current = false
+        flushing = false
       }
     }
 
@@ -143,7 +150,7 @@ export function useGpsBeacon(shiftId: string | null): { tracking: boolean } {
       window.removeEventListener('online', onOnline)
       void wakeLock?.release?.().catch(() => undefined)
     }
-  }, [api, shiftId])
+  }, [api, shiftId, session?.userId])
 
   return { tracking }
 }

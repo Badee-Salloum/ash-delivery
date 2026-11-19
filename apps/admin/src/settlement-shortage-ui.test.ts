@@ -6,8 +6,8 @@ import { ar, en } from '@ash/client/i18n'
 
 const approvalSource = readFileSync(new URL('./screens/Approval.tsx', import.meta.url), 'utf8')
 
-describe('close-time ordinary shortage receivable UI', () => {
-  it('recalculates, confirms, and posts the exact reviewed shortage amount', () => {
+describe('close-time ordinary shortage receivable compatibility', () => {
+  it('keeps the zero-default settlement contract without offering the retired debt creation form', () => {
     expect(approvalSource).toContain("const [cashShortageReceivable, setCashShortageReceivable] = useState('0')")
     expect(approvalSource).toContain('cashShortageReceivable: cashShortageReceivable.trim()')
     expect(approvalSource).toContain('cashShortageReceivable: settlement.cashShortageReceivable')
@@ -19,8 +19,9 @@ describe('close-time ordinary shortage receivable UI', () => {
      */
     expect(approvalSource).toContain('deferralMatchesSettlementInputs(')
     expect(approvalSource).toContain('cashShortageReceivable,')
-    expect(approvalSource).toContain('settlement.maximumCashShortageReceivable')
-    expect(approvalSource).toContain('onCashShortageReceivable(event.target.value)')
+    // The owner removed debt creation from this screen; the API fields remain compatible.
+    expect(approvalSource).not.toContain('settlement.maximumCashShortageReceivable')
+    expect(approvalSource).not.toContain('onCashShortageReceivable(event.target.value)')
   })
 
   it('uses explicit debt language and promises no second office deduction in both languages', () => {
@@ -55,7 +56,7 @@ describe('«الحسم» — the charge, and the place it is actually rendered',
 
   it('refuses to charge without a stated reason, in the browser as well as the server', () => {
     // A deduction from someone's pay with no reason is the one thing this instrument must not do.
-    expect(approvalSource).toContain('disabled={disabled || !amountReady || !reasonReady}')
+    expect(approvalSource).toContain('disabled={disabled || !ready || !reason.trim()}')
     expect(approvalSource).toContain('copy.chargeReasonRequired')
     expect(ar.settlement.chargeReasonRequired).toContain('سبب')
   })

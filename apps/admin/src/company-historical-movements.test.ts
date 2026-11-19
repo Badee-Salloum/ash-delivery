@@ -21,7 +21,14 @@ describe('historical company-fund movements', () => {
     expect(screen).toContain('pendingMoneyMove(pendingKey.current, {')
     expect(screen).toContain('pendingMoneyMove(pendingReversalKey.current, {')
     expect(screen).toContain('details: payload,')
+    expect(screen).toContain('details: { ...historicalPayload, ...(editingDraft ? { draftId: editingDraft.id, expectedVersion: editingDraft.version } : {}) },')
+    expect(screen).toContain("command: `${reviewOnly ? 'company_historical_draft' : 'company_historical'}:${kind}`,")
+    expect(screen).toContain("saveAdministrativeDraft({ path: editingDraft ? `/company/historical-drafts/${editingDraft.id}` : '/company/historical-drafts',")
     expect(screen).toContain("api.post('/company/historical-movements', { idempotencyKey: operation.idempotencyKey, ...payload })")
+    expect(screen).toContain('const requestBody = { idempotencyKey: operation.idempotencyKey, ...historicalPayload }')
+    expect(screen).toContain('rememberRequest(requestBody)')
+    expect(screen).toContain("api.post('/company/historical-movements', requestBody)")
+    expect(screen).toContain("api.post('/company/historical-movements', unfinished)")
     expect(screen).toContain('pendingAfterAttempt(operation, outcome)')
     expect(screen).toContain('type: kind,')
     expect(screen).toContain('description: reason.trim(),')
@@ -29,7 +36,9 @@ describe('historical company-fund movements', () => {
     expect(screen).toContain("type: 'reversal' as const,")
     expect(screen).toContain('targetId,')
     expect(screen).toContain('occurredOn: today,')
-    expect(screen).toContain('externalReference: reversalReference.trim(),')
+    expect(screen).toContain("...(reversalReference.trim() ? { receiptReference: reversalReference.trim() } : {}),")
+    expect(screen).toContain("...(externalReference.trim() ? { receiptReference: externalReference.trim() } : {}),")
+    expect(screen).not.toContain('externalReference: reversalReference.trim(),')
     expect(screen).toContain('reason: reversalReason.trim(),')
   })
 
@@ -42,11 +51,14 @@ describe('historical company-fund movements', () => {
     expect(screen).toContain("<HistoricalCategoryCreator kind=\"income\"")
   })
 
-  it('loads the dedicated register, protects its first entry, and shows both dates and balance after', () => {
-    expect(screen).toContain("'/company/historical-movements/preflight'")
-    expect(screen).toContain('const openingBlocked = rows.length === 0 && !hasPostedHistorical && !preflight.canStart')
-    expect(screen).toContain('const earliestAllowedOccurrence = latestHistoricalOccurrence ?? \'2000-01-01\'')
-    expect(screen).toContain('occurredOn < earliestAllowedOccurrence')
+  it('retains legacy intake guards without loading its retired preflight in the current workspace', () => {
+    const mounted = screen.slice(screen.indexOf('export function CompanyFund'), screen.indexOf('export type MutationOutcome'))
+    expect(mounted).not.toContain("'/company/historical-movements/preflight'")
+    expect(screen).toContain('const openingBlocked = !intakeSessionId && rows.length === 0 && !hasPostedHistorical && !preflight.canStart')
+    expect(screen).toContain("const earliestAllowedOccurrence = intakeSessionId ? '2000-01-01' : latestHistoricalOccurrence ?? '2000-01-01'")
+    expect(screen).toContain("'/company/historical-intake-sessions'")
+    expect(screen).toContain('...(intakeSessionId ? { intakeSessionId } : {})')
+    expect(screen).toContain('effectiveOccurrence < earliestAllowedOccurrence')
     expect(screen).toContain('pocketAfter?: Partial<Record<Currency, string>>')
     expect(screen).toContain('t.companyFinance.occurredOn, t.companyFinance.postedOn')
     expect(screen).toContain('t.companyFinance.balanceAfter')
@@ -54,8 +66,10 @@ describe('historical company-fund movements', () => {
     expect(screen).toContain('max={today}')
   })
 
-  it('keeps the history tab role-gated, filterable, and responsive in both supported languages', () => {
-    expect(screen).toContain("session?.roleKey === 'system_admin' || session?.roleKey === 'general_manager'")
+  it('keeps legacy controls unmounted and the protected source register responsive in both languages', () => {
+    const mounted = screen.slice(screen.indexOf('export function CompanyFund'), screen.indexOf('export type MutationOutcome'))
+    expect(mounted).not.toContain('<HistoricalMovementsTab')
+    expect(mounted).toContain('<CompanyHistoricalImportRegister')
     expect(screen).toContain('referenceFilter')
     expect(screen).toContain('kindFilter')
     expect(screen).toContain('<option value="reversal">{t.companyFinance.historicalKinds.reversal}</option>')

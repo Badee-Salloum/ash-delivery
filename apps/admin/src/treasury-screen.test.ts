@@ -48,14 +48,11 @@ describe('branch treasury screen contract', () => {
 
   // The hand «كييش» row used to render for anyone with `journal.manual.write`, the branch manager
   // included; it moves صندوق الشركة, so it now renders only under `company_fund.manage`.
-  it('renders the hand «كييش» only for company_fund.manage and sends it with a held key', () => {
-    const kaishButton = treasurySource.indexOf('{t.treasury.transferToCompanyKaish}')
-    expect(kaishButton).toBeGreaterThan(-1)
-    expect(treasurySource.indexOf('{t.treasury.transferToCompanyKaish}', kaishButton + 1)).toBe(-1)
-    const guard = treasurySource.lastIndexOf('{canManageCompanyFund ? (', kaishButton)
-    expect(guard).toBeGreaterThan(-1)
-    // Nothing closes that guard between it and the button.
-    expect(treasurySource.slice(guard, kaishButton)).not.toContain(') : null}')
+  it('requires an explicit withdrawal destination and keeps company transfers permission-gated', () => {
+    expect(treasurySource).toContain('{canManageCompanyFund ? <option value="company_box">')
+    expect(treasurySource).toContain('<option value="owner_drawings">')
+    expect(treasurySource).toContain('t.treasury.chooseWithdrawalDestination')
+    expect(treasurySource).toContain("if (destination === 'company_box' && !canManageCompanyFund) return")
 
     const kaish = treasurySource.slice(
       treasurySource.indexOf('async function withdraw('),
@@ -63,9 +60,19 @@ describe('branch treasury screen contract', () => {
     )
     expect(kaish).toContain('pendingMoneyMove(pendingKaish.current[target], {')
     expect(kaish).toContain(
-      "api.treasuryWithdraw(target, amount, t.treasury.kaish, 'company_box', operation.idempotencyKey)",
+      'api.treasuryWithdraw(target, amount, reasonText, destination, operation.idempotencyKey)',
     )
     expect(kaish).toContain('pendingAfterAttempt(operation, { ok: false, error: code })')
+    expect(kaish).toContain('treasury_withdraw:${target}:${destination}')
+    expect(kaish).toContain('await confirm({')
+    expect(kaish).toContain('version !== loadVersion.current')
+    expect(kaish).toContain('withdrawalInFlight.current[target] = true')
+    expect(kaish).toContain('void loadRestoration()')
+    for (const catalog of [ar, en]) {
+      expect(catalog.treasury.personalOwnerWithdrawal.length).toBeGreaterThan(10)
+      expect(catalog.treasury.ownerWithdrawalHint.length).toBeGreaterThan(50)
+      expect(catalog.companyFinance.historicalKinds.withdrawal).toBe(catalog.treasury.personalOwnerWithdrawal)
+    }
     expect(treasurySource).not.toMatch(/treasuryWithdraw\([^)]*randomUUID/)
     for (const catalog of [ar, en]) {
       expect(catalog.errors.company_fund_forbidden.length).toBeGreaterThan(20)

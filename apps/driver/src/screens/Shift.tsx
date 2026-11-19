@@ -1,3 +1,5 @@
+import { PermissionHistory } from './PermissionHistory.tsx'
+import { DailySummary } from './DailySummary.tsx'
 import {
   type Dispatch,
   type ReactNode,
@@ -48,7 +50,7 @@ import {
   splitSlot,
   uploadEvidencePath,
 } from '@ash/client'
-import { closeGateBlockers } from '../close-gate.ts'
+import { closeGateBlockers, readBlocksClose } from '../close-gate.ts'
 import { LINKED_READ_UI_TIMEOUT_MS } from '../linked-read-task.ts'
 import {
   isStaleCloseDraftView,
@@ -62,6 +64,7 @@ import {
   openNativeTrackingSettings, preflightNativeTracker, setupNativeTrackingReliability,
   syncNativeTracking, type NativeReliability,
 } from '../native-tracker.ts'
+import { confirmReadinessWithFreshFix, describeGpsTimingFailure } from '../gps-readiness.ts'
 import { useGpsBeacon } from '../use-gps-beacon.ts'
 import { TrackerStatusCard } from './TrackerStatusCard.tsx'
 import { Button, Card, Field, Money, MoneyInput, Screen, TextInput } from '../ui.tsx'
@@ -156,6 +159,7 @@ type LogState = AiPageReadState
  * submit until he retyped what the server already had.
  */
 interface EndDraft {
+  dailySummaryDate: string | null
   /** Revision/hash of the only server draft allowed to materialise at submit. */
   closeDraftRevision: number | null
   closeDraftHash: string | null
@@ -234,6 +238,7 @@ interface EndDraft {
 }
 
 const EMPTY_END_DRAFT: EndDraft = {
+  dailySummaryDate: null,
   closeDraftRevision: null,
   closeDraftHash: null,
   closeDraftMergeConflict: false,
@@ -363,6 +368,7 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
     persistedCloseDraftFingerprint: serverFingerprint,
     persistedCashDeclared: view.figures.cashDeclared,
     persistedWalletDeclared: view.figures.walletDeclared,
+    dailySummaryDate: view.figures.dailySummaryDate ?? null,
     persistedOdometerKm: view.figures.odometerKm,
     persistedOdometerAnomalyConfirmed: view.figures.odometerAnomalyConfirmed,
     slots: new Set(view.attachments.map((attachment) => attachment.slot)),
@@ -399,7 +405,7 @@ function restoreCloseDraft(current: EndDraft, view: CloseDraftView): EndDraft {
 export function applyLinkedScalarRead(
   current: EndDraft,
   response: CloseDraftReadResponse,
-  field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
+  field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms' | 'daily_summary',
   generation: string,
   dashboardCharge = false,
 ): EndDraft {
@@ -598,6 +604,7 @@ export function rebaseStoredCloseDraft(
       ((staleMerge?.conflicts.length ?? 0) > 0 ? view : null),
     persistedCashDeclared: canonical.persistedCashDeclared,
     persistedWalletDeclared: canonical.persistedWalletDeclared,
+    dailySummaryDate: canonical.dailySummaryDate,
     persistedOdometerKm: canonical.persistedOdometerKm,
     persistedOdometerAnomalyConfirmed: canonical.persistedOdometerAnomalyConfirmed,
   }
@@ -1662,7 +1669,7 @@ async function submitOrders(
   return { sent, failed }
 }
 
-function StartPackage({
+export function StartPackage({
   assignment,
   batteries,
   chargeReadingSource,
@@ -1696,8 +1703,11 @@ function StartPackage({
   const toast = useToast()
   const [shiftId, setShiftId] = useState<string | null>(existingShiftId ?? null)
   const [gpsGateError, setGpsGateError] = useState<string | null>(null)
+  const [gpsTimingNotice, setGpsTimingNotice] = useState<string | null>(null)
   useEffect(() => {
     if (!nativeTrackerAvailable() || !gpsGateError || gpsGateError === 'upgradeRequired') return
+    // Permissions becoming healthy does not prove that the server accepted a fresh timestamp.
+    if (['fixTimingRejected', 'refreshingFix', 'readinessCheckFailed', 'readinessExpired'].includes(gpsGateError)) return
     let active = true
     const recheck = (): void => {
       if (document.visibilityState === 'hidden') return
@@ -1871,6 +1881,90 @@ function StartPackage({
       })
   }, [api, assignment, shiftId])
 
+  function showGpsGateFailure(error: unknown): boolean {
+    const code = (error as { error?: string })?.error
+    const timing = describeGpsTimingFailure(error, t.gpsTracking)
+    if (timing !== null) {
+      setGpsGateError('fixTimingRejected')
+      setGpsTimingNotice(timing)
+      return true
+    }
+    setGpsTimingNotice(null)
+    const reason = code === 'android_update_required' ? 'upgradeRequired'
+      : code === 'gps_preflight_required' ? (!nativeTrackerAvailable() ? 'upgradeRequired' : 'readinessExpired')
+      : code === 'gps_precise_location_required' ? 'permission_denied'
+      : code === 'gps_location_enabled_required' ? 'location_disabled'
+      : code === 'gps_background_permission_required' ? 'background_permission_required'
+      : code === 'gps_notification_permission_required' ? 'notification_permission_required'
+      : code === 'gps_battery_optimization_exemption_required' ? 'battery_optimization_required'
+      : code === 'gps_autostart_acknowledgement_required' ? 'autostartGuidance'
+      : code === 'gps_queue_unavailable' ? 'queueUnavailable'
+      : code?.startsWith('gps_') ? 'startBlocked' : null
+    if (reason !== null) setGpsGateError(reason)
+    return reason !== null
+  }
+
+  /** Only verifies readiness. It never starts a shift or changes any financial field. */
+  async function checkGpsReadiness(forceFresh = false): Promise<boolean> {
+    if (!shiftId) return false
+    setGpsGateError(null)
+    setGpsTimingNotice(null)
+    try {
+      const ready = await confirmReadinessWithFreshFix({
+        forceFresh,
+        onRefreshing: () => setGpsGateError('refreshingFix'),
+        read: async fresh => {
+          const preflight = await preflightNativeTracker({ forceFresh: fresh })
+          if (!preflight) { setGpsGateError('upgradeRequired'); return null }
+          if (!preflight.ready) { setGpsGateError(preflight.reason ?? 'provider_error'); return null }
+          if (typeof preflight.backgroundPermission !== 'boolean' ||
+              typeof preflight.notificationPermission !== 'boolean' ||
+              typeof preflight.batteryOptimizationExempt !== 'boolean' ||
+              typeof preflight.autostartGuidanceRequired !== 'boolean' ||
+              typeof preflight.autostartAcknowledged !== 'boolean') {
+            setGpsGateError('upgradeRequired')
+            return null
+          }
+          const missing = missingTrackingPermission({
+            precisePermission: true, locationEnabled: true,
+            backgroundPermission: preflight.backgroundPermission,
+            notificationPermission: preflight.notificationPermission,
+            batteryOptimizationExempt: preflight.batteryOptimizationExempt,
+          })
+          if (missing) {
+            setGpsGateError(missing.reason)
+            void openNativeTrackingSettings(missing.target)
+            return null
+          }
+          if (preflight.autostartGuidanceRequired && !preflight.autostartAcknowledged) {
+            setGpsGateError('autostartGuidance')
+            return null
+          }
+          if (preflight.nativeVersionCode == null || preflight.capturedAtMs == null || preflight.accuracyM == null) {
+            setGpsGateError('provider_error')
+            return null
+          }
+          const queue = await nativeTrackerStatus()
+          if (queue?.queueAvailable !== true) { setGpsGateError('queueUnavailable'); return null }
+          return {
+            appBuild: preflight.nativeVersionCode, capturedAtMs: preflight.capturedAtMs,
+            accuracyM: preflight.accuracyM, precise: true, locationEnabled: true,
+            backgroundPermission: preflight.backgroundPermission,
+            notificationPermission: preflight.notificationPermission,
+            batteryOptimizationExempt: preflight.batteryOptimizationExempt,
+            autostartAcknowledged: preflight.autostartAcknowledged, queueAvailable: true,
+          }
+        },
+        confirm: fix => api.confirmGpsReadiness(shiftId, fix),
+      })
+      if (ready) setGpsGateError(null)
+      return ready
+    } catch (error) {
+      if (!showGpsGateFailure(error)) setGpsGateError('readinessCheckFailed')
+      throw error
+    }
+  }
+
   async function retryGpsGate(): Promise<void> {
     if (!nativeTrackerAvailable()) {
       setGpsGateError('upgradeRequired')
@@ -1890,22 +1984,10 @@ function StartPackage({
         void openNativeTrackingSettings(missing.target)
         return
       }
-      const preflight = await preflightNativeTracker()
-      if (!preflight || typeof preflight.autostartGuidanceRequired !== 'boolean' ||
-          typeof preflight.autostartAcknowledged !== 'boolean') {
-        setGpsGateError('upgradeRequired')
-        return
-      }
-      if (!preflight.ready) {
-        setGpsGateError(preflight.reason ?? 'provider_error')
-        return
-      }
-      if (preflight.autostartGuidanceRequired && !preflight.autostartAcknowledged) {
-        setGpsGateError('autostartGuidance')
-        return
-      }
-      const status = await nativeTrackerStatus()
-      setGpsGateError(status?.queueAvailable === true ? null : 'queueUnavailable')
+      await checkGpsReadiness(true)
+    } catch (error) {
+      // Keep the detailed refusal on screen; do not leave an unhandled click promise.
+      if (!showGpsGateFailure(error)) toast.error(t.gpsTracking.readinessCheckFailed)
     } finally {
       setBusy(false)
     }
@@ -1918,8 +2000,8 @@ function StartPackage({
     if (odometerKm === null) return
     setBusy(true)
     setGpsGateError(null)
+    setGpsTimingNotice(null)
     let startRequestSent = false
-    let nativePreflightUnavailable = false
     const showConfirmed = (submitted: {
       id: string
       state: string
@@ -1967,63 +2049,7 @@ function StartPackage({
           return
         }
       }
-      const preflight = await preflightNativeTracker()
-      nativePreflightUnavailable = nativeTrackerAvailable() && preflight === null
-      if (nativePreflightUnavailable) {
-        setGpsGateError('upgradeRequired')
-        return
-      }
-      if (preflight) {
-        if (!preflight.ready) {
-          setGpsGateError(preflight.reason ?? 'provider_error')
-          return
-        }
-        if (typeof preflight.backgroundPermission !== 'boolean' ||
-            typeof preflight.notificationPermission !== 'boolean' ||
-            typeof preflight.batteryOptimizationExempt !== 'boolean' ||
-            typeof preflight.autostartGuidanceRequired !== 'boolean' ||
-            typeof preflight.autostartAcknowledged !== 'boolean') {
-          setGpsGateError('upgradeRequired')
-          return
-        }
-        const missing = missingTrackingPermission({
-          precisePermission: true,
-          locationEnabled: true,
-          backgroundPermission: preflight.backgroundPermission,
-          notificationPermission: preflight.notificationPermission,
-          batteryOptimizationExempt: preflight.batteryOptimizationExempt,
-        })
-        if (missing) {
-          setGpsGateError(missing.reason)
-          void openNativeTrackingSettings(missing.target)
-          return
-        }
-        if (preflight.autostartGuidanceRequired && !preflight.autostartAcknowledged) {
-          setGpsGateError('autostartGuidance')
-          return
-        }
-        if (preflight.nativeVersionCode == null || preflight.capturedAtMs == null || preflight.accuracyM == null) {
-          setGpsGateError('provider_error')
-          return
-        }
-        const queue = await nativeTrackerStatus()
-        if (queue?.queueAvailable !== true) {
-          setGpsGateError('queueUnavailable')
-          return
-        }
-        await api.confirmGpsReadiness(shiftId, {
-          appBuild: preflight.nativeVersionCode,
-          capturedAtMs: preflight.capturedAtMs,
-          accuracyM: preflight.accuracyM,
-          precise: true,
-          locationEnabled: true,
-          backgroundPermission: preflight.backgroundPermission,
-          notificationPermission: preflight.notificationPermission,
-          batteryOptimizationExempt: preflight.batteryOptimizationExempt,
-          autostartAcknowledged: preflight.autostartAcknowledged,
-          queueAvailable: true,
-        })
-      }
+      if (nativeTrackerAvailable() && !(await checkGpsReadiness())) return
       if (nativeTrackerAvailable()) {
         // Start the real foreground service while the shift is still draft, and wait for Android
         // to confirm it is running before opening the server's tracking window. Provisional fixes
@@ -2063,6 +2089,7 @@ function StartPackage({
         businessDate: string
         startPackage: { odometerKm: number | null; floatTotal: string; topupTotal: string }
       }>(`/shifts/${shiftId}/start-package`, {
+        trackingClient: nativeTrackerAvailable() ? 'android' : 'browser',
         odometerKm,
         batteryPercent: null,
         // SRS D-3: the odometer OCR baseline (null when OCR never ran).
@@ -2091,14 +2118,7 @@ function StartPackage({
       }
       // A driver can't read a console — a failed upload must show on the glass, not vanish.
       const code = (e as { error?: string }).error
-      if (code === 'android_update_required' || (code === 'gps_preflight_required' && (!nativeTrackerAvailable() || nativePreflightUnavailable))) setGpsGateError('upgradeRequired')
-      else if (code === 'gps_background_permission_required') setGpsGateError('background_permission_required')
-      else if (code === 'gps_notification_permission_required') setGpsGateError('notification_permission_required')
-      else if (code === 'gps_battery_optimization_exemption_required') setGpsGateError('battery_optimization_required')
-      else if (code === 'gps_autostart_acknowledgement_required') setGpsGateError('autostartGuidance')
-      else if (code === 'gps_queue_unavailable') setGpsGateError('queueUnavailable')
-      else if (code?.startsWith('gps_')) setGpsGateError('startBlocked')
-      toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
+      if (!showGpsGateFailure(e)) toast.error((code && (t.errors as Record<string, string>)[code]) || t.common.actionFailed)
     } finally {
       setBusy(false)
     }
@@ -2203,9 +2223,9 @@ function StartPackage({
           ) : null}
           {gpsGateError ? (
             <p role="alert" className="text-sm font-semibold text-danger-ink">
-              {typeof t.gpsTracking[gpsGateError as keyof typeof t.gpsTracking] === 'string'
+              {gpsTimingNotice ?? (typeof t.gpsTracking[gpsGateError as keyof typeof t.gpsTracking] === 'string'
                 ? t.gpsTracking[gpsGateError as keyof typeof t.gpsTracking] as string
-                : t.gpsTracking.startBlocked}
+                : t.gpsTracking.startBlocked)}
             </p>
           ) : null}
           {gpsSettingsTarget ? (
@@ -2226,7 +2246,7 @@ function StartPackage({
             </>
           ) : null}
           {gpsGateError === 'upgradeRequired' ? (
-            <a className="text-sm font-semibold text-primary underline" href="https://github.com/Badee-Salloum/ash-delivery/releases/download/driver-android-v4.0.0/ash-driver-v4-signed.apk">
+            <a className="text-sm font-semibold text-primary underline" href="https://ash-driver.vercel.app/download.html">
               {t.gpsTracking.downloadAndroidApp}
             </a>
           ) : null}
@@ -2456,7 +2476,7 @@ function EndPackage({
   const readLinkedAttachment = useCallback(
     async (
       slot: string,
-      field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms',
+      field: 'orders' | 'payments_log' | 'wallet' | 'odometer' | 'bms' | 'daily_summary',
       retryFailed: boolean,
       upload?: EvidenceUploadResponse,
       signal?: AbortSignal,
@@ -2578,6 +2598,7 @@ function EndPackage({
         const latest = detail?.current
         if (latest) applyCanonicalDraft(latest)
         else restorePendingRead()
+        if (field === 'daily_summary') throw error
         return null
       } finally {
         if (deadlineTimer !== null) clearTimeout(deadlineTimer)
@@ -2653,7 +2674,7 @@ function EndPackage({
   )
   const readingAttachment = Object.values(draft.closeDraftAttachments).some(
     (attachment) =>
-      attachment.read?.status === 'running' && attachment.read.field !== 'payments_log',
+      readBlocksClose(attachment.read),
   )
   /**
    * WHAT IS STILL MISSING, named — instead of one grey button and no explanation.
@@ -2763,7 +2784,7 @@ function EndPackage({
       draft.closeDraftRevision === null ||
       draft.closeDraftHash === null ||
       Object.values(draft.closeDraftAttachments).some(
-        (item) => item.read?.status === 'running' && item.read.field !== 'payments_log',
+        (item) => readBlocksClose(item.read),
       )
     ) return
     setCloseFailure(null)
@@ -3120,6 +3141,7 @@ function EndPackage({
         </div>
       }
     >
+      <PermissionHistory shiftId={shift.id} />
       {draft.closeDraftRestored ? (
         <p className="rounded-xl bg-emerald-50 px-3 py-2 text-center text-sm text-emerald-800" role="status">
           {t.shift.draftRestored}
@@ -3175,28 +3197,19 @@ function EndPackage({
         onCashDeductions={(cashDeductions) => onDraft((d) => ({ ...d, cashDeductions }))}
       />
 
-      <p className="text-sm text-slate-500">{t.shift.paymentsLogArchiveHint}</p>
-      <PageGrid
-        title={t.shift.paymentsLog}
-        base={PAYMENTS_LOG_SLOT}
-        pages={draft.logPages}
-        shiftId={shift.id}
-        slots={slots}
-        attachments={draft.closeDraftAttachments}
-        closeDraftRevision={draft.closeDraftRevision}
-        onCloseDraft={applyCanonicalDraft}
-        onRetryRead={retryLogRead}
-        onUploaded={(up) => onDraft((d) => ({ ...d, slots: new Set(d.slots).add(up) }))}
-        onAddPage={() => onDraft((d) => ({ ...d, logPages: d.logPages + 1 }))}
-        onImage={logImage}
-        onDeleted={(gone) => {
-          onDraft((d) => {
-            const next = new Set(d.slots)
-            next.delete(gone)
-            return { ...d, slots: next }
-          })
-        }}
-      />
+      <DailySummary shiftId={shift.id} businessDate={shift.businessDate}
+        attachment={draft.closeDraftAttachments.daily_summary ?? null}
+        revision={draft.closeDraftRevision} date={draft.dailySummaryDate ?? null}
+        orders={draft.orders} onDraft={applyCanonicalDraft}
+        onRead={(upload, retry) => readLinkedAttachment('daily_summary', 'daily_summary', retry ?? false, upload)}
+        onDate={async (date, attachmentToken) => {
+          const current = await api.closeDraft(shift.id)
+          if (current.attachments.find(item => item.slot === 'daily_summary')?.attachmentToken !== attachmentToken) {
+            throw new Error('evidence_attachment_changed')
+          }
+          const next = await api.patchCloseDraft(shift.id, {expectedRevision: current.revision, figures: {dailySummaryDate: date}})
+          applyCanonicalDraft(next)
+        }} />
 
       {/*
         * EACH NUMBER BESIDE THE PICTURE THAT PRODUCED IT.

@@ -119,21 +119,24 @@ export function DriverApp(): ReactNode {
     }
   }, [])
   const [assignment, setAssignment] = useState<Assignment | null>(null)
+  const [assignmentFailed, setAssignmentFailed] = useState(false)
+  const [assignmentRetry, setAssignmentRetry] = useState(0)
   const [vehicleId, setVehicleId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     const driverId = session?.driverId
     setAssignment(null)
+    setAssignmentFailed(false)
     setVehicleId(null)
     if (!driverId) return () => { cancelled = true }
-    void api.get<Assignment>('/me/assignment').then((next) => {
+    void api.get<Assignment>('/me/assignment', { timeoutMs: 20_000 }).then((next) => {
       if (!cancelled) setAssignment(next)
     }).catch(() => {
-      if (!cancelled) setAssignment(null)
+      if (!cancelled) setAssignmentFailed(true)
     })
     return () => { cancelled = true }
-  }, [api, session?.driverId])
+  }, [api, session?.driverId, assignmentRetry])
 
   /**
    * Absorb the Android/browser Back button while a shift is in flight.
@@ -268,7 +271,7 @@ export function DriverApp(): ReactNode {
           resume={{ id: assignment.liveShiftId, state: assignment.liveShiftState ?? 'draft' }}
           onDiscarded={() => {
             setVehicleId(null)
-            void api.get<Assignment>('/me/assignment').then(setAssignment).catch(() => setAssignment(null))
+            setAssignmentRetry((value) => value + 1)
           }}
         />
       </div>
@@ -287,7 +290,10 @@ export function DriverApp(): ReactNode {
         <Screen title={t.shift.myAssignment}>
           {assignment === null ? (
             <Card>
-              <p className="text-center text-slate-600">{t.common.loading}</p>
+              {assignmentFailed ? <>
+                <p role="alert" className="text-center text-danger-ink">{t.shift.assignmentUnavailable}</p>
+                <Button onClick={() => setAssignmentRetry((value) => value + 1)}>{t.common.retry}</Button>
+              </> : <p className="text-center text-slate-600">{t.common.loading}</p>}
             </Card>
           ) : assignment.vehicles.length === 0 ? (
             <Card>

@@ -45,7 +45,9 @@ describe('LatestRequestGuard', () => {
     expect(dashboardReadSource).toContain('useRef(new LatestRequestGuard())')
     expect(dashboardReadSource).toContain('const request = requests.current.next()')
     expect(dashboardReadSource).toContain('signal: request.signal')
-    expect(dashboardReadSource).toContain('if (!request.isCurrent()) return')
+    expect(dashboardReadSource).toContain('!request.isCurrent() || currentKey.current !== key')
+    expect(dashboardReadSource).toContain('result?.key === key ? result.data : null')
+    expect(dashboardReadSource).toContain('session?.userId, session?.roleKey, session?.businessDate, branchId, path, attempt')
     expect(dashboardReadSource).toContain('requests.current.cancel()')
     expect(dashboardSections.match(/useDashboardRead</g)).toHaveLength(9)
     for (const endpoint of ['/dashboard/last-seven-days', '/dashboard/profit', '/dashboard/shifts-summary', '/dashboard/fleet-performance', '/dashboard/treasury', '/documents/expiring']) {

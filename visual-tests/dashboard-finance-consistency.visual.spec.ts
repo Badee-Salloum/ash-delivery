@@ -1,0 +1,122 @@
+import { expect, test, type Page } from '@playwright/test'
+import { stubSevenDayDashboard } from './dashboard-company-finance-fixtures.ts'
+import { preparePublicSurface } from './fixtures.ts'
+
+const adminUrl = process.env.ASH_ADMIN_VISUAL_URL ?? 'http://127.0.0.1:4173'
+const from = '2026-08-30', to = '2026-10-03'
+async function stubFinanceDashboard(page: Page, failCosts = false, unlinkedOnly = false) {
+  await stubSevenDayDashboard(page, { privileged: true })
+  const reads: URL[] = [], writes: string[] = []
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/api/') && request.method() !== 'GET') writes.push(request.url()) })
+  await page.route('**/api/**', async route => {
+    const url = new URL(route.request().url()), path = url.pathname
+    const send = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/api/me') return send({ userId: 'visual-general-manager', roleKey: 'general_manager', branchId: 'visual-branch-1', driverId: null, businessDate: '2026-10-04' })
+    if (path === '/api/branches') return send({ branches: [{ id: 'visual-branch-1', code: 'DAM', nameAr: 'فرع دمشق', nameEn: 'Damascus' }] })
+    if (path === '/api/dashboard/meta') return send({ today: '2026-10-04', goLiveBusinessDate: from, firstActivityDate: from, epoch: from, weekStart: '2026-10-04', monthStart: '2026-10-01', dayStartMinutes: 240, maxRangeDays: 3653 })
+    if (path === '/api/dashboard/profit') return send({ from, to, companyShareSyp: '1100.00', otherIncomeSyp: '0.00', expenseSyp: '120.00', operatingCostSyp: '100.00', vehicleCostSyp: '20.00', lossSyp: '0.00', netProfitSyp: '980.00', branchNetProfitSyp: '980.00', companyNetProfitSyp: '-62.00', combinedNetProfitSyp: '918.00', days: [{ businessDate: from, combinedNetProfitSyp: '-10.10' }, { businessDate: '2026-08-31', combinedNetProfitSyp: '0.00' }, { businessDate: to, combinedNetProfitSyp: '22.30' }] })
+    if (path === '/api/dashboard/fleet-performance') return send({ from, to, financeVisible: true, costsFrom: from, unattributedVehicleCostSyp: '0.00', totals: { shifts: 1, km: 10, kmUnrecorded: 0, orders: 3, feesSyp: '50.00', workDistanceMetres: null, gpsCoveragePercent: null, gpsIncompleteShifts: 0, gpsUnavailableShifts: 1 }, vehicles: [{ vehicleId: 'vehicle-1', code: 'D12', groundNo: '12', shifts: 1, km: 10, kmUnrecorded: 0, orders: 3, companyShareSyp: '30.00', vehicleCostSyp: '20.00', contributionSyp: '10.00', workDistanceMetres: null, gpsCoveragePercent: null, gpsIncompleteShifts: 0, gpsUnavailableShifts: 1 }] })
+    if (path === '/api/company-fund') return send({ total: '123.00', usd: '1300.00', reserve: { SYP_NEW: '0.00', USD: '0.00' }, depreciationDue: { SYP_NEW: '0.00', USD: '0.00' }, assets: { SYP_NEW: '0.00', USD: '0.00' }, debts: {}, assetSummary: { registeredCards: 10, pendingRecognitionCards: 10, bookValueBasis: 'recognized_ledger', cardPrice: { SYP_NEW: '0.00', USD: '12000.00' } }, branches: [{ branchId: 'visual-branch-1', code: 'DAM', nameAr: 'فرع دمشق', balance: '0.00', clearing: '0.00', cutOver: true, totalDifference: '0.00', unexplainedDifference: '0.00', pendingRestorationDifference: '0.00', pendingReviewCount: unlinkedOnly ? 0 : 2, unlinkedHistoricalCount: unlinkedOnly ? 2 : 0, settlementStatus: 'waiting_review', pendingToCompany: unlinkedOnly ? '0.00' : '100.00', pendingFromCompany: unlinkedOnly ? '0.00' : '100.00' }] })
+    if (path === '/api/company/owner-payments') { reads.push(url); return send({ from: url.searchParams.get('from'), to: url.searchParams.get('to'), totals: { SYP_NEW: '51000.00', USD: '22620.00' }, expenseTotals: { SYP_NEW: '51000.00', USD: '9745.00' }, capitalAndDebtTotals: { SYP_NEW: '0.00', USD: '12875.00' }, branchFundingTotals: { SYP_NEW: '116000.00', USD: '0.00' }, payments: [{ id: 'owner-historical', kind: 'expense', currency: 'SYP_NEW', amount: '51000.00', description: 'كسوة وتمديد من جيب المالك', occurredOn: '2026-06-01' }], branchFundingPayments: [] }) }
+    if (path === '/api/dashboard/profit-costs') {
+      reads.push(url)
+      if (failCosts) return send({ error: 'read_unavailable' }, 503)
+      const kind = url.searchParams.get('kind') ?? 'all', offset = Number(url.searchParams.get('offset') ?? 0)
+      const rows = Array.from({ length: 52 }, (_, i) => ({ id: `entry:${i}`, entryId: i + 1, businessDate: to, postingDate: to, eventType: i === 51 ? 'reversal' : 'expense', description: i === 51 ? 'عكس تكلفة' : `تكلفة مثبتة ${i + 1}`, fundCode: 'cost_center:general', side: i === 51 ? 'C' : 'D', kind, amount: i === 51 ? '-2.00' : '2.00', vehicleId: url.searchParams.get('vehicleId') }))
+      return send({ from, to, branchId: 'visual-branch-1', currency: 'SYP_NEW', kind, basis: 'immutable_ledger_net', includesReversals: true, count: 52, total: '100.00', limit: 50, offset, rows: rows.slice(offset, offset + 50) })
+    }
+    if (path === '/api/expense-categories' || path === '/api/income-categories') return send({ categories: [] })
+    if (path === '/api/vehicles') return send({ vehicles: [] })
+    if (path === '/api/advances') return send({ advances: [], parties: [], total: '0.00' })
+    if (path === '/api/incomes') return send({ incomes: [], total: '0.00' })
+    if (path === '/api/expenses') { reads.push(url); return send({ branchId: 'visual-branch-1', from, to, currency: 'SYP_NEW', totalBasis: 'recorded_expense_rows', expenses: [], count: 0, total: '0.00', limit: 50, offset: 0, earliestBusinessDate: from }) }
+    return route.fallback()
+  })
+  return { reads, writes }
+}
+
+test('dashboard separates owner history, card prices, pending matching and ledger-net cost detail', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('admin-'))
+  await preparePublicSurface(page, { language: 'ar', appearance: testInfo.project.name === 'admin-mobile' ? 'dark' : 'light' })
+  const { reads, writes } = await stubFinanceDashboard(page)
+  await page.goto(`${adminUrl}#dashboard?range=custom&from=${from}&to=${to}`)
+  const profit = page.locator('section[aria-labelledby="dashboard-profit"]')
+  await expect(profit).toContainText('918.00')
+  await expect(profit).toContainText('النتيجة قبل الاهتلاك')
+  const chart = profit.locator('svg')
+  await expect(chart.locator('text')).toHaveCount(6)
+  await expect(chart.locator('title').first()).toContainText('-10.10')
+  await expect(chart.locator('rect[height="0"]')).not.toHaveCount(0)
+  await profit.getByText('عرض قيم الرسم في جدول', { exact: true }).click()
+  await expect(profit.locator('table tbody tr')).toHaveCount(35)
+  await expect(profit.locator('table tbody tr').first()).toContainText('-10.10')
+  await expect(profit.locator('table tbody tr').first().locator('td').last().locator('bdi')).toHaveAttribute('dir', 'ltr')
+  await expect(page.getByText('بطاقات بانتظار اعتماد قيم الأصول في الحسابات', { exact: true })).toBeVisible()
+  const matching = page.locator('section[aria-labelledby="dashboard-company-fund"]')
+  await expect(matching.getByRole('columnheader', { name: 'حساب الشركة في دفتر الفرع', exact: true })).toBeVisible()
+  const assetGroup = matching.locator('[data-dashboard-assets]')
+  await expect(assetGroup).not.toHaveAttribute('open')
+  await expect(matching).toContainText('بانتظار التأكيد')
+  await expect(matching.locator('tbody')).not.toContainText('متوازن')
+  await expect(matching.getByRole('link', { name: 'مراجعة المطابقة والترميمات ›' })).toHaveAttribute('href', '#companyFund?tab=review')
+  await expect.poll(() => reads.find(url => url.pathname === '/api/company/owner-payments')?.searchParams.get('from')).toBe('2000-01-01')
+  await expect.poll(() => reads.filter(url => url.pathname === '/api/company/owner-payments').at(-1)?.searchParams.get('to')).toBe('2026-10-04')
+  await page.getByRole('button', { name: 'الفترة المختارة', exact: true }).click()
+  // Selected period narrows details only, never the all-history owner summary/read scope.
+  await expect.poll(() => reads.filter(url => url.pathname === '/api/company/owner-payments').at(-1)?.searchParams.get('from')).toBe('2000-01-01')
+  expect(reads.filter(url => url.pathname === '/api/company/owner-payments').at(-1)?.searchParams.get('to')).toBe('2026-10-04')
+  await expect(page.getByRole('button', { name: 'الفترة المختارة', exact: true })).not.toHaveAttribute('aria-pressed')
+  await expect(profit.getByRole('link', { name: /صافي ربح سجل الشركة/ })).toHaveAttribute('href', `#companyFund?tab=reports&range=custom&from=${from}&to=${to}&dateBasis=occurrence&view=current_corrected&report=cost_income`)
+  await expect(page.getByText('إجمالي المدفوعات المباشرة وتمويل الفرع', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('dashboard-finance-consistent.png'), fullPage: true })
+  await profit.screenshot({ path: testInfo.outputPath('dashboard-profit.png') })
+  await matching.screenshot({ path: testInfo.outputPath('dashboard-matching-assets.png') })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+  await profit.getByRole('button', { name: 'التكاليف اليومية · تفصيل التكاليف من القيود' }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.locator('tbody tr')).toHaveCount(50)
+  await expect(dialog).toContainText('100.00')
+  await dialog.getByRole('button', { name: 'التالي', exact: true }).first().click()
+  await expect(dialog.locator('tbody tr')).toHaveCount(2)
+  await expect(dialog).toContainText('100.00')
+  await expect(dialog).toContainText('-2.00')
+  await dialog.screenshot({ path: testInfo.outputPath('dashboard-ledger-costs.png') })
+  await dialog.getByRole('link', { name: 'فتح الصرفيات المسجلة ›' }).click()
+  await expect(page).toHaveURL(/costCenterKind=operating/)
+  await expect.poll(() => reads.find(url => url.pathname === '/api/expenses')?.searchParams.get('from')).toBe(from)
+  expect(reads.find(url => url.pathname === '/api/expenses')?.searchParams.get('to')).toBe(to)
+  expect(writes).toHaveLength(0)
+})
+
+test('vehicle cost detail stays scoped and failures are not shown as zero', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('admin-'))
+  await preparePublicSurface(page, { language: 'ar', appearance: 'light' })
+  const { reads, writes } = await stubFinanceDashboard(page, true)
+  await page.goto(`${adminUrl}#dashboard?range=custom&from=${from}&to=${to}`)
+  await page.getByRole('button', { name: 'D12 · تكاليف الآليات', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('alert')).toContainText('read_unavailable')
+  await expect(dialog).not.toContainText('0.00')
+  expect(reads.find(url => url.pathname === '/api/dashboard/profit-costs')?.searchParams.get('vehicleId')).toBe('vehicle-1')
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'D12 · تكاليف الآليات', exact: true })).toBeFocused()
+  expect(writes).toHaveLength(0)
+})
+
+test('dashboard distinguishes legacy unlinked restorations from zero pending proposals', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('admin-'))
+  await preparePublicSurface(page, { language: 'ar', appearance: testInfo.project.name === 'admin-mobile' ? 'dark' : 'light' })
+  const { writes } = await stubFinanceDashboard(page, false, true)
+  await page.goto(`${adminUrl}#dashboard?range=custom&from=${from}&to=${to}`)
+  const matching = page.locator('section[aria-labelledby="dashboard-company-fund"]')
+  const reviewCell = matching.locator('tbody tr').first().locator('td').nth(5)
+  await expect(reviewCell.getByRole('link', { name: '0', exact: true })).toBeVisible()
+  const historical = reviewCell.locator('[data-unlinked-historical]')
+  await expect(historical).toContainText('2')
+  await expect(historical).toHaveAttribute('href', '#companyFund?tab=review')
+  await expect(matching.locator('tbody')).not.toContainText('متوازن')
+  await matching.screenshot({ path: testInfo.outputPath('dashboard-legacy-unlinked.png') })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+  expect(writes).toHaveLength(0)
+})

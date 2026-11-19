@@ -101,6 +101,27 @@ describe('PhotoSlot retained-evidence terminal cleanup', () => {
     container.remove()
   })
 
+  it('explains partial payment-log reads and clears the warning after a complete retry', async () => {
+    storage.record = null
+    const partial: CloseDraftAttachment = { ...attachment('log'), slot: 'payments_log', read: {
+      readId: 'partial-log', field: 'payments_log', status: 'failed', failure: 'no_fields', attempts: 1, rowCount: 2,
+    } }
+    const render = (current: CloseDraftAttachment) => root.render(
+      <FeedbackProvider>
+        <PhotoSlot shiftId="shift-1" pkg="end" slot="payments_log" label="payments log"
+          attachment={current} onUploaded={vi.fn()} onRetryRead={vi.fn()} />
+      </FeedbackProvider>,
+    )
+    await act(async () => render(partial))
+    await flushEffects()
+    expect(container.textContent).toContain('readStatePartialPayments')
+    expect(container.textContent).not.toContain('readStateComplete')
+    await act(async () => render({ ...partial, read: { ...partial.read!, readId: 'complete-log', status: 'complete', failure: null, attempts: 2 } }))
+    await flushEffects()
+    expect(container.textContent).toContain('readStateComplete')
+    expect(container.textContent).not.toContain('readStatePartialPayments')
+  })
+
   it('does not let an older attachment terminal result delete a pending replacement', async () => {
     await act(async () => root.render(
       <FeedbackProvider>

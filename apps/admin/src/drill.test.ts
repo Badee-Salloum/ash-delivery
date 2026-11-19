@@ -74,4 +74,13 @@ describe('drill-down links', () => {
     expect(drill.vehicle).toBe(vehicleHref)
     expect(drill.shift).toBe(shiftHref)
   })
+
+  it('hands the exact period and daily/vehicle expense filters to the expense screen', () => {
+    expect(parseHash(expensesHref({ from: '2026-08-30', to: '2026-10-03', costCenterKind: 'operating' })).params).toEqual({
+      range: 'custom', from: '2026-08-30', to: '2026-10-03', costCenterKind: 'operating',
+    })
+    expect(parseHash(expensesHref({ from: '2026-08-30', to: '2026-10-03', vehicle: 'vehicle-1', expenseChannel: 'office_wallet', receipt: 'with', q: 'صيانة', minAmount: '10.01', maxAmount: '100.00' })).params).toEqual({
+      range: 'custom', from: '2026-08-30', to: '2026-10-03', costCenterKind: 'vehicle', vehicle: 'vehicle-1', expenseChannel: 'office_wallet', receipt: 'with', q: 'صيانة', minAmount: '10.01', maxAmount: '100.00',
+    })
+  })
 })

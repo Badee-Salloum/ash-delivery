@@ -31,6 +31,14 @@ export interface ExpensesLink {
   readonly from?: CalendarDate
   readonly to?: CalendarDate
   readonly tab?: string
+  readonly category?: string
+  readonly costCenterKind?: 'vehicle' | 'branch' | 'general' | 'operating'
+  readonly vehicle?: string
+  readonly expenseChannel?: 'office_cash' | 'office_wallet'
+  readonly receipt?: 'with' | 'without'
+  readonly q?: string
+  readonly minAmount?: string
+  readonly maxAmount?: string
 }
 
 export interface VehicleLink {
@@ -79,7 +87,10 @@ export function liveShiftsHref(link: LiveShiftsLink = {}): string {
 }
 
 export function expensesHref(link: ExpensesLink = {}): string {
-  return `#${formatHash({ section: 'expenses', openShift: null, params: paramsOf({ ...rangeOf(link), tab: link.tab }) })}`
+  return `#${formatHash({ section: 'expenses', openShift: null, params: paramsOf({ ...rangeOf(link), tab: link.tab,
+    category: link.category, costCenterKind: link.vehicle ? 'vehicle' : link.costCenterKind, vehicle: link.vehicle,
+    expenseChannel: link.expenseChannel, receipt: link.receipt, q: link.q, minAmount: link.minAmount, maxAmount: link.maxAmount,
+  }) })}`
 }
 
 export function vehicleHref(link: VehicleLink): string {

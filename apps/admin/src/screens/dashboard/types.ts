@@ -197,8 +197,33 @@ export interface CompanyFundLegacyDigest {
   reserve: { SYP_NEW: string; USD: string }
   depreciationDue: { SYP_NEW: string; USD: string }
   assets: { SYP_NEW: string; USD: string }
+  assetSummary?: {
+    registeredCards: number
+    activeCards?: number
+    soldCards?: number
+    pendingRecognitionCards: number
+    bookValueBasis: 'recognized_ledger'
+    cardPrice: { SYP_NEW: string; USD: string }
+    recognizedCost?: { SYP_NEW: string; USD: string }
+    asOf?: string
+    depreciationBasis?: 'posted_ledger_only'
+    reserveIsCash?: true
+  }
   debts: Record<'SYP_NEW' | 'USD', { payable: string; receivable: string }>
-  branches: Array<{ branchId: string; code: string; nameAr: string; balance: string; clearing: string; cutOver: boolean }>
+  branches: Array<{ branchId: string; code: string; nameAr: string; balance: string; clearing: string; cutOver: boolean;
+    totalDifference?: string; pendingRestorationDifference?: string; historicalSettlementDifference?: string; unexplainedDifference?: string;
+    settlementStatus?: 'not_linked' | 'variance' | 'waiting_review' | 'matched'; pendingReviewCount?: number;
+    unlinkedHistoricalCount?: number;
+    confirmedVarianceCount?: number; pendingToCompany?: string; pendingFromCompany?: string }>
+}
+
+export type ProfitCostKind = 'operating_cost' | 'vehicle_cost' | 'loss' | 'all'
+export interface ProfitCostDetails {
+  from: string; to: string; branchId: string; currency: 'SYP_NEW'; kind: ProfitCostKind;
+  basis: 'immutable_ledger_net'; includesReversals: true; total: string; count: number; limit: number; offset: number;
+  rows: Array<{ id: string; entryId: number; businessDate: string; postingDate: string; eventType: string;
+    description: string; fundCode: string; side: 'D' | 'C'; kind: Exclude<ProfitCostKind, 'all'>;
+    amount: string; vehicleId: string | null; vehicleCode?: string | null }>
 }
 
 export interface ExpiringDocument {

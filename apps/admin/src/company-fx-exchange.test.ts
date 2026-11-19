@@ -47,8 +47,12 @@ describe('company currency exchange', () => {
     expect(screen).toContain('title: t.companyFinance.exchangeConfirmTitle')
     expect(screen).toContain('confirmLabel: t.companyFinance.exchangeSubmit')
     expect(screen).toContain("api.post('/company/exchanges'")
-    expect(screen).toContain('idempotencyKey: crypto.randomUUID(), fromCurrency, fromAmount: formatMinor(from)')
+    expect(screen).toContain("const details = { fromCurrency, fromAmount: formatMinor(from)")
     expect(screen).toContain('toCurrency, toAmount: formatMinor(to), reason: reason.trim()')
+    expect(screen).toContain('pendingMoneyMove(pendingExchange.current')
+    expect(screen).toContain('idempotencyKey: operation.idempotencyKey, ...details')
+    expect(screen).toContain('pendingExchange.current = pendingAfterAttempt(operation, outcome)')
+    expect(screen).toContain('if (saved) reset()')
   })
 
   it('shows both actual exchange sides and its frozen rate in the movement log', () => {
