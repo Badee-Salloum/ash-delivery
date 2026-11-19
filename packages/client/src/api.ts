@@ -1893,7 +1893,8 @@ export class ApiClient {
     evidenceMediaId?: string | null
     branchId?: string
   }) {
-    return this.post<IncomeView>('/incomes', body)
+    const branchId = body.branchId ?? this.branchId
+    return this.post<IncomeView>('/incomes', { ...body, ...(branchId ? { branchId } : {}) })
   }
 
   // ── «السلفة» ──────────────────────────────────────────────────────────────────────────
@@ -1932,7 +1933,8 @@ export class ApiClient {
     receiptMediaId?: string | null
     branchId?: string
   }) {
-    return this.post<AdvanceView>('/advances', body)
+    const branchId = body.branchId ?? this.branchId
+    return this.post<AdvanceView>('/advances', { ...body, ...(branchId ? { branchId } : {}) })
   }
   /** Partial is normal. The amount may not exceed what the ledger still says is outstanding. */
   repayAdvance(advanceId: string, body: { idempotencyKey: string; amount: string; reason: string }) {
