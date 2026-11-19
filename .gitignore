@@ -38,3 +38,13 @@ tools/gemini-relay/public/
 
 # Claude Code local settings (personal; holds deploy rights)
 .claude/settings.local.json
+
+# Local operational evidence can contain real financial records and authentication material.
+/outputs/
+/output/
+/tmp/
+
+# Android release signing credentials are transferred privately, never through Git.
+*.keystore
+*.jks
+*.p12
